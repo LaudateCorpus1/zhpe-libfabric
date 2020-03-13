@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2014 Intel Corporation, Inc.  All rights reserved.
  * Copyright (c) 2016 Cisco Systems, Inc.  All rights reserved.
- * Copyright (c) 2017-2018 Hewlett Packard Enterprise Development LP.  All rights reserved.
+ * Copyright (c) 2017-2020 Hewlett Packard Enterprise Development LP.  All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -50,8 +50,7 @@ static void zhpe_pe_tx_handle_rx_rma(struct zhpe_pe_root *pe_root,
 				     struct zhpeq_cq_entry *zq_cqe);
 static int zhpe_pe_writedata(struct zhpe_pe_entry *pe_entry);
 
-static inline void rx_update_status(struct zhpe_rx_entry *rx_entry,
-				    int status)
+static inline void rx_update_status(struct zhpe_rx_entry *rx_entry, int status)
 {
 	if (OFI_UNLIKELY(status < 0) && rx_entry->status >= 0)
 		rx_entry->status = status;
@@ -597,7 +596,7 @@ static void zhpe_pe_rx_handle_status(struct zhpe_conn *conn,
 	pe_entry = &conn->ztx->pentries[ntohs(zhdr->pe_entry_id)];
 
 	zpay = zhpe_pay_ptr(conn, zhdr, 0, __alignof__(*zpay));
-	tx_update_status(pe_entry, ntohs(zpay->status.status));
+	tx_update_status(pe_entry, (int16_t)ntohs(zpay->status.status));
 	/* pe_entry->rem only updated under rx_ctx locking */
 	if (zpay->status.rem_valid)
 		pe_entry->rem = be64toh(zpay->status.rem);

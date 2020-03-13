@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2019 Hewlett Packard Enterprise Development LP.  All rights reserved.
+ * Copyright (c) 2017-2020 Hewlett Packard Enterprise Development LP.  All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -1067,7 +1067,8 @@ void zhpe_send_status_rem(struct zhpe_conn *conn, struct zhpe_msg_hdr ohdr,
 	struct zhpe_msg_status	msg_status;
 
 	msg_status.rem = htobe64(rem);
-	msg_status.status = htonl(status);
+	assert((int16_t)status == status);
+	msg_status.status = htons(status);
 	msg_status.rem_valid = true;
 	ohdr.op_type = ZHPE_OP_STATUS;
 
@@ -1080,7 +1081,8 @@ void zhpe_send_status(struct zhpe_conn *conn, struct zhpe_msg_hdr ohdr,
 {
 	struct zhpe_msg_status	msg_status;
 
-	msg_status.status = htonl(status);
+	assert((int16_t)status == status);
+	msg_status.status = htons(status);
 	msg_status.rem_valid = false;
 	ohdr.op_type = ZHPE_OP_STATUS;
 
