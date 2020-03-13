@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2014 Intel Corporation, Inc.  All rights reserved.
- * Copyright (c) 2017-2019 Hewlett Packard Enterprise Development LP.  All rights reserved.
+ * Copyright (c) 2017-2020 Hewlett Packard Enterprise Development LP.  All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -43,17 +43,11 @@ static int zhpe_dom_close(struct fid *fid)
 	RbtIterator		*rbt;
 	struct zhpe_mr		*zmr;
 
-	if (zdom->cache_inited) {
-		if (ofi_atomic_get32(&zdom->util_domain.ref) != 1)
-			goto done;
-		zhpe_mr_cache_destroy(zdom);
-	}
-
-	mutex_lock(&zhpe_fabdom_close_mutex);
-	ret = ofi_domain_close(&zdom->util_domain);
-	mutex_unlock(&zhpe_fabdom_close_mutex);
-	if (ret < 0)
+	if (ofi_atomic_get32(&zdom->util_domain.ref) != 1)
 		goto done;
+
+	if (zdom->cache_inited)
+		zhpe_mr_cache_destroy(zdom);
 
 	if (zdom->mr_tree) {
 		/*
@@ -68,6 +62,13 @@ static int zhpe_dom_close(struct fid *fid)
 		}
 		rbtDelete(zdom->mr_tree);
 	}
+
+	mutex_lock(&zhpe_fabdom_close_mutex);
+	ret = ofi_domain_close(&zdom->util_domain);
+	mutex_unlock(&zhpe_fabdom_close_mutex);
+	if (ret < 0)
+		goto done;
+
 	if (zdom->pe)
 		zhpe_pe_finalize(zdom->pe);
 	if (zdom->zqdom)
