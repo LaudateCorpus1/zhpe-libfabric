@@ -647,7 +647,7 @@ static void zhpe_pe_rx_handle_atomic(struct zhpe_conn *conn,
 	if (zmr) {
 		status = zhpeq_lcl_key_access(
 			zmr->kdata, dst, zpay->atomic_req.datasize,
-			ZHPEQ_MR_GET | ZHPEQ_MR_PUT, &dontcare);
+			ZHPEQ_MR_GET_REMOTE | ZHPEQ_MR_PUT_REMOTE, &dontcare);
 		zhpe_mr_put(zmr);
 		if (status < 0)
 			goto done;

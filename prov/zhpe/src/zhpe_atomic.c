@@ -308,10 +308,10 @@ ssize_t zhpe_do_tx_atomic(struct fid_ep *fid_ep,
 		rma_iov.addr = msg->rma_iov[0].addr;
 		rma_iov.len = datasize;
 		rma_iov.key = msg->rma_iov[0].key;
-		ret = zhpe_check_user_rma(&rma_iov, 1, ZHPEQ_MR_PUT_REMOTE,
-					  &pe_entry->rstate,
-					  ZHPE_EP_MAX_IOV_LIMIT, &dontcare,
-					  conn);
+		ret = zhpe_check_user_rma(
+			&rma_iov, 1, (ZHPE_MR_GET_REMOTE | ZHPEQ_MR_PUT_REMOTE),
+			&pe_entry->rstate, ZHPE_EP_MAX_IOV_LIMIT, &dontcare,
+			conn);
 		if (ret < 0)
 			goto done;
 
