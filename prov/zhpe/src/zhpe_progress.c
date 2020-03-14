@@ -823,6 +823,7 @@ static inline int zhpe_pe_rem_setup(struct zhpe_conn *conn,
 					    ZHPEQ_MR_PUT_REMOTE),
 					   &riov[i].iov_zaddr);
 		if (ret < 0) {
+			zhpe_rkey_put(rkey);
 			ZHPE_LOG_ERROR("zhpeq_rem_key_access() returned %d\n",
 				       ret);
 			break;
