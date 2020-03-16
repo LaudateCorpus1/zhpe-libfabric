@@ -1,7 +1,10 @@
 
 pipeline {
     agent any
-    options {timestamps()}
+    options {
+        timestamps()
+        timeout(activity: true, time: 4, unit: 'HOURS')    
+    }
 
     stages {
         stage ('fetch-opa-psm2')  {
@@ -83,22 +86,7 @@ pipeline {
             }
         }
    stage('parallel-tests') {
-            parallel {
-                 stage('eth-sockets-dbg') {
-                    agent {node {label 'eth'}}
-                    steps{
-                        withEnv(['PATH+EXTRA=/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/bin/:$PYTHONPATH'])
-                        {
-                          sh """
-                            env
-                            (
-                               cd  ${env.WORKSPACE}/contrib/intel/jenkins/
-                               python3.7 runtests.py --prov=sockets --ofi_build_mode='dbg'
-                            )
-                          """
-                        }
-                     }
-                 }
+            parallel { 
                  stage('eth-tcp-dbg') {
                     agent {node {label 'eth'}}
                     steps{
@@ -125,6 +113,7 @@ pipeline {
                                 cd  ${env.WORKSPACE}/contrib/intel/jenkins/
                                 python3.7 runtests.py --prov=udp --ofi_build_mode='dbg'
                                 python3.7 runtests.py --prov=udp --util=rxd --ofi_build_mode='dbg'
+                                python3.7 runtests.py --prov=shm --ofi_build_mode='dbg'
                             )
                           """
                         }
@@ -212,8 +201,8 @@ pipeline {
   post {
     cleanup {
         withEnv(['PATH+EXTRA=/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/bin:$PYTHONPATH']) {
-            sh "rm -rf '/mpibuilddir/mpich-build-dir/${env.BRANCH_NAME}/${env.BUILD_NUMBER}'"
-            sh "rm -rf '/mpibuilddir/ompi-build-dir/${env.BRANCH_NAME}/${env.BUILD_NUMBER}'"
+            sh "rm -rf '/mpibuilddir/mpich-build-dir/${env.JOB_NAME}/${env.BUILD_NUMBER}'"
+            sh "rm -rf '/mpibuilddir/ompi-build-dir/${env.JOB_NAME}/${env.BUILD_NUMBER}'"
             dir("${env.WORKSPACE}"){
                 deleteDir()
             }

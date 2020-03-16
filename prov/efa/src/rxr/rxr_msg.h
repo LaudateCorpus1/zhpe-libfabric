@@ -1,13 +1,12 @@
 /*
- * Copyright (c) 2004, 2005 Topspin Communications.  All rights reserved.
- * Copyright (c) 2007 Cisco Systems, Inc.  All rights reserved.
- * Copyright (c) 2017-2019 Amazon.com, Inc. or its affiliates. All rights reserved.
+ * Copyright (c) 2019-2020 Amazon.com, Inc. or its affiliates.
+ * All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
  * General Public License (GPL) Version 2, available from the file
  * COPYING in the main directory of this source tree, or the
- * OpenIB.org BSD license below:
+ * BSD license below:
  *
  *     Redistribution and use in source and binary forms, with or
  *     without modification, are permitted provided that the following
@@ -32,22 +31,23 @@
  * SOFTWARE.
  */
 
-#ifndef EFA_IB_H
-#define EFA_IB_H
+/**
+ * This following functions are used in rxr_cq_process_msg_rts()
+ */
+bool rxr_msg_multi_recv_buffer_available(struct rxr_ep *ep,
+					 struct rxr_rx_entry *rx_entry);
 
-#include "config.h"
-#include <pthread.h>
-#include <stddef.h>
+void rxr_msg_multi_recv_handle_completion(struct rxr_ep *ep,
+					  struct rxr_rx_entry *rx_entry);
 
-#include "infiniband/efa_verbs.h"
-#include "efa-abi.h"
-#include "efa.h"
+void rxr_msg_multi_recv_free_posted_entry(struct rxr_ep *ep,
+					  struct rxr_rx_entry *rx_entry);
 
-#define HIDDEN		__attribute__((visibility("hidden")))
+/*
+ * The following 2 OP structures are defined in rxr_msg_ops.c and is
+ * used by rxr_endpoint()
+ */
+extern struct fi_ops_msg rxr_ops_msg;
 
-extern HIDDEN int abi_ver;
+extern struct fi_ops_tagged rxr_ops_tagged;
 
-HIDDEN int efa_ib_init(struct ibv_device ***list);
-char *get_sysfs_path(void);
-
-#endif /* EFA_IB_H */

@@ -518,18 +518,60 @@ dgram_info:
 	if (ret == -FI_ENODATA && *info)
 		ret = 0;
 
-	if (rxr_env.enable_shm_transfer && !shm_info) {
+	if (!ret && rxr_env.enable_shm_transfer && !shm_info) {
 		shm_info = fi_allocinfo();
 		shm_hints = fi_allocinfo();
 		rxr_set_shm_hints(shm_hints);
-		ret = fi_getinfo(FI_VERSION(1, 8), NULL, NULL, 0, shm_hints, &shm_info);
+		ret = fi_getinfo(FI_VERSION(1, 8), NULL, NULL,
+		                 OFI_GETINFO_HIDDEN, shm_hints, &shm_info);
 		fi_freeinfo(shm_hints);
 		if (ret) {
-			FI_WARN(&rxr_prov, FI_LOG_CORE, "Failed to get shm provider's info.\n");
-			goto out;
+			FI_WARN(&rxr_prov, FI_LOG_CORE, "Disabling EFA shared memory support; failed to get shm provider's info: %s\n",
+				fi_strerror(-ret));
+			rxr_env.enable_shm_transfer = 0;
+			ret = 0;
+		} else {
+			assert(!strcmp(shm_info->fabric_attr->name, "shm"));
 		}
-		assert(!strcmp(shm_info->fabric_attr->name, "shm"));
-		if (shm_info->ep_attr->max_msg_size != SIZE_MAX) {
+	}
+out:
+	fi_freeinfo(core_info);
+	return ret;
+}
+
+static void rxr_child_cma_write(pid_t ppid, void *remote_base, size_t remote_len)
+{
+	struct iovec local;
+	struct iovec remote;
+	int cflag = 1;
+	int ret = 0;
+
+	local.iov_base = &cflag;
+	local.iov_len = sizeof(cflag);
+	remote.iov_base = remote_base;
+	remote.iov_len = remote_len;
+	ret = process_vm_writev(ppid, &local, 1, &remote, 1, 0);
+	if (ret == -1) {
+		FI_WARN(&rxr_prov, FI_LOG_CORE,
+			"Error when child tries CMA write on its parent: %s\n",
+			strerror(errno));
+	}
+}
+
+static void rxr_check_cma_capability(void)
+{
+	pid_t pid;
+	int flag = 0;
+
+	pid = fork();
+	if (pid == 0) {
+		// child tries to CMA write on parent's memory and exits
+		rxr_child_cma_write(getppid(), (void *) &flag, sizeof(flag));
+		exit(0);
+	} else {
+		// parent waits child to exit, and check flag bit
+		wait(NULL);
+		if (flag == 0) {
 			fprintf(stderr, "SHM transfer will be disabled because of ptrace protection.\n"
 				"To enable SHM transfer, please refer to the man page fi_efa.7 for more information.\n"
 				"Also note that turning off ptrace protection has security implications. If you cannot\n"
@@ -537,9 +579,6 @@ dgram_info:
 			rxr_env.enable_shm_transfer = 0;
 		}
 	}
-out:
-	fi_freeinfo(core_info);
-	return ret;
 }
 
 static void rxr_fini(void)
@@ -639,6 +678,9 @@ EFA_INI
 	lower_efa_prov = init_lower_efa_prov();
 	if (!lower_efa_prov)
 		return NULL;
+
+	if (rxr_env.enable_shm_transfer)
+		rxr_check_cma_capability();
 
 	if (rxr_env.enable_shm_transfer && rxr_get_local_gids(lower_efa_prov))
 		return NULL;

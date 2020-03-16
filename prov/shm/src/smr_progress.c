@@ -340,12 +340,6 @@ static int smr_progress_cmd_msg(struct smr_ep *ep, struct smr_cmd *cmd)
 	recv_queue = (cmd->msg.hdr.op == ofi_op_tagged) ?
 		      &ep->trecv_queue : &ep->recv_queue;
 
-	if (dlist_empty(&recv_queue->list)) {
-		FI_WARN(&smr_prov, FI_LOG_EP_CTRL,
-			"no recv entry available\n");
-		return -FI_ENOMSG;
-	}
-
 	match_attr.addr = cmd->msg.hdr.addr;
 	match_attr.tag = cmd->msg.hdr.tag;
 
@@ -358,7 +352,13 @@ static int smr_progress_cmd_msg(struct smr_ep *ep, struct smr_cmd *cmd)
 		unexp = freestack_pop(ep->unexp_fs);
 		memcpy(&unexp->cmd, cmd, sizeof(*cmd));
 		ofi_cirque_discard(smr_cmd_queue(ep->region));
-		dlist_insert_tail(&unexp->entry, &ep->unexp_queue.list);
+		if (cmd->msg.hdr.op == ofi_op_msg) {
+			dlist_insert_tail(&unexp->entry, &ep->unexp_msg_queue.list);
+		} else {
+			assert(cmd->msg.hdr.op == ofi_op_tagged);
+			dlist_insert_tail(&unexp->entry, &ep->unexp_tagged_queue.list);
+		}
+
 		return ret;
 	}
 	entry = container_of(dlist_entry, struct smr_ep_entry, entry);
@@ -599,7 +599,9 @@ void smr_ep_progress(struct util_ep *util_ep)
 	smr_progress_cmd(ep);
 }
 
-int smr_progress_unexp(struct smr_ep *ep, struct smr_ep_entry *entry)
+int smr_progress_unexp(struct smr_ep *ep,
+		       struct smr_ep_entry *entry,
+		       struct smr_queue *unexp_queue)
 {
 	struct smr_match_attr match_attr;
 	struct smr_unexp_msg *unexp_msg;
@@ -607,6 +609,7 @@ int smr_progress_unexp(struct smr_ep *ep, struct smr_ep_entry *entry)
 	size_t total_len = 0;
 	int ret = 0;
 
+	fastlock_acquire(&ep->region->lock);
 	if (ofi_cirque_isfull(ep->util_ep.rx_cq->cirq)) {
 		FI_WARN(&smr_prov, FI_LOG_EP_CTRL,
 			"rx cq full\n");
@@ -617,11 +620,13 @@ int smr_progress_unexp(struct smr_ep *ep, struct smr_ep_entry *entry)
 	match_attr.addr = entry->addr;
 	match_attr.ignore = entry->ignore;
 	match_attr.tag = entry->tag;
-	dlist_entry = dlist_remove_first_match(&ep->unexp_queue.list,
-					       ep->unexp_queue.match_func,
+	dlist_entry = dlist_remove_first_match(&unexp_queue->list,
+					       unexp_queue->match_func,
 					       &match_attr);
-	if (!dlist_entry)
-		return -FI_ENOMSG;
+	if (!dlist_entry) {
+		ret = -FI_ENOMSG;
+		goto out;
+	}
 
 	unexp_msg = container_of(dlist_entry, struct smr_unexp_msg, entry);
 
@@ -662,10 +667,13 @@ int smr_progress_unexp(struct smr_ep *ep, struct smr_ep_entry *entry)
 	if (entry->flags & SMR_MULTI_RECV) {
 		ret = smr_progress_multi_recv(ep, &ep->trecv_queue, entry,
 					      total_len);
-		return ret ? ret : -FI_ENOMSG;
+		ret = ret ? ret : -FI_ENOMSG;
+		goto out;
 	}
 
 push_entry:
 	freestack_push(ep->recv_fs, entry);
+out:
+	fastlock_release(&ep->region->lock);
 	return ret;
 }

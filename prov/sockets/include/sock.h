@@ -109,43 +109,11 @@
 #define SOCK_CM_DEF_RETRY (5)
 #define SOCK_CM_CONN_IN_PROGRESS ((struct sock_conn *)(0x1L))
 
-#define SOCK_EP_RDM_PRI_CAP (FI_MSG | FI_RMA | FI_TAGGED | FI_ATOMICS |	\
-			 FI_NAMED_RX_CTX | \
-			 FI_DIRECTED_RECV | \
-			 FI_READ | FI_WRITE | FI_RECV | FI_SEND | \
-			 FI_REMOTE_READ | FI_REMOTE_WRITE)
-
-#define SOCK_EP_RDM_SEC_CAP_BASE (FI_MULTI_RECV | FI_SOURCE | FI_RMA_EVENT | \
-				  FI_SHARED_AV | FI_FENCE | FI_TRIGGER | \
-				  FI_LOCAL_COMM | FI_REMOTE_COMM)
-extern uint64_t SOCK_EP_RDM_SEC_CAP;
-
-#define SOCK_EP_RDM_CAP_BASE (SOCK_EP_RDM_PRI_CAP | SOCK_EP_RDM_SEC_CAP_BASE)
-extern uint64_t SOCK_EP_RDM_CAP;
-
-#define SOCK_EP_MSG_PRI_CAP SOCK_EP_RDM_PRI_CAP
-
-#define SOCK_EP_MSG_SEC_CAP_BASE SOCK_EP_RDM_SEC_CAP_BASE
-extern uint64_t SOCK_EP_MSG_SEC_CAP;
-
-#define SOCK_EP_MSG_CAP_BASE (SOCK_EP_MSG_PRI_CAP | SOCK_EP_MSG_SEC_CAP_BASE)
-extern uint64_t SOCK_EP_MSG_CAP;
-
-#define SOCK_EP_DGRAM_PRI_CAP (FI_MSG | FI_TAGGED | \
-			   FI_NAMED_RX_CTX | FI_DIRECTED_RECV | \
-			   FI_RECV | FI_SEND)
-
-#define SOCK_EP_DGRAM_SEC_CAP (FI_MULTI_RECV | FI_SOURCE | FI_SHARED_AV | \
-			   FI_FENCE | FI_TRIGGER)
-
-#define SOCK_EP_DGRAM_CAP (SOCK_EP_DGRAM_PRI_CAP | SOCK_EP_DGRAM_SEC_CAP)
-
 #define SOCK_EP_MSG_ORDER (OFI_ORDER_RAR_SET | OFI_ORDER_RAW_SET | FI_ORDER_RAS| \
 			   OFI_ORDER_WAR_SET | OFI_ORDER_WAW_SET | FI_ORDER_WAS | \
 			   FI_ORDER_SAR | FI_ORDER_SAW | FI_ORDER_SAS)
 
 #define SOCK_EP_COMP_ORDER (FI_ORDER_STRICT | FI_ORDER_DATA)
-#define SOCK_EP_DEFAULT_OP_FLAGS (FI_TRANSMIT_COMPLETE)
 
 #define SOCK_EP_CQ_FLAGS (FI_SEND | FI_TRANSMIT | FI_RECV | \
 			FI_SELECTIVE_COMPLETION)
@@ -183,6 +151,26 @@ enum {
 
 #define SOCK_WIRE_PROTO_VERSION (2)
 
+extern struct fi_info sock_msg_info;
+extern struct fi_info sock_rdm_info;
+extern struct fi_info sock_dgram_info;
+extern struct util_prov sock_msg_util_prov;
+extern struct util_prov sock_rdm_util_prov;
+extern struct util_prov sock_dgram_util_prov;
+extern struct fi_domain_attr sock_domain_attr;
+extern struct fi_fabric_attr sock_fabric_attr;
+extern struct fi_tx_attr sock_msg_tx_attr;
+extern struct fi_tx_attr sock_rdm_tx_attr;
+extern struct fi_tx_attr sock_dgram_tx_attr;
+extern struct fi_rx_attr sock_msg_rx_attr;
+extern struct fi_rx_attr sock_rdm_rx_attr;
+extern struct fi_rx_attr sock_dgram_rx_attr;
+extern struct fi_ep_attr sock_msg_ep_attr;
+extern struct fi_ep_attr sock_rdm_ep_attr;
+extern struct fi_ep_attr sock_dgram_ep_attr;
+extern struct fi_tx_attr sock_stx_attr;
+extern struct fi_rx_attr sock_srx_attr;
+
 struct sock_service_entry {
 	int service;
 	struct dlist_entry entry;
@@ -213,7 +201,7 @@ struct sock_conn {
 
 struct sock_conn_map {
 	struct sock_conn *table;
-	fi_epoll_t epoll_set;
+	ofi_epoll_t epoll_set;
 	void **epoll_ctxs;
 	int epoll_ctxs_sz;
 	int used;
@@ -222,7 +210,7 @@ struct sock_conn_map {
 };
 
 struct sock_conn_listener {
-	fi_epoll_t emap;
+	ofi_epoll_t emap;
 	struct fd_signal signal;
 	fastlock_t signal_lock; /* acquire before map lock */
 	pthread_t listener_thread;
@@ -230,7 +218,7 @@ struct sock_conn_listener {
 };
 
 struct sock_ep_cm_head {
-	fi_epoll_t emap;
+	ofi_epoll_t emap;
 	struct fd_signal signal;
 	fastlock_t signal_lock;
 	pthread_t listener_thread;
@@ -879,7 +867,7 @@ struct sock_pe {
 	pthread_t progress_thread;
 	volatile int do_progress;
 	struct sock_pe_entry *pe_atomic;
-	fi_epoll_t epoll_set;
+	ofi_epoll_t epoll_set;
 };
 
 typedef int (*sock_cq_report_fn) (struct sock_cq *cq, fi_addr_t addr,
@@ -1023,12 +1011,6 @@ int sock_get_src_addr_from_hostname(union ofi_sock_ip *src_addr,
 struct fi_info *sock_fi_info(uint32_t version, enum fi_ep_type ep_type,
 			     const struct fi_info *hints, void *src_addr,
 			     void *dest_addr);
-int sock_msg_fi_info(uint32_t version, void *src_addr, void *dest_addr,
-		     const struct fi_info *hints, struct fi_info **info);
-int sock_dgram_fi_info(uint32_t version, void *src_addr, void *dest_addr,
-		       const struct fi_info *hints, struct fi_info **info);
-int sock_rdm_fi_info(uint32_t version, void *src_addr, void *dest_addr,
-		     const struct fi_info *hints, struct fi_info **info);
 void free_fi_info(struct fi_info *info);
 
 int sock_msg_getinfo(uint32_t version, const char *node, const char *service,

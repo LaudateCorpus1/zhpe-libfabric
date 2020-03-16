@@ -44,11 +44,11 @@
 
 static struct fi_ops_domain rxr_domain_ops = {
 	.size = sizeof(struct fi_ops_domain),
-	.av_open = rxr_av_open,
+	.av_open = efa_av_open,
 	.cq_open = rxr_cq_open,
 	.endpoint = rxr_endpoint,
 	.scalable_ep = fi_no_scalable_ep,
-	.cntr_open = rxr_cntr_open,
+	.cntr_open = efa_cntr_open,
 	.poll_open = fi_poll_create,
 	.stx_ctx = fi_no_stx_context,
 	.srx_ctx = fi_no_srx_context,

@@ -9,11 +9,14 @@ import re
 import ci_site_config
 import common
 import shlex
+from abc import ABC, abstractmethod # abstract base class for creating abstract classes in python
 
+# A Jenkins env variable for job name is composed of the name of the jenkins job and the branch name
+# it is building for. for e.g. in our case jobname = 'ofi_libfabric/master'
 class Test:
-    def __init__ (self, branchname, buildno, testname, core_prov, fabric,
+    def __init__ (self, jobname, buildno, testname, core_prov, fabric,
                   hosts, ofi_build_mode, util_prov=None):
-        self.branchname = branchname
+        self.jobname = jobname
         self.buildno = buildno
         self.testname = testname
         self.core_prov = core_prov
@@ -27,16 +30,16 @@ class Test:
        
         self.nw_interface = ci_site_config.interface_map[self.fabric]
         self.libfab_installpath = "{}/{}/{}/{}".format(ci_site_config.install_dir,
-                                  self.branchname, self.buildno, self.ofi_build_mode)
+                                  self.jobname, self.buildno, self.ofi_build_mode)
  
         self.env = [("FI_VERBS_MR_CACHE_ENABLE", "1"),\
                     ("FI_VERBS_INLINE_SIZE", "256")] \
                     if self.core_prov == "verbs" else []
 class FiInfoTest(Test):
-    def __init__(self, branchname, buildno, testname, core_prov, fabric,
+    def __init__(self, jobname, buildno, testname, core_prov, fabric,
                  hosts, ofi_build_mode, util_prov=None):
 
-        super().__init__(branchname, buildno, testname, core_prov, fabric,
+        super().__init__(jobname, buildno, testname, core_prov, fabric,
                      hosts, ofi_build_mode, util_prov)
      
         self.fi_info_testpath =  "{}/bin".format(self.libfab_installpath) 
@@ -62,10 +65,10 @@ class FiInfoTest(Test):
 
 class Fabtest(Test):
     
-    def __init__(self, branchname, buildno, testname, core_prov, fabric,
+    def __init__(self, jobname, buildno, testname, core_prov, fabric,
                  hosts, ofi_build_mode, util_prov=None):
         
-        super().__init__(branchname, buildno, testname, core_prov, fabric,
+        super().__init__(jobname, buildno, testname, core_prov, fabric,
                          hosts, ofi_build_mode, util_prov)
         self.fabtestpath = "{}/bin".format(self.libfab_installpath) 
         self.fabtestconfigpath = "{}/share/fabtests".format(self.libfab_installpath)
@@ -130,7 +133,7 @@ class Fabtest(Test):
                     core=self.core_prov)
         
         if (self.core_prov == "shm"):
-            opts += "{} {} ".format(self.client, self.server)
+            opts += "{} {} ".format(self.server, self.server)
         else:
             opts += "{} {} ".format(self.server, self.client)
              
@@ -151,10 +154,10 @@ class Fabtest(Test):
         os.chdir(curdir)
 
 class ShmemTest(Test):
-    def __init__(self, branchname, buildno, testname, core_prov, fabric,
+    def __init__(self, jobname, buildno, testname, core_prov, fabric,
                  hosts, ofi_build_mode, util_prov=None):
         
-        super().__init__(branchname, buildno, testname, core_prov, fabric,
+        super().__init__(jobname, buildno, testname, core_prov, fabric,
                          hosts, ofi_build_mode, util_prov)
      
         #self.n - number of hosts * number of processes per host
@@ -197,10 +200,10 @@ class ShmemTest(Test):
     
 
 class MpiTests(Test):
-    def __init__(self, branchname, buildno, testname, core_prov, fabric,
+    def __init__(self, jobname, buildno, testname, core_prov, fabric,
                  mpitype, hosts, ofi_build_mode, util_prov=None):
        
-        super().__init__(branchname, buildno, testname, core_prov, 
+        super().__init__(jobname, buildno, testname, core_prov, 
                          fabric, hosts, ofi_build_mode, util_prov)
         self.mpi = mpitype
 
@@ -271,43 +274,96 @@ class MpiTests(Test):
                        self.util_prov == "ofi_rxm" or \
                        self.util_prov == "ofi_rxd")) else False
 
-class MpiTestIMB(MpiTests):
+# IMBtests serves as an abstract class for different
+# types of intel MPI benchmarks. Currently we have
+# the mpi1 and rma tests enabled which are encapsulated 
+# in the IMB_mpi1 and IMB_rma classes below. 
 
-    def __init__(self, branchname, buildno, testname, core_prov, fabric,
-                 mpitype, hosts, ofi_build_mode, util_prov=None):
-        super().__init__(branchname, buildno, testname, core_prov, fabric,
-                         mpitype, hosts, ofi_build_mode, util_prov)
+class IMBtests(ABC):
+    """
+    This is an abstract class for IMB tests. 
+    currently IMB-MPI1 and IMB-RMA tests are 
+    supported. In future there could be more.
+    All abstract  methods must be implemented. 
+    """
+
+    @property
+    @abstractmethod
+    def imb_cmd(self):
+        pass
+
+    @property
+    @abstractmethod
+    def execute_condn(self):
+        pass
+
+class IMBmpi1(IMBtests):
+    
+    def __init__(self):
         self.additional_tests = [ 
                                    "Biband",
                                    "Uniband",
-                                   "PingPingAnySource",
+                                   "PingPongAnySource",
                                    "PingPingAnySource",
                                    "PingPongSpecificSource",
-                                   "PingPongSpecificSource"
+                                   "PingPingSpecificSource"
         ]
-        self.n = 4
-        self.ppn = 2
 
-  
     @property
-    def imb_cmd(self): 
-        return "{}/intel64/bin/IMB-MPI1 -include {}".format(ci_site_config.impi_root,
+    def imb_cmd(self):
+        return "{}/intel64/bin/IMB-MPI1 -include {}".format(ci_site_config.impi_root, \
                 ','.join(self.additional_tests))
+
+    @property
+    def execute_condn(self):
+        return True
+
+class IMBrma(IMBtests):
+    def __init__(self, core_prov):
+        self.core_prov =  core_prov
+
+    @property
+    def imb_cmd(self):
+        return "{}/intel64/bin/IMB-RMA".format(ci_site_config.impi_root)
+
+    @property
+    def execute_condn(self):
+        return True if (self.core_prov != "verbs") else False
+ 
+# MpiTestIMB class inherits from the MPITests class.
+# It uses the same options method and class variables as all MPI tests. 
+# It creates IMB_xxx test objects for each kind of IMB test.
+class MpiTestIMB(MpiTests):
+
+    def __init__(self, jobname, buildno, testname, core_prov, fabric,
+                 mpitype, hosts, ofi_build_mode, util_prov=None):
+        super().__init__(jobname, buildno, testname, core_prov, fabric,
+                         mpitype, hosts, ofi_build_mode, util_prov)
+       
+        self.n = 4
+        self.ppn = 1
+        self.mpi1 = IMBmpi1()
+        self.rma = IMBrma(self.core_prov) 
+
     @property
     def execute_condn(self):
         return True if (self.mpi == "impi") else False
-        
+       
     def execute_cmd(self):
-        command = self.cmd + self.options + self.imb_cmd
-        outputcmd = shlex.split(command)
-        common.run_command(outputcmd) 
+        command = self.cmd + self.options 
+        if(self.mpi1.execute_condn):
+            outputcmd = shlex.split(command +  self.mpi1.imb_cmd)
+            common.run_command(outputcmd)
+        if (self.rma.execute_condn):
+            outputcmd = shlex.split(command + self.rma.imb_cmd)
+            common.run_command(outputcmd)
 
         
 class MpiTestStress(MpiTests):
      
-    def __init__(self, branchname, buildno, testname, core_prov, fabric, 
+    def __init__(self, jobname, buildno, testname, core_prov, fabric, 
                  mpitype, hosts, ofi_build_mode, util_prov=None):
-        super().__init__(branchname, buildno, testname, core_prov, fabric, 
+        super().__init__(jobname, buildno, testname, core_prov, fabric, 
                          mpitype,  hosts, ofi_build_mode, util_prov)
         
          
@@ -326,8 +382,12 @@ class MpiTestStress(MpiTests):
     def execute_condn(self):
         # Todo : run stress test for ompi with libfabirc-dbg builds if it works
         # in Jenkins for buildbot these ompi did not build with libfabric-dbg 
-        return True if (self.mpi != 'ompi' or \
-                        self.ofi_build_mode != 'dbg') else  False
+
+        # Due to an mpich issue when the correct mpich options are enabled during
+        # mpich builds, sttress test is failing. disabling mpich + stress tests
+        # untill the mpich team fixes the issue. 
+        return True if (self.mpi != 'mpich' and (self.mpi != 'ompi' or \
+                        self.ofi_build_mode != 'dbg')) else  False
     
     def execute_cmd(self):
         command = self.cmd + self.options + self.stress_cmd
@@ -338,9 +398,9 @@ class MpiTestStress(MpiTests):
       
 class MpiTestOSU(MpiTests):
 
-    def __init__(self, branchname, buildno, testname, core_prov, fabric,
+    def __init__(self, jobname, buildno, testname, core_prov, fabric,
                  mpitype, hosts, ofi_build_mode, util_prov=None):
-        super().__init__(branchname, buildno, testname, core_prov, fabric,
+        super().__init__(jobname, buildno, testname, core_prov, fabric,
                          mpitype, hosts, ofi_build_mode, util_prov)
         
         self.n = 4 

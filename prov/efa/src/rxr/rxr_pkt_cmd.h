@@ -1,11 +1,12 @@
 /*
- * Copyright (c) 2017-2018 Amazon.com, Inc. or its affiliates. All rights reserved.
+ * Copyright (c) 2019-2020 Amazon.com, Inc. or its affiliates.
+ * All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
  * General Public License (GPL) Version 2, available from the file
  * COPYING in the main directory of this source tree, or the
- * OpenIB.org BSD license below:
+ * BSD license below:
  *
  *     Redistribution and use in source and binary forms, with or
  *     without modification, are permitted provided that the following
@@ -30,19 +31,31 @@
  * SOFTWARE.
  */
 
-#ifndef EFA_VERBS_H
-#define EFA_VERBS_H
+#ifndef _RXR_PKT_CMD_H
+#define _RXR_PKT_CMD_H
 
-#include <pthread.h>
-#include <stddef.h>
+#include "rxr.h"
 
-#include "efa-abi.h"
-#include "efa_cmd.h"
+ssize_t rxr_pkt_post_data(struct rxr_ep *rxr_ep, struct rxr_tx_entry *tx_entry);
 
-int efa_device_init(void);
-void efa_device_free(void);
+ssize_t rxr_pkt_post_ctrl(struct rxr_ep *ep, int entry_type, void *x_entry,
+			  int ctrl_type, bool inject);
 
-struct efa_context **efa_device_get_context_list(int *num_ctx);
-void efa_device_free_context_list(struct efa_context **list);
+ssize_t rxr_pkt_post_ctrl_or_queue(struct rxr_ep *ep, int entry_type, void *x_entry,
+				   int ctrl_type, bool inject);
 
-#endif /* EFA_VERBS_H */
+void rxr_pkt_handle_send_completion(struct rxr_ep *ep,
+				    struct fi_cq_data_entry *cq_entry);
+
+void rxr_pkt_handle_recv_completion(struct rxr_ep *ep,
+				    struct fi_cq_data_entry *cq_entry,
+				    fi_addr_t src_addr);
+
+#if ENABLE_DEBUG
+void rxr_pkt_print(char *prefix,
+		   struct rxr_ep *ep,
+		   struct rxr_base_hdr *hdr);
+#endif
+
+#endif
+

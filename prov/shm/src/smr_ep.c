@@ -70,7 +70,12 @@ int smr_getname(fid_t fid, void *addr, size_t *addrlen)
 	if (!addr || *addrlen == 0 ||
 	    snprintf(addr, *addrlen, "%s", ep->name) >= *addrlen)
 		ret = -FI_ETOOSMALL;
-	*addrlen = strlen(ep->name);
+
+	*addrlen = strlen(ep->name) + 1;
+
+	if (!ret)
+		((char *) addr)[*addrlen - 1] = '\0';
+
 	return ret;
 }
 
@@ -205,12 +210,26 @@ static int smr_match_tagged(struct dlist_entry *item, const void *args)
 	       smr_match_tag(recv_entry->tag, recv_entry->ignore, attr->tag); 
 } 
 
-static int smr_match_unexp(struct dlist_entry *item, const void *args)
+static int smr_match_unexp_msg(struct dlist_entry *item, const void *args)
 {
 	struct smr_match_attr *attr = (struct smr_match_attr *)args;
 	struct smr_unexp_msg *unexp_msg;
 
 	unexp_msg = container_of(item, struct smr_unexp_msg, entry);
+	assert(unexp_msg->cmd.msg.hdr.op == ofi_op_msg);
+	return smr_match_addr(unexp_msg->cmd.msg.hdr.addr, attr->addr);
+}
+
+static int smr_match_unexp_tagged(struct dlist_entry *item, const void *args)
+{
+	struct smr_match_attr *attr = (struct smr_match_attr *)args;
+	struct smr_unexp_msg *unexp_msg;
+
+	unexp_msg = container_of(item, struct smr_unexp_msg, entry);
+	if (unexp_msg->cmd.msg.hdr.op == ofi_op_msg)
+		return smr_match_addr(unexp_msg->cmd.msg.hdr.addr, attr->addr);
+
+	assert(unexp_msg->cmd.msg.hdr.op == ofi_op_tagged);
 	return smr_match_addr(unexp_msg->cmd.msg.hdr.addr, attr->addr) &&
 	       smr_match_tag(unexp_msg->cmd.msg.hdr.tag, attr->ignore,
 			     attr->tag);
@@ -315,6 +334,17 @@ static int smr_ep_close(struct fid *fid)
 	return 0;
 }
 
+static int smr_ep_trywait(void *arg)
+{
+	struct smr_ep *ep;
+
+	ep = container_of(arg, struct smr_ep, util_ep.ep_fid.fid);
+
+	smr_ep_progress(&ep->util_ep);
+
+	return FI_SUCCESS;
+}
+
 static int smr_ep_bind_cq(struct smr_ep *ep, struct util_cq *cq, uint64_t flags)
 {
 	int ret;
@@ -338,11 +368,36 @@ static int smr_ep_bind_cq(struct smr_ep *ep, struct util_cq *cq, uint64_t flags)
 		}
 	}
 
+	if (cq->wait) {
+		ret = ofi_wait_fid_add(cq->wait, smr_ep_trywait,
+				       &ep->util_ep.ep_fid.fid);
+		if (ret)
+			return ret;
+	}
+
 	ret = fid_list_insert(&cq->ep_list,
 			      &cq->ep_list_lock,
 			      &ep->util_ep.ep_fid.fid);
 
 	return ret;
+}
+
+static int smr_ep_bind_cntr(struct smr_ep *ep, struct util_cntr *cntr, uint64_t flags)
+{
+	int ret;
+
+	ret = ofi_ep_bind_cntr(&ep->util_ep, cntr, flags);
+	if (ret)
+		return ret;
+
+	if (cntr->wait) {	
+		ret = ofi_wait_fid_add(cntr->wait, smr_ep_trywait,
+				       &ep->util_ep.ep_fid.fid);
+		if (ret)
+			return ret;
+	}
+
+	return FI_SUCCESS;
 }
 
 static int smr_ep_bind(struct fid *ep_fid, struct fid *bfid, uint64_t flags)
@@ -369,7 +424,7 @@ static int smr_ep_bind(struct fid *ep_fid, struct fid *bfid, uint64_t flags)
 	case FI_CLASS_EQ:
 		break;
 	case FI_CLASS_CNTR:
-		ret = ofi_ep_bind_cntr(&ep->util_ep, container_of(bfid,
+		ret = smr_ep_bind_cntr(ep, container_of(bfid,
 				struct util_cntr, cntr_fid.fid), flags);
 		break;
 	default:
@@ -476,7 +531,8 @@ int smr_endpoint(struct fid_domain *domain, struct fi_info *info,
 	ep->pend_fs = smr_pend_fs_create(info->tx_attr->size, NULL, NULL);
 	smr_init_queue(&ep->recv_queue, smr_match_msg);
 	smr_init_queue(&ep->trecv_queue, smr_match_tagged);
-	smr_init_queue(&ep->unexp_queue, smr_match_unexp);
+	smr_init_queue(&ep->unexp_msg_queue, smr_match_unexp_msg);
+	smr_init_queue(&ep->unexp_tagged_queue, smr_match_unexp_tagged);
 
 	ep->min_multi_recv_size = SMR_INJECT_SIZE;
 

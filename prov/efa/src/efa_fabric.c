@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2014-2016, Cisco Systems, Inc. All rights reserved.
- * Copyright (c) 2017-2018 Amazon.com, Inc. or its affiliates. All rights reserved.
+ * Copyright (c) 2017-2020 Amazon.com, Inc. or its affiliates. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -40,6 +40,8 @@
 #include <netdb.h>
 #include <inttypes.h>
 
+#include <infiniband/efadv.h>
+
 #include <rdma/fabric.h>
 #include <rdma/fi_cm.h>
 #include <rdma/fi_domain.h>
@@ -50,16 +52,20 @@
 #include <ofi_util.h>
 
 #include "efa.h"
-#include "efa_ib.h"
-#include "efa_io_defs.h"
-#include "efa_verbs.h"
+#if HAVE_EFA_DL
+#include <ofi_shm.h>
+#endif
 
 #define EFA_FABRIC_PREFIX "EFA-"
 
 #define EFA_DOMAIN_CAPS (FI_LOCAL_COMM | FI_REMOTE_COMM)
 
-#define EFA_RDM_CAPS (FI_MSG | FI_RECV | FI_SEND | FI_SOURCE | EFA_DOMAIN_CAPS)
-#define EFA_DGRM_CAPS (FI_MSG | FI_RECV | FI_SEND | FI_SOURCE | EFA_DOMAIN_CAPS)
+#define EFA_RDM_TX_CAPS (OFI_TX_MSG_CAPS)
+#define EFA_RDM_RX_CAPS (OFI_RX_MSG_CAPS | FI_SOURCE)
+#define EFA_DGRM_TX_CAPS (OFI_TX_MSG_CAPS)
+#define EFA_DGRM_RX_CAPS (OFI_RX_MSG_CAPS | FI_SOURCE)
+#define EFA_RDM_CAPS (EFA_RDM_TX_CAPS | EFA_RDM_RX_CAPS | EFA_DOMAIN_CAPS)
+#define EFA_DGRM_CAPS (EFA_DGRM_TX_CAPS | EFA_DGRM_RX_CAPS | EFA_DOMAIN_CAPS)
 
 #define EFA_TX_OP_FLAGS (FI_TRANSMIT_COMPLETE)
 
@@ -98,7 +104,7 @@ const struct fi_domain_attr efa_domain_attr = {
 	.resource_mgmt		= FI_RM_DISABLED,
 
 	.mr_mode		= OFI_MR_BASIC_MAP | FI_MR_LOCAL | FI_MR_BASIC,
-	.mr_key_size		= sizeof_field(struct efa_io_tx_buf_desc, lkey),
+	.mr_key_size		= sizeof_field(struct ibv_sge, lkey),
 	.cq_data_size		= 0,
 	.tx_ctx_cnt		= 1024,
 	.rx_ctx_cnt		= 1024,
@@ -118,6 +124,7 @@ const struct fi_ep_attr efa_ep_attr = {
 };
 
 const struct fi_rx_attr efa_dgrm_rx_attr = {
+	.caps			= EFA_DGRM_RX_CAPS,
 	.mode			= FI_MSG_PREFIX | EFA_RX_MODE,
 	.op_flags		= EFA_RX_DGRM_OP_FLAGS,
 	.msg_order		= EFA_MSG_ORDER,
@@ -127,6 +134,7 @@ const struct fi_rx_attr efa_dgrm_rx_attr = {
 };
 
 const struct fi_rx_attr efa_rdm_rx_attr = {
+	.caps			= EFA_RDM_RX_CAPS,
 	.mode			= EFA_RX_MODE,
 	.op_flags		= EFA_RX_RDM_OP_FLAGS,
 	.msg_order		= EFA_MSG_ORDER,
@@ -136,6 +144,7 @@ const struct fi_rx_attr efa_rdm_rx_attr = {
 };
 
 const struct fi_tx_attr efa_dgrm_tx_attr = {
+	.caps			= EFA_DGRM_TX_CAPS,
 	.mode			= FI_MSG_PREFIX,
 	.op_flags		= EFA_TX_OP_FLAGS,
 	.msg_order		= EFA_MSG_ORDER,
@@ -145,6 +154,7 @@ const struct fi_tx_attr efa_dgrm_tx_attr = {
 };
 
 const struct fi_tx_attr efa_rdm_tx_attr = {
+	.caps			= EFA_RDM_TX_CAPS,
 	.mode			= 0,
 	.op_flags		= EFA_TX_OP_FLAGS,
 	.msg_order		= EFA_MSG_ORDER,
@@ -239,20 +249,31 @@ static int efa_check_hints(uint32_t version, const struct fi_info *hints,
 	return 0;
 }
 
-static int efa_alloc_qp_table(struct efa_context *ctx, size_t ep_cnt)
+static char *get_sysfs_path(void)
 {
-	ctx->qp_table = calloc(ep_cnt, sizeof(*ctx->qp_table));
-	if (!ctx->qp_table)
-		return -FI_ENOMEM;
-	pthread_mutex_init(&ctx->qp_table_mutex, NULL);
+	char *env = NULL;
+	char *sysfs_path = NULL;
+	int len;
 
-	return FI_SUCCESS;
-}
+	/*
+	 * Only follow use path passed in through the calling user's
+	 * environment if we're not running SUID.
+	 */
+	if (getuid() == geteuid())
+		env = getenv("SYSFS_PATH");
 
-static void efa_free_qp_table(struct efa_context *ctx)
-{
-	pthread_mutex_destroy(&ctx->qp_table_mutex);
-	free(ctx->qp_table);
+	if (env) {
+		sysfs_path = strndup(env, IBV_SYSFS_PATH_MAX);
+		len = strlen(sysfs_path);
+		while (len > 0 && sysfs_path[len - 1] == '/') {
+			--len;
+			sysfs_path[len] = '\0';
+		}
+	} else {
+		sysfs_path = strndup("/sys", IBV_SYSFS_PATH_MAX);
+	}
+
+	return sysfs_path;
 }
 
 static int efa_alloc_fid_nic(struct fi_info *fi, struct efa_context *ctx,
@@ -285,7 +306,7 @@ static int efa_alloc_fid_nic(struct fi_info *fi, struct efa_context *ctx,
 	link_attr = fi->nic->link_attr;
 
 	/* fi_device_attr */
-	device_attr->name = strdup(ctx->ibv_ctx.device->name);
+	device_attr->name = strdup(ctx->ibv_ctx->device->name);
 	if (!device_attr->name) {
 		ret = -FI_ENOMEM;
 		goto err_free_nic;
@@ -325,7 +346,7 @@ static int efa_alloc_fid_nic(struct fi_info *fi, struct efa_context *ctx,
 	}
 
 	ret = asprintf(&driver_sym_path, "%s%s",
-		       ctx->ibv_ctx.device->ibdev_path, "/device/driver");
+		       ctx->ibv_ctx->device->ibdev_path, "/device/driver");
 	if (ret < 0) {
 		ret = -FI_ENOMEM;
 		goto err_free_sysfs;
@@ -359,7 +380,7 @@ static int efa_alloc_fid_nic(struct fi_info *fi, struct efa_context *ctx,
 
 	/* fi_pci_attr */
 	ret = asprintf(&dbdf_sym_path, "%s%s",
-		       ctx->ibv_ctx.device->ibdev_path, "/device");
+		       ctx->ibv_ctx->device->ibdev_path, "/device");
 	if (ret < 0) {
 		ret = -FI_ENOMEM;
 		goto err_free_driver_sym;
@@ -449,17 +470,26 @@ err_free_nic:
 
 static int efa_get_device_attrs(struct efa_context *ctx, struct fi_info *info)
 {
+	struct efadv_device_attr efadv_attr;
 	struct efa_device_attr device_attr;
 	struct ibv_device_attr *base_attr;
 	struct ibv_port_attr port_attr;
 	int ret;
 
 	base_attr = &device_attr.ibv_attr;
-	ret = efa_cmd_query_device(ctx, &device_attr);
+	ret = -ibv_query_device(ctx->ibv_ctx, base_attr);
 	if (ret) {
-		EFA_INFO_ERRNO(FI_LOG_FABRIC, "efa_verbs_query_device_ex", ret);
+		EFA_INFO_ERRNO(FI_LOG_FABRIC, "ibv_query_device", ret);
 		return ret;
 	}
+
+	ret = -efadv_query_device(ctx->ibv_ctx, &efadv_attr, sizeof(efadv_attr));
+	if (ret) {
+		EFA_INFO_ERRNO(FI_LOG_FABRIC, "efadv_query_device", ret);
+		return ret;
+	}
+
+	ctx->inline_buf_size = efadv_attr.inline_buf_size;
 
 	ctx->max_mr_size			= base_attr->max_mr_size;
 	info->domain_attr->cq_cnt		= base_attr->max_cq;
@@ -485,36 +515,45 @@ static int efa_get_device_attrs(struct efa_context *ctx, struct fi_info *info)
 				info->domain_attr->max_ep_tx_ctx,
 				info->domain_attr->max_ep_rx_ctx);
 
-	info->tx_attr->iov_limit	= device_attr.max_sq_sge;
-	info->tx_attr->size		= align_down_to_power_of_2(MIN(device_attr.max_sq_wr,
-								   ctx->max_llq_size / sizeof(struct efa_io_tx_wqe)));
-	info->rx_attr->iov_limit	= device_attr.max_rq_sge;
-	info->rx_attr->size		= align_down_to_power_of_2(device_attr.max_rq_wr / info->rx_attr->iov_limit);
+	info->tx_attr->iov_limit = efadv_attr.max_sq_sge;
+	info->tx_attr->size = align_down_to_power_of_2(efadv_attr.max_sq_wr);
+	if (info->ep_attr->type == FI_EP_RDM) {
+		info->tx_attr->inject_size = efadv_attr.inline_buf_size;
+	} else if (info->ep_attr->type == FI_EP_DGRAM) {
+                /*
+                 * Currently, there is no mechanism for EFA layer (lower layer)
+                 * to discard completions internally and FI_INJECT is not optional,
+                 * it can only be disabled by setting inject_size to 0. RXR
+                 * layer does not have this issue as completions can be read from
+                 * the EFA layer and discarded in the RXR layer. For dgram
+                 * endpoint, inject size needs to be set to 0
+                 */
+		info->tx_attr->inject_size = 0;
+	}
+	info->rx_attr->iov_limit = efadv_attr.max_rq_sge;
+	info->rx_attr->size = align_down_to_power_of_2(efadv_attr.max_rq_wr / info->rx_attr->iov_limit);
 
 	EFA_DBG(FI_LOG_DOMAIN, "Tx/Rx attribute :\n"
 				"\t info->tx_attr->iov_limit		= %zu\n"
 				"\t info->tx_attr->size			= %zu\n"
+				"\t info->tx_attr->inject_size		= %zu\n"
 				"\t info->rx_attr->iov_limit		= %zu\n"
 				"\t info->rx_attr->size			= %zu\n",
 				info->tx_attr->iov_limit,
 				info->tx_attr->size,
+				info->tx_attr->inject_size,
 				info->rx_attr->iov_limit,
 				info->rx_attr->size);
 
-	ret = efa_cmd_query_port(ctx, 1, &port_attr);
+	ret = -ibv_query_port(ctx->ibv_ctx, 1, &port_attr);
 	if (ret) {
-		EFA_INFO_ERRNO(FI_LOG_FABRIC, "ibv_query_port", errno);
+		EFA_INFO_ERRNO(FI_LOG_FABRIC, "ibv_query_port", ret);
 		return ret;
 	}
 
 	info->ep_attr->max_msg_size		= port_attr.max_msg_sz;
 	info->ep_attr->max_order_raw_size	= port_attr.max_msg_sz;
 	info->ep_attr->max_order_waw_size	= port_attr.max_msg_sz;
-
-	EFA_DBG(FI_LOG_DOMAIN, "Internal attributes:\n"
-				"\tinject size        = %" PRIu16 "\n"
-				"\tsub_cqs_per_cq     = %" PRIu16 "\n",
-				ctx->inject_size, ctx->sub_cqs_per_cq);
 
 	/* Set fid nic attributes. */
 	ret = efa_alloc_fid_nic(info, ctx, &device_attr, &port_attr);
@@ -560,9 +599,9 @@ static int efa_get_addr(struct efa_context *ctx, void *src_addr)
 	union ibv_gid gid;
 	int ret;
 
-	ret = efa_cmd_query_gid(ctx, 1, 0, &gid);
+	ret = ibv_query_gid(ctx->ibv_ctx, 1, 0, &gid);
 	if (ret) {
-		EFA_INFO_ERRNO(FI_LOG_FABRIC, "efa_cmd_query_gid", errno);
+		EFA_INFO_ERRNO(FI_LOG_FABRIC, "ibv_query_gid", ret);
 		return ret;
 	}
 
@@ -601,17 +640,14 @@ static int efa_alloc_info(struct efa_context *ctx, struct fi_info **info,
 
 	fi->ep_attr->protocol	= FI_PROTO_EFA;
 	fi->ep_attr->type	= ep_dom->type;
-	fi->tx_attr->caps	= ep_dom->caps;
-	fi->rx_attr->caps	= ep_dom->caps;
 
 	ret = efa_get_device_attrs(ctx, fi);
 	if (ret)
 		goto err_free_info;
 
-	ret = efa_cmd_query_gid(ctx, 1, 0, &gid);
+	ret = ibv_query_gid(ctx->ibv_ctx, 1, 0, &gid);
 	if (ret) {
-		EFA_INFO_ERRNO(FI_LOG_FABRIC, "efa_cmd_query_gid", errno);
-		ret = -errno;
+		EFA_INFO_ERRNO(FI_LOG_FABRIC, "ibv_query_gid", ret);
 		goto err_free_info;
 	}
 
@@ -624,7 +660,7 @@ static int efa_alloc_info(struct efa_context *ctx, struct fi_info **info,
 	}
 	efa_addr_to_str(gid.raw, fi->fabric_attr->name);
 
-	name_len = strlen(ctx->ibv_ctx.device->name) + strlen(ep_dom->suffix);
+	name_len = strlen(ctx->ibv_ctx->device->name) + strlen(ep_dom->suffix);
 	fi->domain_attr->name = malloc(name_len + 1);
 	if (!fi->domain_attr->name) {
 		ret = -FI_ENOMEM;
@@ -632,7 +668,7 @@ static int efa_alloc_info(struct efa_context *ctx, struct fi_info **info,
 	}
 
 	snprintf(fi->domain_attr->name, name_len + 1, "%s%s",
-		 ctx->ibv_ctx.device->name, ep_dom->suffix);
+		 ctx->ibv_ctx->device->name, ep_dom->suffix);
 	fi->domain_attr->name[name_len] = '\0';
 
 	fi->addr_format = FI_ADDR_EFA;
@@ -741,6 +777,7 @@ static int efa_set_fi_address(const char *node, const char *service, uint64_t fl
 	struct efa_ep_addr tmp_addr;
 	void *dest_addr = NULL;
 	int ret = FI_SUCCESS;
+	struct fi_info *cur;
 
 	if (flags & FI_SOURCE) {
 		if (hints && hints->dest_addr)
@@ -757,15 +794,17 @@ static int efa_set_fi_address(const char *node, const char *service, uint64_t fl
 	}
 
 	if (dest_addr) {
-		fi->dest_addr = malloc(EFA_EP_ADDR_LEN);
-		if (!fi->dest_addr)
-			return -FI_ENOMEM;
-		memcpy(fi->dest_addr, dest_addr, EFA_EP_ADDR_LEN);
+		for (cur = fi; cur; cur = cur->next) {
+			cur->dest_addr = malloc(EFA_EP_ADDR_LEN);
+			if (!cur->dest_addr) {
+				for (; fi->dest_addr; fi = fi->next)
+					free(fi->dest_addr);
+				return -FI_ENOMEM;
+			}
+			memcpy(cur->dest_addr, dest_addr, EFA_EP_ADDR_LEN);
+			cur->dest_addrlen = EFA_EP_ADDR_LEN;
+		}
 	}
-
-	if (fi->dest_addr)
-		fi->dest_addrlen = EFA_EP_ADDR_LEN;
-
 	return ret;
 }
 
@@ -808,6 +847,7 @@ static int efa_fabric_close(fid_t fid)
 	struct efa_fabric *fab;
 	int ret;
 
+	unsetenv("RDMAV_HUGEPAGES_SAFE");
 	fab = container_of(fid, struct efa_fabric, util_fabric.fabric_fid.fid);
 	ret = ofi_fabric_close(&fab->util_fabric);
 	if (ret)
@@ -841,6 +881,29 @@ int efa_fabric(struct fi_fabric_attr *attr, struct fid_fabric **fabric_fid,
 	struct efa_fabric *fab;
 	int ret = 0;
 
+	/*
+	 * Enable rdma-core fork support and huge page support. We want call
+	 * this only when the EFA provider is selected. It is safe to call this
+	 * function again if multiple EFA fabrics are opened or if the fabric
+	 * is closed and opened again.
+	 *
+	 * TODO: allow users to disable this once the fork() to check ptrace
+	 * permissions is removed.
+	 */
+	ret = setenv("RDMAV_HUGEPAGES_SAFE", "1", 1);
+	if (ret)
+		return -errno;
+
+	ret = ibv_fork_init();
+	if (ret) {
+		EFA_WARN(FI_LOG_FABRIC, "Failed to initialize libibverbs "
+					"fork support. Please check your "
+					"application to ensure it is not "
+					"making verbs calls before "
+					"initializing EFA.\n");
+		return -ret;
+	}
+
 	fab = calloc(1, sizeof(*fab));
 	if (!fab)
 		return -FI_ENOMEM;
@@ -865,25 +928,20 @@ int efa_fabric(struct fi_fabric_attr *attr, struct fid_fabric **fabric_fid,
 	return 0;
 }
 
-static void efa_dealloc_ctx(struct efa_context *ctx)
-{
-	efa_free_qp_table(ctx);
-}
-
 static void fi_efa_fini(void)
 {
 	struct efa_context **ctx_list;
 	int num_devices;
-	int i;
 
 	fi_freeinfo((void *)efa_util_prov.info);
 	efa_util_prov.info = NULL;
 
 	ctx_list = efa_device_get_context_list(&num_devices);
-	for (i = 0; i < num_devices; i++)
-		efa_dealloc_ctx(ctx_list[i]);
 	efa_device_free_context_list(ctx_list);
 	efa_device_free();
+#if HAVE_EFA_DL
+	smr_cleanup();
+#endif 
 }
 
 struct fi_provider efa_prov = {
@@ -934,9 +992,7 @@ static int efa_init_info(const struct fi_info **all_infos)
 			continue;
 		}
 
-		ret = efa_alloc_qp_table(ctx_list[i], tail->domain_attr->ep_cnt);
-		if (!ret)
-			retv = 0;
+		retv = 0;
 	}
 
 	efa_device_free_context_list(ctx_list);

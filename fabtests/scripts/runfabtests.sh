@@ -58,6 +58,7 @@ declare COMPLEX_CFG
 declare TIMEOUT_VAL="120"
 declare STRICT_MODE=0
 declare FORK=0
+declare OOB=0
 declare C_ARGS=""
 declare S_ARGS=""
 
@@ -200,7 +201,8 @@ complex_tests=(
 )
 
 multinode_tests=(
-	"fi_multinode"
+	"fi_multinode -C msg"
+	"fi_multinode -C rma"
 	"fi_multinode_coll"
 )
 
@@ -364,8 +366,12 @@ function unit_test {
 	local test=$1
 	local is_neg=$2
 	local ret1=0
+	local s_interface=$(eval "if [ $OOB -eq 1 ]; \
+		then echo $GOOD_ADDR; \
+		else echo $S_INTERFACE; \
+		fi")
 	local test_exe=$(echo "${test} -p \"$PROV\"" | \
-	    sed -e "s/GOOD_ADDR/$GOOD_ADDR/g" -e "s/SERVER_ADDR/${S_INTERFACE}/g")
+	    sed -e "s/GOOD_ADDR/$GOOD_ADDR/g" -e "s/SERVER_ADDR/$s_interface/g")
 	local start_time
 	local end_time
 	local test_time
@@ -419,12 +425,22 @@ function cs_test {
 
 	start_time=$(date '+%s')
 
-	s_cmd="${BIN_PATH}${test_exe} ${S_ARGS} -s $S_INTERFACE"
+	if [[ $OOB -eq 1 ]]; then
+		s_arg="-E"
+	else
+		s_arg="-s $S_INTERFACE"
+	fi
+	s_cmd="${BIN_PATH}${test_exe} ${S_ARGS} $s_arg"
 	${SERVER_CMD} "${EXPORT_ENV} $s_cmd" &> $s_outp &
 	s_pid=$!
 	sleep 1
 
-	c_cmd="${BIN_PATH}${test_exe} ${C_ARGS} -s $C_INTERFACE $S_INTERFACE"
+	if [[ $OOB -eq 1 ]]; then
+		c_arg="-E $S_INTERFACE"
+	else
+		c_arg="-s $C_INTERFACE $S_INTERFACE"
+	fi
+	c_cmd="${BIN_PATH}${test_exe} ${C_ARGS} $c_arg"
 	${CLIENT_CMD} "${EXPORT_ENV} $c_cmd" &> $c_outp &
 	c_pid=$!
 
@@ -500,6 +516,10 @@ function complex_test {
 		opts=""
 	fi
 
+	if [[ $OOB -eq 1 ]]; then
+		opts+=" -E"
+	fi
+
 	s_cmd="${BIN_PATH}${test_exe} -x $opts"
 	FI_LOG_LEVEL=error ${SERVER_CMD} "${EXPORT_ENV} $s_cmd" &> $s_outp &
 	s_pid=$!
@@ -548,20 +568,21 @@ function complex_test {
 }
 
 function multinode_test {
-	local test=$1
+	local test="$1"
 	local s_ret=0
 	local c_ret=0
+	local c_out_arr=()
 	local num_procs=$2
 	local test_exe="${test} -n $num_procs -p \"${PROV}\"" 	
+	local c_out
 	local start_time
 	local end_time
 	local test_time
 
-
 	is_excluded "$test" && return
 
 	start_time=$(date '+%s')
-
+	
 	s_cmd="${BIN_PATH}${test_exe} ${S_ARGS} -s ${S_INTERFACE}"
 	${SERVER_CMD} "${EXPORT_ENV} $s_cmd" &> $s_outp &
 	s_pid=$!
@@ -570,36 +591,58 @@ function multinode_test {
 	c_pid_arr=()	
 	for ((i=1; i<num_procs; i++))
 	do
+		local c_out=$(mktemp fabtests.c_outp${i}.XXXXXX)
 		c_cmd="${BIN_PATH}${test_exe} ${S_ARGS} -s ${S_INTERFACE}"
-		${CLIENT_CMD} "${EXPORT_ENV} $c_cmd" &> $c_outp & 
+		${CLIENT_CMD} "${EXPORT_ENV} $c_cmd" &> $c_out & 
 		c_pid_arr+=($!)
+		c_out_arr+=($c_out)
 	done
 
 	for pid in ${c_pid_arr[*]}; do
 		wait $pid
+		c_ret=($?)||$c_ret
 	done
 	
-
 	[[ c_ret -ne 0 ]] && kill -9 $s_pid 2> /dev/null
 
 	wait $s_pid
 	s_ret=$?
+	echo "server finished"
 	
 	end_time=$(date '+%s')
 	test_time=$(compute_duration "$start_time" "$end_time")
-
+	
+	pe=1
 	if [[ $STRICT_MODE -eq 0 && $s_ret -eq $FI_ENODATA && $c_ret -eq $FI_ENODATA ]] ||
 	   [[ $STRICT_MODE -eq 0 && $s_ret -eq $FI_ENOSYS && $c_ret -eq $FI_ENOSYS ]]; then
-		print_results "$test_exe" "Notrun" "$test_time" "$s_outp" "$s_cmd" "$c_outp" "$c_cmd"
+		print_results "$test_exe" "Notrun" "$test_time" "$s_outp" "$s_cmd" "" "$c_cmd"
+		for c_out in "${c_out_arr[@]}" 
+		do
+			printf -- "  client_stdout $pe: |\n"
+			sed -e 's/^/    /' < $c_out
+			pe=$((pe+1))
+		done
 		skip_count+=1
 	elif [ $s_ret -ne 0 -o $c_ret -ne 0 ]; then
-		print_results "$test_exe" "Fail" "$test_time" "$s_outp" "$s_cmd" "$c_outp" "$c_cmd"
+		print_results "$test_exe" "Fail" "$test_time" "$s_outp" "$s_cmd" "" "$c_cmd"
+		for c_out in "${c_out_arr[@]}" 
+		do
+			printf -- "  client_stdout $pe: |\n"
+			sed -e 's/^/    /' < $c_out
+			pe=$((pe+1))
+		done
 		if [ $s_ret -eq 124 -o $c_ret -eq 124 ]; then
 			cleanup
 		fi
 		fail_count+=1
 	else
-		print_results "$test_exe" "Pass" "$test_time" "$s_outp" "$s_cmd" "$c_outp" "$c_cmd"
+		print_results "$test_exe" "Pass" "$test_time" "$s_outp" "$s_cmd" "" "$c_cmd"
+		for c_out in "${c_out_arr[@]}" 
+		do
+			printf -- "  client_stdout $pe: |\n"
+			sed -e 's/^/    /' < $c_out
+			pe=$((pe+1))
+		done
 		pass_count+=1
 	fi
 }
@@ -625,6 +668,7 @@ function main {
 
 	set_core_util
 	set_excludes
+	
 
 	if [[ $1 == "quick" ]]; then
 		local -r tests="unit functional short"
@@ -632,7 +676,7 @@ function main {
 		local -r tests="complex"
 		complex_type=$1
 	else
-		local -r tests=$(echo $1 | sed 's/all/unit,functional,standard,complex/g' | tr ',' ' ')
+		local -r tests=$(echo $1 | sed 's/all/unit,functional,standard,complex,multinode/g' | tr ',' ' ')
 		if [[ $1 == "all" || $1 == "complex" ]]; then
 			complex_type="all"
 		fi
@@ -674,12 +718,11 @@ function main {
 		complex)
 			for test in "${complex_tests[@]}"; do
 				complex_test $test $complex_type
-
 			done
 		;;
 		multinode)
 			for test in "${multinode_tests[@]}"; do
-					multinode_test $test 3
+					multinode_test "$test" 3
 			done
 		;;
 		*)
@@ -735,10 +778,11 @@ function usage {
 	errcho -e " -S\tStrict mode: -FI_ENODATA, -FI_ENOSYS errors would be treated as failures instead of skipped/notrun"
 	errcho -e " -C\tAdditional client test arguments: Parameters to pass to client fabtests"
 	errcho -e " -L\tAdditional server test arguments: Parameters to pass to server fabtests"
+	errcho -e " -b\tenable out-of-band address exchange over the default port"
 	exit 1
 }
 
-while getopts ":vt:p:g:e:f:c:s:u:T:C:L:NRSkE:" opt; do
+while getopts ":vt:p:g:e:f:c:s:u:T:C:L:NRSbkE:" opt; do
 case ${opt} in
 	t) TEST_TYPE=$OPTARG
 	;;
@@ -766,6 +810,8 @@ case ${opt} in
 	R)
 	;;
 	S) STRICT_MODE=1
+	;;
+	b) OOB=1
 	;;
 	k) FORK=1
 	;;

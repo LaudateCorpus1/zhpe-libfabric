@@ -774,8 +774,6 @@ static int sock_pe_process_rx_read(struct sock_pe *pe,
 	return 0;
 }
 
-#include <zhpeq_util.h>
-
 static int sock_pe_process_rx_write(struct sock_pe *pe,
 					struct sock_rx_ctx *rx_ctx,
 					struct sock_pe_entry *pe_entry)
@@ -819,25 +817,12 @@ static int sock_pe_process_rx_write(struct sock_pe *pe,
 
 	rem = pe_entry->msg_hdr.msg_len - len;
 	for (i = 0; rem > 0 && i < pe_entry->msg_hdr.dest_iov_len; i++) {
-		/*
-		 * HACK: zhpe command writes are cache-aligned and fit it
-		 * in a cache-line. Intercept anything that looks like that.
-		 */
-		void *iov_addr =
-			(void *)(uintptr_t)pe_entry->pe.rx.rx_iov[i].iov.addr;
-		size_t iov_len =  pe_entry->pe.rx.rx_iov[i].iov.len;
-		uint64_t buf[8];
-		if (pe_entry->msg_hdr.dest_iov_len == 1 &&
-		    !((uintptr_t)iov_addr & 63) &&
-		    iov_len >= 8 && iov_len <= 64) {
-			if (sock_pe_recv_field(pe_entry, buf, iov_len, len))
-				return 0;
-			memcpy((char *)iov_addr + 8, buf + 1, iov_len - 8);
-			atm_store((uint64_t *)iov_addr, buf[0]);
-		} else if (sock_pe_recv_field(pe_entry, iov_addr, iov_len, len))
+		if (sock_pe_recv_field(pe_entry,
+				       (void *) (uintptr_t) pe_entry->pe.rx.rx_iov[i].iov.addr,
+				       pe_entry->pe.rx.rx_iov[i].iov.len, len))
 			return 0;
-		len += iov_len;
-		rem -= iov_len;
+		len += pe_entry->pe.rx.rx_iov[i].iov.len;
+		rem -= pe_entry->pe.rx.rx_iov[i].iov.len;
 	}
 	pe_entry->buf = pe_entry->pe.rx.rx_iov[0].iov.addr;
 	pe_entry->data_len = 0;
@@ -2292,7 +2277,7 @@ void sock_pe_signal(struct sock_pe *pe)
 void sock_pe_poll_add(struct sock_pe *pe, int fd)
 {
         fastlock_acquire(&pe->signal_lock);
-        if (fi_epoll_add(pe->epoll_set, fd, FI_EPOLL_IN, NULL))
+        if (ofi_epoll_add(pe->epoll_set, fd, OFI_EPOLL_IN, NULL))
 			SOCK_LOG_ERROR("failed to add to epoll set: %d\n", fd);
         fastlock_release(&pe->signal_lock);
 }
@@ -2300,7 +2285,7 @@ void sock_pe_poll_add(struct sock_pe *pe, int fd)
 void sock_pe_poll_del(struct sock_pe *pe, int fd)
 {
         fastlock_acquire(&pe->signal_lock);
-        if (fi_epoll_del(pe->epoll_set, fd))
+        if (ofi_epoll_del(pe->epoll_set, fd))
 			SOCK_LOG_DBG("failed to del from epoll set: %d\n", fd);
         fastlock_release(&pe->signal_lock);
 }
@@ -2381,7 +2366,7 @@ static int sock_pe_progress_rx_ep(struct sock_pe *pe,
 		}
 	}
 
-	num_fds = fi_epoll_wait(map->epoll_set, map->epoll_ctxs,
+	num_fds = ofi_epoll_wait(map->epoll_set, map->epoll_ctxs,
 	                        MIN(map->used, map->epoll_ctxs_sz), 0);
 	if (num_fds < 0 || num_fds == 0) {
 		if (num_fds < 0)
@@ -2553,7 +2538,7 @@ static int sock_pe_wait_ok(struct sock_pe *pe)
 	struct sock_tx_ctx *tx_ctx;
 	struct sock_rx_ctx *rx_ctx;
 
-	if (pe->waittime && ((fi_gettime_ms() - pe->waittime) < (uint64_t)sock_pe_waittime))
+	if (pe->waittime && ((ofi_gettime_ms() - pe->waittime) < (uint64_t)sock_pe_waittime))
 		return 0;
 
 	if (dlist_empty(&pe->tx_list) && dlist_empty(&pe->rx_list))
@@ -2592,7 +2577,7 @@ static void sock_pe_wait(struct sock_pe *pe)
 	int ret;
 	void *ep_contexts[1];
 
-	ret = fi_epoll_wait(pe->epoll_set, ep_contexts, 1, -1);
+	ret = ofi_epoll_wait(pe->epoll_set, ep_contexts, 1, -1);
 	if (ret < 0)
 		SOCK_LOG_ERROR("poll failed : %s\n", strerror(ofi_sockerr()));
 
@@ -2604,7 +2589,7 @@ static void sock_pe_wait(struct sock_pe *pe)
 			SOCK_LOG_ERROR("Invalid signal\n");
 	}
 	fastlock_release(&pe->signal_lock);
-	pe->waittime = fi_gettime_ms();
+	pe->waittime = ofi_gettime_ms();
 }
 
 static void sock_pe_set_affinity(void)
@@ -2727,7 +2712,7 @@ struct sock_pe *sock_pe_init(struct sock_domain *domain)
 		goto err2;
 	}
 
-	if (fi_epoll_create(&pe->epoll_set) < 0) {
+	if (ofi_epoll_create(&pe->epoll_set) < 0) {
                 SOCK_LOG_ERROR("failed to create epoll set\n");
                 goto err3;
 	}
@@ -2737,9 +2722,9 @@ struct sock_pe *sock_pe_init(struct sock_domain *domain)
 			goto err4;
 
 		if (fd_set_nonblock(pe->signal_fds[SOCK_SIGNAL_RD_FD]) ||
-		    fi_epoll_add(pe->epoll_set,
+		    ofi_epoll_add(pe->epoll_set,
 				 pe->signal_fds[SOCK_SIGNAL_RD_FD],
-				 FI_EPOLL_IN, NULL))
+				 OFI_EPOLL_IN, NULL))
 			goto err5;
 
 		pe->do_progress = 1;
@@ -2756,7 +2741,7 @@ err5:
 	ofi_close_socket(pe->signal_fds[0]);
 	ofi_close_socket(pe->signal_fds[1]);
 err4:
-	fi_epoll_close(pe->epoll_set);
+	ofi_epoll_close(pe->epoll_set);
 err3:
 	ofi_bufpool_destroy(pe->atomic_rx_pool);
 err2:
@@ -2803,7 +2788,7 @@ void sock_pe_finalize(struct sock_pe *pe)
 	fastlock_destroy(&pe->lock);
 	fastlock_destroy(&pe->signal_lock);
 	pthread_mutex_destroy(&pe->list_lock);
-	fi_epoll_close(pe->epoll_set);
+	ofi_epoll_close(pe->epoll_set);
 	free(pe);
 	SOCK_LOG_DBG("Progress engine finalize: OK\n");
 }

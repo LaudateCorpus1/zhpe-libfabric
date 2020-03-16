@@ -41,6 +41,7 @@
 #include "unit_common.h"
 #include "shared.h"
 
+static int test_max = 1 << 15;
 static char err_buf[512];
 
 static int
@@ -70,7 +71,7 @@ static int cq_open_close_simultaneous(void)
 	int testret = FAIL;
 	struct fid_cq **cq_array;
 
-	count = fi->domain_attr->cq_cnt;
+	count = MIN(fi->domain_attr->cq_cnt, test_max);
 	FT_DEBUG("testing creation of up to %zu simultaneous CQs\n", count);
 
 	cq_array = calloc(count, sizeof(*cq_array));
@@ -81,6 +82,10 @@ static int cq_open_close_simultaneous(void)
 	for (opened = 0; opened < count && !ret; opened++) {
 		ret = create_cq(&cq_array[opened], 0, 0, FI_CQ_FORMAT_UNSPEC,
 				FI_WAIT_UNSPEC);
+		if (ret) {
+			ret = create_cq(&cq_array[opened], 0, 0,
+					FI_CQ_FORMAT_UNSPEC, FI_WAIT_NONE);
+		}
 	}
 	if (ret) {
 		FT_WARN("fi_cq_open failed after %d (cq_cnt: %zu): %s",
@@ -114,6 +119,11 @@ cq_open_close_sizes()
 		size = (i < 0) ? 0 : 1 << i;
 
 		ret = create_cq(&cq, size, 0, FI_CQ_FORMAT_UNSPEC, FI_WAIT_UNSPEC);
+		if (ret != 0) {
+			ret = create_cq(&cq, size, 0, FI_CQ_FORMAT_UNSPEC,
+					FI_WAIT_NONE);
+		}
+
 		if (ret == -FI_EINVAL) {
 			FT_WARN("\nSuccessfully completed %d iterations up to "
 				"size %d before the provider returned "
@@ -123,8 +133,7 @@ cq_open_close_sizes()
 			goto pass;
 		}
 		if (ret != 0) {
-			sprintf(err_buf, "fi_cq_open(%d, 0, FI_CQ_FORMAT_UNSPEC, "
-					"FI_WAIT_UNSPEC) = %d, %s",
+			sprintf(err_buf, "fi_cq_open with size %d returned %d, %s",
 					size, ret, fi_strerror(-ret));
 			goto fail;
 		}
@@ -209,6 +218,7 @@ struct test_entry test_array[] = {
 static void usage(void)
 {
 	ft_unit_usage("cq_test", "Unit test for Completion Queue (CQ)");
+	FT_PRINT_OPTS_USAGE("-L <int>", "Limit of CQs to open. Default: 32k");
 }
 
 int main(int argc, char **argv)
@@ -220,8 +230,11 @@ int main(int argc, char **argv)
 	if (!hints)
 		return EXIT_FAILURE;
 
-	while ((op = getopt(argc, argv, FAB_OPTS "h")) != -1) {
+	while ((op = getopt(argc, argv, FAB_OPTS "hL:")) != -1) {
 		switch (op) {
+		case 'L':
+			test_max = atoi(optarg);
+			break;
 		default:
 			ft_parseinfo(op, optarg, hints, &opts);
 			break;

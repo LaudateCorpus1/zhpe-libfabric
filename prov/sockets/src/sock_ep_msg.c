@@ -59,48 +59,12 @@
 #define SOCK_LOG_DBG(...) _SOCK_LOG_DBG(FI_LOG_EP_CTRL, __VA_ARGS__)
 #define SOCK_LOG_ERROR(...) _SOCK_LOG_ERROR(FI_LOG_EP_CTRL, __VA_ARGS__)
 
-static const struct fi_ep_attr sock_msg_ep_attr = {
-	.type = FI_EP_MSG,
-	.protocol = FI_PROTO_SOCK_TCP,
-	.protocol_version = SOCK_WIRE_PROTO_VERSION,
-	.max_msg_size = SOCK_EP_MAX_MSG_SZ,
-	.msg_prefix_size = SOCK_EP_MSG_PREFIX_SZ,
-	.max_order_raw_size = SOCK_EP_MAX_ORDER_RAW_SZ,
-	.max_order_war_size = SOCK_EP_MAX_ORDER_WAR_SZ,
-	.max_order_waw_size = SOCK_EP_MAX_ORDER_WAW_SZ,
-	.mem_tag_format = SOCK_EP_MEM_TAG_FMT,
-	.tx_ctx_cnt = SOCK_EP_MAX_TX_CNT,
-	.rx_ctx_cnt = SOCK_EP_MAX_RX_CNT,
-};
-
-static const struct fi_tx_attr sock_msg_tx_attr = {
-	.caps = SOCK_EP_MSG_CAP_BASE,
-	.mode = SOCK_MODE,
-	.op_flags = SOCK_EP_DEFAULT_OP_FLAGS,
-	.msg_order = SOCK_EP_MSG_ORDER,
-	.inject_size = SOCK_EP_MAX_INJECT_SZ,
-	.size = SOCK_EP_TX_SZ,
-	.iov_limit = SOCK_EP_MAX_IOV_LIMIT,
-	.rma_iov_limit = SOCK_EP_MAX_IOV_LIMIT,
-};
-
-static const struct fi_rx_attr sock_msg_rx_attr = {
-	.caps = SOCK_EP_MSG_CAP_BASE,
-	.mode = SOCK_MODE,
-	.op_flags = 0,
-	.msg_order = SOCK_EP_MSG_ORDER,
-	.comp_order = SOCK_EP_COMP_ORDER,
-	.total_buffered_recv = SOCK_EP_MAX_BUFF_RECV,
-	.size = SOCK_EP_RX_SZ,
-	.iov_limit = SOCK_EP_MAX_IOV_LIMIT,
-};
-
 static int sock_msg_verify_rx_attr(const struct fi_rx_attr *attr)
 {
 	if (!attr)
 		return 0;
 
-	if ((attr->caps | SOCK_EP_MSG_CAP) != SOCK_EP_MSG_CAP)
+	if ((attr->caps | sock_msg_rx_attr.caps) != sock_msg_rx_attr.caps)
 		return -FI_ENODATA;
 
 	if ((attr->msg_order | SOCK_EP_MSG_ORDER) != SOCK_EP_MSG_ORDER)
@@ -127,7 +91,7 @@ static int sock_msg_verify_tx_attr(const struct fi_tx_attr *attr)
 	if (!attr)
 		return 0;
 
-	if ((attr->caps | SOCK_EP_MSG_CAP) != SOCK_EP_MSG_CAP)
+	if ((attr->caps | sock_msg_tx_attr.caps) != sock_msg_tx_attr.caps)
 		return -FI_ENODATA;
 
 	if ((attr->msg_order | SOCK_EP_MSG_ORDER) != SOCK_EP_MSG_ORDER)
@@ -200,52 +164,6 @@ int sock_msg_verify_ep_attr(const struct fi_ep_attr *ep_attr,
 	if (sock_msg_verify_tx_attr(tx_attr) || sock_msg_verify_rx_attr(rx_attr))
 		return -FI_ENODATA;
 
-	return 0;
-}
-
-int sock_msg_fi_info(uint32_t version, void *src_addr, void *dest_addr,
-		     const struct fi_info *hints, struct fi_info **info)
-{
-	*info = sock_fi_info(version, FI_EP_MSG, hints, src_addr, dest_addr);
-	if (!*info)
-		return -FI_ENOMEM;
-
-	*(*info)->tx_attr = sock_msg_tx_attr;
-	(*info)->tx_attr->size = sock_get_tx_size(sock_msg_tx_attr.size);
-	*(*info)->rx_attr = sock_msg_rx_attr;
-	(*info)->rx_attr->size = sock_get_tx_size(sock_msg_rx_attr.size);
-	*(*info)->ep_attr = sock_msg_ep_attr;
-
-	if (hints && hints->ep_attr) {
-		if (hints->ep_attr->rx_ctx_cnt)
-			(*info)->ep_attr->rx_ctx_cnt = hints->ep_attr->rx_ctx_cnt;
-		if (hints->ep_attr->tx_ctx_cnt)
-			(*info)->ep_attr->tx_ctx_cnt = hints->ep_attr->tx_ctx_cnt;
-	}
-
-	if (hints && hints->rx_attr) {
-		(*info)->rx_attr->op_flags |= hints->rx_attr->op_flags;
-		if (hints->rx_attr->caps)
-			(*info)->rx_attr->caps = SOCK_EP_MSG_SEC_CAP |
-							hints->rx_attr->caps;
-	}
-
-	if (hints && hints->tx_attr) {
-		(*info)->tx_attr->op_flags |= hints->tx_attr->op_flags;
-		if (hints->tx_attr->caps)
-			(*info)->tx_attr->caps = SOCK_EP_MSG_SEC_CAP |
-							hints->tx_attr->caps;
-	}
-
-	(*info)->caps = SOCK_EP_MSG_CAP |
-		(*info)->rx_attr->caps | (*info)->tx_attr->caps;
-	if (hints && hints->caps) {
-		(*info)->caps = SOCK_EP_MSG_SEC_CAP | hints->caps;
-		(*info)->rx_attr->caps = SOCK_EP_MSG_SEC_CAP |
-			((*info)->rx_attr->caps & (*info)->caps);
-		(*info)->tx_attr->caps = SOCK_EP_MSG_SEC_CAP |
-			((*info)->tx_attr->caps & (*info)->caps);
-	}
 	return 0;
 }
 
@@ -418,7 +336,7 @@ static void sock_ep_cm_monitor_handle(struct sock_ep_cm_head *cm_head,
 
 	/* Mark the handle as monitored before adding it to the pollset */
 	handle->monitored = 1;
-	ret = fi_epoll_add(cm_head->emap, handle->sock_fd,
+	ret = ofi_epoll_add(cm_head->emap, handle->sock_fd,
 	                   events, handle);
 	if (ret) {
 		SOCK_LOG_ERROR("failed to monitor fd %d: %d\n",
@@ -439,7 +357,7 @@ sock_ep_cm_unmonitor_handle_locked(struct sock_ep_cm_head *cm_head,
 	int ret;
 
 	if (handle->monitored) {
-		ret = fi_epoll_del(cm_head->emap, handle->sock_fd);
+		ret = ofi_epoll_del(cm_head->emap, handle->sock_fd);
 		if (ret)
 			SOCK_LOG_ERROR("failed to unmonitor fd %d: %d\n",
 			               handle->sock_fd, ret);
@@ -717,7 +635,7 @@ static int sock_ep_cm_connect(struct fid_ep *ep, const void *addr,
 	/* Monitor the connection */
 	_ep->attr->cm.state = SOCK_CM_STATE_REQUESTED;
 	handle->sock_fd = sock_fd;
-	sock_ep_cm_monitor_handle(cm_head, handle, FI_EPOLL_IN);
+	sock_ep_cm_monitor_handle(cm_head, handle, OFI_EPOLL_IN);
 
 	return 0;
 close_socket:
@@ -782,7 +700,7 @@ static int sock_ep_cm_accept(struct fid_ep *ep, const void *param, size_t paraml
 		}
 	}
 	/* Monitor the handle prior to report the event */
-	sock_ep_cm_monitor_handle(cm_head, handle, FI_EPOLL_IN);
+	sock_ep_cm_monitor_handle(cm_head, handle, OFI_EPOLL_IN);
 	sock_ep_enable(ep);
 
 	memset(&cm_entry, 0, sizeof(cm_entry));
@@ -945,8 +863,8 @@ static struct fi_info *sock_ep_msg_get_info(struct sock_pep *pep,
 	struct fi_info hints;
 	uint64_t requested, supported;
 
-	requested = req->caps & SOCK_EP_MSG_PRI_CAP;
-	supported = pep->info.caps & SOCK_EP_MSG_PRI_CAP;
+	requested = req->caps & sock_msg_info.caps;
+	supported = pep->info.caps & sock_msg_info.caps;
 	supported = (supported & FI_RMA) ?
 		(supported | FI_REMOTE_READ | FI_REMOTE_WRITE) : supported;
 	if ((requested | supported) != supported)
@@ -1172,7 +1090,7 @@ static void *sock_pep_listener_thread(void *data)
 		handle->pep = pep;
 
 		/* Monitor the connection */
-		sock_ep_cm_monitor_handle(&pep->cm_head, handle, FI_EPOLL_IN);
+		sock_ep_cm_monitor_handle(&pep->cm_head, handle, OFI_EPOLL_IN);
 	}
 
 	SOCK_LOG_DBG("PEP listener thread exiting\n");
@@ -1410,7 +1328,7 @@ static void *sock_ep_cm_thread(void *arg)
 	while (cm_head->do_listen) {
 		sock_ep_cm_check_closing_rejected_list(cm_head);
 
-		num_fds = fi_epoll_wait(cm_head->emap, ep_contexts,
+		num_fds = ofi_epoll_wait(cm_head->emap, ep_contexts,
 		                        SOCK_EPOLL_WAIT_EVENTS, -1);
 		if (num_fds < 0) {
 			SOCK_LOG_ERROR("poll failed : %s\n", strerror(errno));
@@ -1452,7 +1370,7 @@ int sock_ep_cm_start_thread(struct sock_ep_cm_head *cm_head)
 	fastlock_init(&cm_head->signal_lock);
 	dlist_init(&cm_head->msg_list);
 
-	int ret = fi_epoll_create(&cm_head->emap);
+	int ret = ofi_epoll_create(&cm_head->emap);
 	if (ret < 0) {
 		SOCK_LOG_ERROR("failed to create epoll set\n");
 		goto err1;
@@ -1465,9 +1383,9 @@ int sock_ep_cm_start_thread(struct sock_ep_cm_head *cm_head)
 		goto err2;
 	}
 
-	ret = fi_epoll_add(cm_head->emap,
+	ret = ofi_epoll_add(cm_head->emap,
 	                   cm_head->signal.fd[FI_READ_FD],
-	                   FI_EPOLL_IN, NULL);
+	                   OFI_EPOLL_IN, NULL);
 	if (ret != 0){
 		SOCK_LOG_ERROR("failed to add signal fd to epoll\n");
 		goto err3;
@@ -1486,7 +1404,7 @@ err3:
 	cm_head->do_listen = 0;
 	fd_signal_free(&cm_head->signal);
 err2:
-	fi_epoll_close(cm_head->emap);
+	ofi_epoll_close(cm_head->emap);
 err1:
 	return ret;
 }
@@ -1519,7 +1437,7 @@ void sock_ep_cm_stop_thread(struct sock_ep_cm_head *cm_head)
 			pthread_join(cm_head->listener_thread, NULL)) {
 		SOCK_LOG_DBG("pthread join failed\n");
 	}
-	fi_epoll_close(cm_head->emap);
+	ofi_epoll_close(cm_head->emap);
 	fd_signal_free(&cm_head->signal);
 	fastlock_destroy(&cm_head->signal_lock);
 }

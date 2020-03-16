@@ -89,24 +89,21 @@ extern struct fi_provider psmx2_prov;
 			 FI_TRIGGER | FI_INJECT_COMPLETE | \
 			 FI_TRANSMIT_COMPLETE | FI_DELIVERY_COMPLETE)
 
-#define PSMX2_PRI_CAPS	(FI_TAGGED | FI_MSG | FI_RMA | FI_ATOMICS | \
-			 FI_NAMED_RX_CTX | FI_DIRECTED_RECV | \
-			 FI_SEND | FI_RECV | FI_READ | FI_WRITE | \
-			 FI_REMOTE_READ | FI_REMOTE_WRITE)
+#define PSMX2_TX_CAPS (OFI_TX_MSG_CAPS | FI_TAGGED | OFI_TX_RMA_CAPS | FI_ATOMICS | \
+		       FI_NAMED_RX_CTX | FI_TRIGGER)
+#define PSMX2_RX_CAPS (FI_SOURCE | FI_SOURCE_ERR | FI_RMA_EVENT | OFI_RX_MSG_CAPS | \
+		       FI_TAGGED | OFI_RX_RMA_CAPS | FI_ATOMICS | FI_DIRECTED_RECV | \
+		       FI_MULTI_RECV | FI_TRIGGER)
+#define PSMX2_DOM_CAPS	(FI_SHARED_AV | FI_LOCAL_COMM | FI_REMOTE_COMM)
+#define PSMX2_CAPS (PSMX2_TX_CAPS | PSMX2_RX_CAPS | PSMX2_DOM_CAPS)
 
-#define PSMX2_SEC_CAPS	(FI_MULTI_RECV | FI_SOURCE | FI_RMA_EVENT | \
-			 FI_TRIGGER | FI_LOCAL_COMM | FI_REMOTE_COMM | \
-			 FI_SOURCE_ERR | FI_SHARED_AV)
-
-#define PSMX2_CAPS	(PSMX2_PRI_CAPS | PSMX2_SEC_CAPS | FI_REMOTE_CQ_DATA)
-
-#define PSMX2_RMA_CAPS	(PSMX2_CAPS & ~(FI_TAGGED | FI_MSG | FI_SEND | \
-			 FI_RECV | FI_DIRECTED_RECV | FI_MULTI_RECV))
+#define PSMX2_RMA_TX_CAPS (PSMX2_TX_CAPS & ~(FI_TAGGED | FI_MSG | FI_SEND))
+#define PSMX2_RMA_RX_CAPS (PSMX2_RX_CAPS & ~(FI_TAGGED | FI_MSG | FI_RECV | \
+			   FI_DIRECTED_RECV | FI_MULTI_RECV))
+#define PSMX2_RMA_CAPS (PSMX2_RMA_TX_CAPS | PSMX2_RMA_RX_CAPS | PSMX2_DOM_CAPS)
 
 #define PSMX2_SUB_CAPS	(FI_SEND | FI_RECV | FI_READ | FI_WRITE | \
 			 FI_REMOTE_READ | FI_REMOTE_WRITE)
-
-#define PSMX2_DOM_CAPS	(FI_LOCAL_COMM | FI_REMOTE_COMM)
 
 #define PSMX2_ALL_TRX_CTXT	((void *)-1)
 #define PSMX2_MAX_MSG_SIZE	((0x1ULL << 32) - 1)
@@ -700,6 +697,7 @@ struct psmx2_av_addr {
 	psm2_epid_t		epid;
 	uint8_t			type;
 	uint8_t			sep_id;
+	uint8_t			valid;
 };
 
 struct psmx2_av_sep {
@@ -1052,7 +1050,7 @@ psm2_epaddr_t psmx2_av_translate_addr(struct psmx2_fid_av *av,
 	av->domain->av_lock_fn(&av->lock, 1);
 
 	idx = PSMX2_ADDR_IDX(addr);
-	assert(idx < av->hdr->last);
+	assert(idx < av->hdr->last && av->table[idx].valid);
 
 	if (OFI_UNLIKELY(av->table[idx].type == PSMX2_EP_SCALABLE)) {
 		if (OFI_UNLIKELY(!av->sep_info[idx].epids)) {

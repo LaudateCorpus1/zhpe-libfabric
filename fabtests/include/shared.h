@@ -65,9 +65,6 @@ static inline int ft_exit_code(int ret)
 	return absret > 255 ? EXIT_FAILURE : absret;
 }
 
-#define ft_foreach_info(fi, info) \
-	for (fi = info; fi; fi = fi->next)
-
 #define ft_sa_family(addr) (((struct sockaddr *)(addr))->sa_family)
 
 struct test_size_param {
@@ -92,7 +89,8 @@ enum ft_comp_method {
 	FT_COMP_SPIN = 0,
 	FT_COMP_SREAD,
 	FT_COMP_WAITSET,
-	FT_COMP_WAIT_FD
+	FT_COMP_WAIT_FD,
+	FT_COMP_YIELD,
 };
 
 enum {
@@ -355,6 +353,7 @@ int ft_alloc_bufs();
 int ft_open_fabric_res();
 int ft_getinfo(struct fi_info *hints, struct fi_info **info);
 int ft_init_fabric();
+int ft_init_oob();
 int ft_start_server();
 int ft_server_connect();
 int ft_client_connect();

@@ -89,9 +89,9 @@ extern "C" {
 #define OFI_Q_STRERROR(prov, level, subsys, q, q_str, entry, q_strerror)	\
 	FI_LOG(prov, level, subsys, "fi_" q_str "_readerr: err: %s (%d), "	\
 	       "prov_err: %s (%d)\n", strerror((entry)->err), (entry)->err,	\
-	       q_strerror((q), -(entry)->prov_errno,				\
+	       q_strerror((q), (entry)->prov_errno,				\
 			  (entry)->err_data, NULL, 0),				\
-	       -(entry)->prov_errno)
+	       (entry)->prov_errno)
 
 #define OFI_CQ_STRERROR(prov, level, subsys, cq, entry) \
 	OFI_Q_STRERROR(prov, level, subsys, cq, "cq", entry, fi_cq_strerror)
@@ -408,24 +408,24 @@ struct util_wait {
 	fi_wait_try_func	wait_try;
 };
 
-int fi_wait_init(struct util_fabric *fabric, struct fi_wait_attr *attr,
-		 struct util_wait *wait);
+int ofi_wait_init(struct util_fabric *fabric, struct fi_wait_attr *attr,
+		  struct util_wait *wait);
 int fi_wait_cleanup(struct util_wait *wait);
 
 struct util_wait_fd {
 	struct util_wait	util_wait;
 	struct fd_signal	signal;
-	fi_epoll_t		epoll_fd;
+	ofi_epoll_t		epoll_fd;
 	struct dlist_entry	fd_list;
 	fastlock_t		lock;
 };
 
-typedef int (*ofi_wait_fd_try_func)(void *arg);
+typedef int (*ofi_wait_try_func)(void *arg);
 
 struct ofi_wait_fd_entry {
 	struct dlist_entry	entry;
 	int 			fd;
-	ofi_wait_fd_try_func	wait_try;
+	ofi_wait_try_func	wait_try;
 	void			*arg;
 	ofi_atomic32_t		ref;
 };
@@ -433,8 +433,29 @@ struct ofi_wait_fd_entry {
 int ofi_wait_fd_open(struct fid_fabric *fabric, struct fi_wait_attr *attr,
 		struct fid_wait **waitset);
 int ofi_wait_fd_add(struct util_wait *wait, int fd, uint32_t events,
-		    ofi_wait_fd_try_func wait_try, void *arg, void *context);
+		    ofi_wait_try_func wait_try, void *arg, void *context);
 int ofi_wait_fd_del(struct util_wait *wait, int fd);
+
+struct util_wait_yield {
+	struct util_wait	util_wait;
+	int			signal;
+	struct dlist_entry	fid_list;
+	fastlock_t		wait_lock;
+	fastlock_t		signal_lock;
+};
+
+struct ofi_wait_fid_entry {
+	struct dlist_entry	entry;
+	ofi_wait_try_func	wait_try;
+	void			*fid;
+	ofi_atomic32_t		ref;
+};
+
+int ofi_wait_yield_open(struct fid_fabric *fabric, struct fi_wait_attr *attr,
+			struct fid_wait **waitset);
+int ofi_wait_fid_add(struct util_wait *wait, ofi_wait_try_func wait_try,
+		       void *arg);
+int ofi_wait_fid_del(struct util_wait *wait, void *fid);
 
 /*
  * Completion queue
@@ -808,7 +829,8 @@ const char *ofi_eq_strerror(struct fid_eq *eq_fid, int prov_errno,
 #define FI_PRIMARY_CAPS	(FI_MSG | FI_RMA | FI_TAGGED | FI_ATOMICS | FI_MULTICAST | \
 			 FI_NAMED_RX_CTX | FI_DIRECTED_RECV | \
 			 FI_READ | FI_WRITE | FI_RECV | FI_SEND | \
-			 FI_REMOTE_READ | FI_REMOTE_WRITE | FI_COLLECTIVE)
+			 FI_REMOTE_READ | FI_REMOTE_WRITE | FI_COLLECTIVE | \
+			 FI_HMEM)
 
 #define FI_SECONDARY_CAPS (FI_MULTI_RECV | FI_SOURCE | FI_RMA_EVENT | \
 			   FI_SHARED_AV | FI_TRIGGER | FI_FENCE | \
@@ -883,7 +905,6 @@ void fid_list_remove(struct dlist_entry *fid_list, fastlock_t *lock,
 		     struct fid *fid);
 
 void ofi_fabric_insert(struct util_fabric *fabric);
-struct util_fabric *ofi_fabric_find(struct util_fabric_info *fabric_info);
 void ofi_fabric_remove(struct util_fabric *fabric);
 
 /*

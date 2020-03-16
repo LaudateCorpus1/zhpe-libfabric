@@ -415,7 +415,7 @@ int rxd_ep_send_pkt(struct rxd_ep *ep, struct rxd_pkt_entry *pkt_entry)
 {
 	int ret;
 
-	pkt_entry->timestamp = fi_gettime_ms();
+	pkt_entry->timestamp = ofi_gettime_ms();
 
 	ret = fi_send(ep->dg_ep, (const void *) rxd_pkt_start(pkt_entry),
 		      pkt_entry->pkt_size, pkt_entry->desc,
@@ -709,7 +709,7 @@ static int rxd_ep_trywait(void *arg)
 
 static int rxd_ep_wait_fd_add(struct rxd_ep *rxd_ep, struct util_wait *wait)
 {
-	return ofi_wait_fd_add(wait, rxd_ep->dg_cq_fd, FI_EPOLL_IN,
+	return ofi_wait_fd_add(wait, rxd_ep->dg_cq_fd, OFI_EPOLL_IN,
 			       rxd_ep_trywait, rxd_ep,
 			       &rxd_ep->util_ep.ep_fid.fid);
 }
@@ -915,7 +915,7 @@ static void rxd_progress_pkt_list(struct rxd_ep *ep, struct rxd_peer *peer)
 	uint64_t current;
 	int ret, retry = 0;
 
-	current = fi_gettime_ms();
+	current = ofi_gettime_ms();
 	if (peer->retry_cnt > RXD_MAX_PKT_RETRY) {
 		rxd_peer_timeout(ep, peer);
 		return;

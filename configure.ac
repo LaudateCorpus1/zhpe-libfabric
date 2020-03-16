@@ -1,7 +1,7 @@
 dnl
 dnl Copyright (c) 2016 Cisco Systems, Inc.  All rights reserved.
 dnl Copyright (c) 2019 Intel, Inc.  All rights reserved.
-dnl Copyright (c) 2019 Amazon.com, Inc. or its affiliates. All rights reserved.
+dnl Copyright (c) 2019-2020 Amazon.com, Inc. or its affiliates. All rights reserved.
 dnl
 dnl Process this file with autoconf to produce a configure script.
 
@@ -13,6 +13,7 @@ AC_CONFIG_MACRO_DIR(config)
 AC_CONFIG_HEADERS(config.h)
 AM_INIT_AUTOMAKE([1.11 dist-bzip2 foreign -Wall -Werror subdir-objects parallel-tests tar-ustar])
 m4_ifdef([AM_SILENT_RULES], [AM_SILENT_RULES([yes])])
+m4_include(config/fi_check_package.m4)
 
 AC_CANONICAL_HOST
 
@@ -93,6 +94,9 @@ AC_ARG_ENABLE([atomics],
 
 dnl Checks for programs
 AC_PROG_CC_C99
+AS_IF([test "$ac_cv_prog_cc_c99" = "no"],
+      [AC_MSG_WARN([Libfabric requires a C99-compliant compiler])
+       AC_MSG_ERROR([Cannot continue])])
 AM_PROG_CC_C_O
 AC_PROG_CPP
 
@@ -180,10 +184,19 @@ fi
 AC_DEFINE_UNQUOTED([PT_LOCK_SPIN], [$have_spinlock],
 	[Define to 1 if pthread_spin_init is available.])
 
-AC_CHECK_FUNCS([epoll_create])
-if test "$ac_cv_func_epoll_create" = yes; then
-  AC_DEFINE([HAVE_EPOLL], [1], [Define if you have epoll support.])
-fi
+AC_ARG_ENABLE([epoll],
+    [AS_HELP_STRING([--disable-epoll],
+        [Disable epoll if available@<:@default=no@:>@])],
+    [],
+    [enable_epoll=auto]
+)
+
+AS_IF([test x"$enable_epoll" != x"no"],
+    [AC_CHECK_FUNCS([epoll_create])
+     if test "$ac_cv_func_epoll_create" = yes; then
+        AC_DEFINE([HAVE_EPOLL], [1], [Define if you have epoll support.])
+     fi]
+)
 
 AC_CHECK_HEADER([linux/perf_event.h],
     [AC_CHECK_DECL([__builtin_ia32_rdpmc],
@@ -453,6 +466,38 @@ AC_DEFINE_UNQUOTED([HAVE_UFFD_UNMAP], [$have_uffd],
 
 dnl Check support to intercept syscalls
 AC_CHECK_HEADERS_ONCE(elf.h sys/auxv.h)
+
+dnl Check support to clock_gettime
+have_clock_gettime=0
+
+AC_SEARCH_LIBS([clock_gettime],[rt],
+         [have_clock_gettime=1],
+         [])
+
+AC_DEFINE_UNQUOTED(HAVE_CLOCK_GETTIME, [$have_clock_gettime],
+       [Define to 1 if clock_gettime is available.])
+AM_CONDITIONAL(HAVE_CLOCK_GETTIME, [test $have_clock_gettime -eq 1])
+
+dnl Check for CUDA runtime libraries.
+AC_ARG_WITH([cuda],
+	    [AC_HELP_STRING([--with-cuda=DIR],
+			    [Provide path to where the CUDA development
+			    and runtime libraries are installed.])],
+	    [], [])
+
+FI_CHECK_PACKAGE([cuda],
+		 [cuda_runtime.h],
+		 [cudart],
+		 [cudaMemcpy],
+		 [-lcuda],
+		 [$with_cuda],
+		 [],
+		 [AC_DEFINE([HAVE_LIBCUDA], [1],[CUDA support])],
+		 [], [])
+
+CPPFLAGS="$CPPFLAGS $cuda_CPPFLAGS"
+LDFLAGS="$LDFLAGS $cuda_LDFLAGS"
+LIBS="$LIBS $cuda_LIBS"
 
 dnl Provider-specific checks
 FI_PROVIDER_INIT

@@ -218,20 +218,22 @@ int ofi_check_rx_mode(const struct fi_info *info, uint64_t flags)
 	return (info->mode & flags) ? 1 : 0;
 }
 
-uint64_t fi_gettime_ms(void)
+uint64_t ofi_gettime_ns(void)
 {
-	struct timeval now;
+	struct timespec now;
 
-	gettimeofday(&now, NULL);
-	return now.tv_sec * 1000 + now.tv_usec / 1000;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	return now.tv_sec * 1000000000 + now.tv_nsec;
 }
 
-uint64_t fi_gettime_us(void)
+uint64_t ofi_gettime_us(void)
 {
-	struct timeval now;
+	return ofi_gettime_ns() / 1000;
+}
 
-	gettimeofday(&now, NULL);
-	return now.tv_sec * 1000000 + now.tv_usec;
+uint64_t ofi_gettime_ms(void)
+{
+	return ofi_gettime_ns() / 1000000;
 }
 
 uint16_t ofi_get_sa_family(const struct fi_info *info)
@@ -844,7 +846,7 @@ int ofi_discard_socket(SOCKET sock, size_t len)
 
 #ifndef HAVE_EPOLL
 
-int fi_epoll_create(struct fi_epoll **ep)
+int ofi_epoll_create(struct fi_epoll **ep)
 {
 	int ret;
 
@@ -866,7 +868,7 @@ int fi_epoll_create(struct fi_epoll **ep)
 		goto err2;
 
 	(*ep)->fds[(*ep)->nfds].fd = (*ep)->signal.fd[FI_READ_FD];
-	(*ep)->fds[(*ep)->nfds].events = FI_EPOLL_IN;
+	(*ep)->fds[(*ep)->nfds].events = OFI_EPOLL_IN;
 	(*ep)->context[(*ep)->nfds++] = NULL;
 	slist_init(&(*ep)->work_item_list);
 	fastlock_init(&(*ep)->lock);
@@ -879,10 +881,10 @@ err1:
 }
 
 
-static int fi_epoll_ctl(struct fi_epoll *ep, enum fi_epoll_ctl op,
+static int ofi_epoll_ctl(struct fi_epoll *ep, enum ofi_epoll_ctl op,
 			int fd, uint32_t events, void *context)
 {
-	struct fi_epoll_work_item *item;
+	struct ofi_epoll_work_item *item;
 
 	item = calloc(1,sizeof(*item));
 	if (!item)
@@ -899,22 +901,22 @@ static int fi_epoll_ctl(struct fi_epoll *ep, enum fi_epoll_ctl op,
 	return 0;
 }
 
-int fi_epoll_add(struct fi_epoll *ep, int fd, uint32_t events, void *context)
+int ofi_epoll_add(struct fi_epoll *ep, int fd, uint32_t events, void *context)
 {
-	return fi_epoll_ctl(ep, EPOLL_CTL_ADD, fd, events, context);
+	return ofi_epoll_ctl(ep, EPOLL_CTL_ADD, fd, events, context);
 }
 
-int fi_epoll_mod(struct fi_epoll *ep, int fd, uint32_t events, void *context)
+int ofi_epoll_mod(struct fi_epoll *ep, int fd, uint32_t events, void *context)
 {
-	return fi_epoll_ctl(ep, EPOLL_CTL_MOD, fd, events, context);
+	return ofi_epoll_ctl(ep, EPOLL_CTL_MOD, fd, events, context);
 }
 
-int fi_epoll_del(struct fi_epoll *ep, int fd)
+int ofi_epoll_del(struct fi_epoll *ep, int fd)
 {
-	return fi_epoll_ctl(ep, EPOLL_CTL_DEL, fd, 0, NULL);
+	return ofi_epoll_ctl(ep, EPOLL_CTL_DEL, fd, 0, NULL);
 }
 
-static int fi_epoll_fd_array_grow(struct fi_epoll *ep)
+static int ofi_epoll_fd_array_grow(struct fi_epoll *ep)
 {
 	struct pollfd *fds;
 	void *contexts;
@@ -935,7 +937,7 @@ static int fi_epoll_fd_array_grow(struct fi_epoll *ep)
 	return FI_SUCCESS;
 }
 
-static void fi_epoll_cleanup_array(struct fi_epoll *ep)
+static void ofi_epoll_cleanup_array(struct fi_epoll *ep)
 {
 	int i;
 
@@ -952,19 +954,19 @@ static void fi_epoll_cleanup_array(struct fi_epoll *ep)
 	}
 }
 
-static void fi_epoll_process_work_item_list(struct fi_epoll *ep)
+static void ofi_epoll_process_work_item_list(struct fi_epoll *ep)
 {
 	struct slist_entry *entry;
-	struct fi_epoll_work_item *item;
+	struct ofi_epoll_work_item *item;
 	int i;
 
 	while (!slist_empty(&ep->work_item_list)) {
 		if ((ep->nfds == ep->size) &&
-		    fi_epoll_fd_array_grow(ep))
+		    ofi_epoll_fd_array_grow(ep))
 			continue;
 
 		entry = slist_remove_head(&ep->work_item_list);
-		item = container_of(entry, struct fi_epoll_work_item, entry);
+		item = container_of(entry, struct ofi_epoll_work_item, entry);
 
 		switch (item->type) {
 		case EPOLL_CTL_ADD:
@@ -985,10 +987,9 @@ static void fi_epoll_process_work_item_list(struct fi_epoll *ep)
 		case EPOLL_CTL_MOD:
 			for (i = 0; i < ep->nfds; i++) {
 				if (ep->fds[i].fd == item->fd) {
-
 					ep->fds[i].events = item->events;
 					ep->fds[i].revents &= item->events;
-					ep->context = item->context;
+					ep->context[i] = item->context;
 					break;
 				}
 			}
@@ -1000,15 +1001,15 @@ static void fi_epoll_process_work_item_list(struct fi_epoll *ep)
 		free(item);
 	}
 out:
-	fi_epoll_cleanup_array(ep);
+	ofi_epoll_cleanup_array(ep);
 }
 
-int fi_epoll_wait(struct fi_epoll *ep, void **contexts, int max_contexts,
+int ofi_epoll_wait(struct fi_epoll *ep, void **contexts, int max_contexts,
                   int timeout)
 {
 	int i, ret;
 	int found = 0;
-	uint64_t start = (timeout >= 0) ? fi_gettime_ms() : 0;
+	uint64_t start = (timeout >= 0) ? ofi_gettime_ms() : 0;
 
 	do {
 		ret = poll(ep->fds, ep->nfds, timeout);
@@ -1022,10 +1023,11 @@ int fi_epoll_wait(struct fi_epoll *ep, void **contexts, int max_contexts,
 
 		fastlock_acquire(&ep->lock);
 		if (!slist_empty(&ep->work_item_list))
-			fi_epoll_process_work_item_list(ep);
+			ofi_epoll_process_work_item_list(ep);
 
 		fastlock_release(&ep->lock);
 
+		/* Index 0 is the internal signaling fd, skip it */
 		for (i = ep->index; i < ep->nfds && found < max_contexts; i++) {
 			if (ep->fds[i].revents && i) {
 				contexts[found++] = ep->context[i];
@@ -1040,22 +1042,22 @@ int fi_epoll_wait(struct fi_epoll *ep, void **contexts, int max_contexts,
 		}
 
 		if (timeout > 0)
-			timeout -= (int) (fi_gettime_ms() - start);
+			timeout -= (int) (ofi_gettime_ms() - start);
 
 	} while (timeout > 0 && !found);
 
 	return found;
 }
 
-void fi_epoll_close(struct fi_epoll *ep)
+void ofi_epoll_close(struct fi_epoll *ep)
 {
-	struct fi_epoll_work_item *item;
+	struct ofi_epoll_work_item *item;
 	struct slist_entry *entry;
 	if (ep) {
 		while (!slist_empty(&ep->work_item_list)) {
 			entry = slist_remove_head(&ep->work_item_list);
 			item = container_of(entry,
-					    struct fi_epoll_work_item,
+					    struct ofi_epoll_work_item,
 					    entry);
 			free(item);
 		}
@@ -1197,9 +1199,7 @@ void ofi_get_list_of_addr(struct fi_provider *prov, const char *env_name,
 
 			memcpy(&addr_entry->ipaddr, ifa->ifa_addr,
 			       ofi_sizeofaddr(ifa->ifa_addr));
-			ofi_straddr_log(prov, FI_LOG_INFO, FI_LOG_CORE,
-					"available addr: ", ifa->ifa_addr);
-
+			
 			if (!inet_ntop(ifa->ifa_addr->sa_family,
 					ofi_get_ipaddr(ifa->ifa_addr),
 					addr_entry->ipstr,
@@ -1211,6 +1211,9 @@ void ofi_get_list_of_addr(struct fi_provider *prov, const char *env_name,
 			}
 
 			addr_entry->speed = ofi_ifaddr_get_speed(ifa);
+			FI_INFO(prov, FI_LOG_CORE, "Available addr: %s, "
+				"iface name: %s, speed: %zu\n",
+				addr_entry->ipstr, ifa->ifa_name, addr_entry->speed);
 
 			slist_insert_before_first_match(addr_list, ofi_addr_list_entry_comp_speed,
 							&addr_entry->entry);

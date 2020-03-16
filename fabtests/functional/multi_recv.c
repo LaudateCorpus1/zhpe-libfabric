@@ -426,11 +426,16 @@ static int run(void)
 		if (ret)
 			goto out;
 	} else {
+		ret = ft_init_oob();
+		if (ret)
+			goto out;
+
 		ret = init_fabric();
 		if (ret)
 			goto out;
 
-		ret = init_av();
+		ret = (opts.options & (FT_OPT_OOB_SYNC | FT_OPT_OOB_CTRL)) ?
+			ft_init_av() : init_av();
 		if (ret)
 			goto out;
 	}
@@ -469,8 +474,10 @@ int main(int argc, char **argv)
 			break;
 		case '?':
 		case 'h':
-			ft_csusage(argv[0], "Streaming RDM client-server using multi recv buffer.");
+			ft_csusage(argv[0],
+				"Streaming RDM client-server using multi recv buffer.");
 			FT_PRINT_OPTS_USAGE("-M", "enable testing with fi_recvmsg");
+			FT_PRINT_OPTS_USAGE("-v", "Enable data verification");
 			return EXIT_FAILURE;
 		}
 	}

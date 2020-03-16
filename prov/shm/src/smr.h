@@ -67,6 +67,11 @@
 #define SMR_MAJOR_VERSION 1
 #define SMR_MINOR_VERSION 1
 
+struct smr_env {
+	int disable_cma;
+};
+
+extern struct smr_env smr_env;
 extern struct fi_provider smr_prov;
 extern struct fi_info smr_info;
 extern struct util_prov smr_util_prov;
@@ -169,7 +174,8 @@ static inline const char *smr_no_prefix(const char *addr)
 #define SMR_RMA_ORDER (OFI_ORDER_RAR_SET | OFI_ORDER_RAW_SET | FI_ORDER_RAS |	\
 		       OFI_ORDER_WAR_SET | OFI_ORDER_WAW_SET | FI_ORDER_WAS |	\
 		       FI_ORDER_SAR | FI_ORDER_SAW)
-#define smr_fast_rma_enabled(mode, order) ((mode & FI_MR_VIRT_ADDR) && \
+#define smr_fast_rma_enabled(mode, order) (!smr_env.disable_cma && \
+			(mode & FI_MR_VIRT_ADDR) && \
 			!(order & SMR_RMA_ORDER))
 
 struct smr_ep {
@@ -186,7 +192,8 @@ struct smr_ep {
 	struct smr_queue	trecv_queue;
 	struct smr_unexp_fs	*unexp_fs;
 	struct smr_pend_fs	*pend_fs;
-	struct smr_queue	unexp_queue;
+	struct smr_queue	unexp_msg_queue;
+	struct smr_queue	unexp_tagged_queue;
 };
 
 #define smr_ep_rx_flags(smr_ep) ((smr_ep)->util_ep.rx_op_flags)
@@ -245,6 +252,9 @@ int smr_rx_src_comp_signal(struct smr_ep *ep, void *context, uint32_t op,
 uint64_t smr_rx_cq_flags(uint32_t op, uint16_t op_flags);
 
 void smr_ep_progress(struct util_ep *util_ep);
-int smr_progress_unexp(struct smr_ep *ep, struct smr_ep_entry *entry);
+
+int smr_progress_unexp(struct smr_ep *ep,
+		       struct smr_ep_entry *entry,
+		       struct smr_queue *unexp_queue);
 
 #endif

@@ -33,23 +33,23 @@
 #include "config.h"
 #include "fi_verbs.h"
 
-void fi_ibv_next_xrc_conn_state(struct fi_ibv_xrc_ep *ep)
+void vrb_next_xrc_conn_state(struct vrb_xrc_ep *ep)
 {
 	switch (ep->conn_state) {
-	case FI_IBV_XRC_UNCONNECTED:
-		ep->conn_state = FI_IBV_XRC_ORIG_CONNECTING;
+	case VRB_XRC_UNCONNECTED:
+		ep->conn_state = VRB_XRC_ORIG_CONNECTING;
 		break;
-	case FI_IBV_XRC_ORIG_CONNECTING:
-		ep->conn_state = FI_IBV_XRC_ORIG_CONNECTED;
+	case VRB_XRC_ORIG_CONNECTING:
+		ep->conn_state = VRB_XRC_ORIG_CONNECTED;
 		break;
-	case FI_IBV_XRC_ORIG_CONNECTED:
-		ep->conn_state = FI_IBV_XRC_RECIP_CONNECTING;
+	case VRB_XRC_ORIG_CONNECTED:
+		ep->conn_state = VRB_XRC_RECIP_CONNECTING;
 		break;
-	case FI_IBV_XRC_RECIP_CONNECTING:
-		ep->conn_state = FI_IBV_XRC_CONNECTED;
+	case VRB_XRC_RECIP_CONNECTING:
+		ep->conn_state = VRB_XRC_CONNECTED;
 		break;
-	case FI_IBV_XRC_CONNECTED:
-	case FI_IBV_XRC_ERROR:
+	case VRB_XRC_CONNECTED:
+	case VRB_XRC_ERROR:
 		break;
 	default:
 		assert(0);
@@ -58,24 +58,24 @@ void fi_ibv_next_xrc_conn_state(struct fi_ibv_xrc_ep *ep)
 	}
 }
 
-void fi_ibv_prev_xrc_conn_state(struct fi_ibv_xrc_ep *ep)
+void vrb_prev_xrc_conn_state(struct vrb_xrc_ep *ep)
 {
 	switch (ep->conn_state) {
-	case FI_IBV_XRC_UNCONNECTED:
+	case VRB_XRC_UNCONNECTED:
 		break;
-	case FI_IBV_XRC_ORIG_CONNECTING:
-		ep->conn_state = FI_IBV_XRC_UNCONNECTED;
+	case VRB_XRC_ORIG_CONNECTING:
+		ep->conn_state = VRB_XRC_UNCONNECTED;
 		break;
-	case FI_IBV_XRC_ORIG_CONNECTED:
-		ep->conn_state = FI_IBV_XRC_ORIG_CONNECTING;
+	case VRB_XRC_ORIG_CONNECTED:
+		ep->conn_state = VRB_XRC_ORIG_CONNECTING;
 		break;
-	case FI_IBV_XRC_RECIP_CONNECTING:
-		ep->conn_state = FI_IBV_XRC_ORIG_CONNECTED;
+	case VRB_XRC_RECIP_CONNECTING:
+		ep->conn_state = VRB_XRC_ORIG_CONNECTED;
 		break;
-	case FI_IBV_XRC_CONNECTED:
-		ep->conn_state = FI_IBV_XRC_RECIP_CONNECTING;
+	case VRB_XRC_CONNECTED:
+		ep->conn_state = VRB_XRC_RECIP_CONNECTING;
 		break;
-	case FI_IBV_XRC_ERROR:
+	case VRB_XRC_ERROR:
 		break;
 	default:
 		assert(0);
@@ -84,7 +84,7 @@ void fi_ibv_prev_xrc_conn_state(struct fi_ibv_xrc_ep *ep)
 	}
 }
 
-void fi_ibv_save_priv_data(struct fi_ibv_xrc_ep *ep, const void *data,
+void vrb_save_priv_data(struct vrb_xrc_ep *ep, const void *data,
 			   size_t len)
 {
 	ep->conn_setup->event_len = MIN(sizeof(ep->conn_setup->event_data),
@@ -92,17 +92,19 @@ void fi_ibv_save_priv_data(struct fi_ibv_xrc_ep *ep, const void *data,
 	memcpy(ep->conn_setup->event_data, data, ep->conn_setup->event_len);
 }
 
-void fi_ibv_set_xrc_cm_data(struct fi_ibv_xrc_cm_data *local, int reciprocal,
-			    uint32_t conn_tag, uint16_t port, uint32_t param)
+void vrb_set_xrc_cm_data(struct vrb_xrc_cm_data *local, int reciprocal,
+			    uint32_t conn_tag, uint16_t port, uint32_t tgt_qpn,
+			    uint32_t srqn)
 {
-	local->version = FI_IBV_XRC_VERSION;
+	local->version = VRB_XRC_VERSION;
 	local->reciprocal = reciprocal ? 1 : 0;
 	local->port = htons(port);
 	local->conn_tag = htonl(conn_tag);
-	local->param = htonl(param);
+	local->tgt_qpn = htonl(tgt_qpn);
+	local->srqn = htonl(srqn);
 }
 
-int fi_ibv_verify_xrc_cm_data(struct fi_ibv_xrc_cm_data *remote,
+int vrb_verify_xrc_cm_data(struct vrb_xrc_cm_data *remote,
 			      int private_data_len)
 {
 	if (sizeof(*remote) > private_data_len) {
@@ -111,92 +113,87 @@ int fi_ibv_verify_xrc_cm_data(struct fi_ibv_xrc_cm_data *remote,
 		return -FI_EINVAL;
 	}
 
-	if (remote->version != FI_IBV_XRC_VERSION) {
+	if (remote->version != VRB_XRC_VERSION) {
 		VERBS_WARN(FI_LOG_EP_CTRL,
 			   "XRC MSG EP connection protocol mismatch "
 			   "(local %"PRIu8", remote %"PRIu8")\n",
-			   FI_IBV_XRC_VERSION, remote->version);
+			   VRB_XRC_VERSION, remote->version);
 		return -FI_EINVAL;
 	}
 	return FI_SUCCESS;
 }
 
-void fi_ibv_log_ep_conn(struct fi_ibv_xrc_ep *ep, char *desc)
+void vrb_log_ep_conn(struct vrb_xrc_ep *ep, char *desc)
 {
 	struct sockaddr *addr;
 	char buf[OFI_ADDRSTRLEN];
 	size_t len = sizeof(buf);
 
-	if (!fi_log_enabled(&fi_ibv_prov, FI_LOG_INFO, FI_LOG_FABRIC))
+	if (!fi_log_enabled(&vrb_prov, FI_LOG_INFO, FI_LOG_EP_CTRL))
 		return;
 
-	VERBS_INFO(FI_LOG_FABRIC, "EP %p, %s\n", ep, desc);
-	VERBS_INFO(FI_LOG_FABRIC,
+	VERBS_INFO(FI_LOG_EP_CTRL, "EP %p, %s\n", ep, desc);
+	VERBS_INFO(FI_LOG_EP_CTRL,
 		  "EP %p, CM ID %p, TGT CM ID %p, SRQN %d Peer SRQN %d\n",
 		  ep, ep->base_ep.id, ep->tgt_id, ep->srqn, ep->peer_srqn);
 
-	assert(ep->base_ep.id);
 
-	addr = rdma_get_local_addr(ep->base_ep.id);
-	if (addr) {
-		ofi_straddr(buf, &len, ep->base_ep.info->addr_format, addr);
-		VERBS_INFO(FI_LOG_FABRIC, "EP %p src_addr: %s\n", ep, buf);
-	}
-	addr = rdma_get_peer_addr(ep->base_ep.id);
-	if (addr) {
-		len = sizeof(buf);
-		ofi_straddr(buf, &len, ep->base_ep.info->addr_format, addr);
-		VERBS_INFO(FI_LOG_FABRIC, "EP %p dst_addr: %s\n", ep, buf);
+	if (ep->base_ep.id) {
+		addr = rdma_get_local_addr(ep->base_ep.id);
+		if (addr) {
+			ofi_straddr(buf, &len, ep->base_ep.info->addr_format,
+				    addr);
+			VERBS_INFO(FI_LOG_EP_CTRL, "EP %p src_addr: %s\n",
+				   ep, buf);
+		}
+		addr = rdma_get_peer_addr(ep->base_ep.id);
+		if (addr) {
+			len = sizeof(buf);
+			ofi_straddr(buf, &len, ep->base_ep.info->addr_format,
+				    addr);
+			VERBS_INFO(FI_LOG_EP_CTRL, "EP %p dst_addr: %s\n",
+				   ep, buf);
+		}
 	}
 
 	if (ep->base_ep.ibv_qp) {
-		VERBS_INFO(FI_LOG_FABRIC, "EP %p, INI QP Num %d\n",
+		VERBS_INFO(FI_LOG_EP_CTRL, "EP %p, INI QP Num %d\n",
 			  ep, ep->base_ep.ibv_qp->qp_num);
-		VERBS_INFO(FI_LOG_FABRIC, "EP %p, Remote TGT QP Num %d\n", ep,
+		VERBS_INFO(FI_LOG_EP_CTRL, "EP %p, Remote TGT QP Num %d\n", ep,
 			  ep->ini_conn->tgt_qpn);
 	}
 	if (ep->tgt_ibv_qp)
-		VERBS_INFO(FI_LOG_FABRIC, "EP %p, TGT QP Num %d\n",
+		VERBS_INFO(FI_LOG_EP_CTRL, "EP %p, TGT QP Num %d\n",
 			  ep, ep->tgt_ibv_qp->qp_num);
-	if (ep->conn_setup && ep->conn_setup->rsvd_ini_qpn)
-		VERBS_INFO(FI_LOG_FABRIC, "EP %p, Reserved INI QPN %d\n",
-			  ep, ep->conn_setup->rsvd_ini_qpn->qp_num);
-	if (ep->conn_setup && ep->conn_setup->rsvd_tgt_qpn)
-		VERBS_INFO(FI_LOG_FABRIC, "EP %p, Reserved TGT QPN %d\n",
-			  ep, ep->conn_setup->rsvd_tgt_qpn->qp_num);
 }
 
 /* Caller must hold eq:lock */
-void fi_ibv_free_xrc_conn_setup(struct fi_ibv_xrc_ep *ep, int disconnect)
+void vrb_free_xrc_conn_setup(struct vrb_xrc_ep *ep, int disconnect)
 {
 	assert(ep->conn_setup);
 
 	/* If a disconnect is requested then the XRC bidirectional connection
 	 * has completed and a disconnect sequence is started (the XRC INI QP
 	 * side disconnect is initiated when the remote target disconnect is
-	 * received). XRC temporary QP resources will be released when the
-	 * timewait state is exited. */
-	if (ep->conn_setup->rsvd_ini_qpn && !disconnect) {
-		ibv_destroy_qp(ep->conn_setup->rsvd_ini_qpn);
-		ep->conn_setup->rsvd_ini_qpn = NULL;
-	}
-
+	 * received). */
 	if (disconnect) {
 		assert(ep->tgt_id);
 		assert(!ep->tgt_id->qp);
 
-		if (ep->conn_setup->tgt_connected) {
+		if (ep->tgt_id->ps == RDMA_PS_UDP) {
+			rdma_destroy_id(ep->tgt_id);
+			ep->tgt_id = NULL;
+		} else {
 			rdma_disconnect(ep->tgt_id);
-			ep->conn_setup->tgt_connected = 0;
 		}
-	} else if (ep->conn_setup->rsvd_tgt_qpn) {
-		ibv_destroy_qp(ep->conn_setup->rsvd_tgt_qpn);
-		ep->conn_setup->rsvd_tgt_qpn = NULL;
+
+		if (ep->base_ep.id->ps == RDMA_PS_UDP) {
+			rdma_destroy_id(ep->base_ep.id);
+			ep->base_ep.id = NULL;
+		}
 	}
 
-	if (ep->conn_setup->conn_tag != VERBS_CONN_TAG_INVALID)
-		fi_ibv_eq_clear_xrc_conn_tag(ep);
-
+	vrb_eq_clear_xrc_conn_tag(ep);
 	if (!disconnect) {
 		free(ep->conn_setup);
 		ep->conn_setup = NULL;
@@ -204,25 +201,14 @@ void fi_ibv_free_xrc_conn_setup(struct fi_ibv_xrc_ep *ep, int disconnect)
 }
 
 /* Caller must hold the eq:lock */
-int fi_ibv_connect_xrc(struct fi_ibv_xrc_ep *ep, struct sockaddr *addr,
+int vrb_connect_xrc(struct vrb_xrc_ep *ep, struct sockaddr *addr,
 		       int reciprocal, void *param, size_t paramlen)
 {
-	struct sockaddr *peer_addr;
 	int ret;
 
-	assert(ep->base_ep.id && !ep->base_ep.ibv_qp && !ep->ini_conn);
+	assert(!ep->base_ep.id && !ep->base_ep.ibv_qp && !ep->ini_conn);
 
-	peer_addr = rdma_get_local_addr(ep->base_ep.id);
-	if (peer_addr)
-		ofi_straddr_dbg(&fi_ibv_prov, FI_LOG_FABRIC,
-				"XRC connect src_addr", peer_addr);
-
-	peer_addr = rdma_get_peer_addr(ep->base_ep.id);
-	if (peer_addr)
-		ofi_straddr_dbg(&fi_ibv_prov, FI_LOG_FABRIC,
-				"XRC connect dest_addr", peer_addr);
-
-	ret = fi_ibv_get_shared_ini_conn(ep, &ep->ini_conn);
+	ret = vrb_get_shared_ini_conn(ep, &ep->ini_conn);
 	if (ret) {
 		VERBS_WARN(FI_LOG_EP_CTRL,
 			   "Get of shared XRC INI connection failed %d\n", ret);
@@ -232,27 +218,28 @@ int fi_ibv_connect_xrc(struct fi_ibv_xrc_ep *ep, struct sockaddr *addr,
 		}
 		return ret;
 	}
-	fi_ibv_add_pending_ini_conn(ep, reciprocal, param, paramlen);
-	fi_ibv_sched_ini_conn(ep->ini_conn);
+
+	vrb_eq_set_xrc_conn_tag(ep);
+	vrb_add_pending_ini_conn(ep, reciprocal, param, paramlen);
+	vrb_sched_ini_conn(ep->ini_conn);
 
 	return FI_SUCCESS;
 }
 
 /* Caller must hold the eq:lock */
-void fi_ibv_ep_ini_conn_done(struct fi_ibv_xrc_ep *ep, uint32_t peer_srqn,
-			     uint32_t tgt_qpn)
+void vrb_ep_ini_conn_done(struct vrb_xrc_ep *ep, uint32_t tgt_qpn)
 {
 	assert(ep->base_ep.id && ep->ini_conn);
 
-	assert(ep->ini_conn->state == FI_IBV_INI_QP_CONNECTING ||
-	       ep->ini_conn->state == FI_IBV_INI_QP_CONNECTED);
+	assert(ep->ini_conn->state == VRB_INI_QP_CONNECTING ||
+	       ep->ini_conn->state == VRB_INI_QP_CONNECTED);
 
 	/* If this was a physical INI/TGT QP connection, remove the QP
 	 * from control of the RDMA CM. We don't want the shared INI QP
 	 * to be destroyed if this endpoint closes. */
 	if (ep->base_ep.id == ep->ini_conn->phys_conn_id) {
 		ep->ini_conn->phys_conn_id = NULL;
-		ep->ini_conn->state = FI_IBV_INI_QP_CONNECTED;
+		ep->ini_conn->state = VRB_INI_QP_CONNECTED;
 		ep->ini_conn->tgt_qpn = tgt_qpn;
 		ep->base_ep.id->qp = NULL;
 		VERBS_DBG(FI_LOG_EP_CTRL,
@@ -261,59 +248,90 @@ void fi_ibv_ep_ini_conn_done(struct fi_ibv_xrc_ep *ep, uint32_t peer_srqn,
 			  ep->ini_conn->tgt_qpn);
 	}
 
-	ep->conn_setup->ini_connected = 1;
-	fi_ibv_log_ep_conn(ep, "INI Connection Done");
-	fi_ibv_sched_ini_conn(ep->ini_conn);
+	vrb_log_ep_conn(ep, "INI Connection Done");
+	vrb_sched_ini_conn(ep->ini_conn);
 }
 
 /* Caller must hold the eq:lock */
-void fi_ibv_ep_ini_conn_rejected(struct fi_ibv_xrc_ep *ep)
+void vrb_ep_ini_conn_rejected(struct vrb_xrc_ep *ep)
 {
 	assert(ep->base_ep.id && ep->ini_conn);
 
-	fi_ibv_log_ep_conn(ep, "INI Connection Rejected");
-	fi_ibv_put_shared_ini_conn(ep);
-	ep->conn_state = FI_IBV_XRC_ERROR;
+	vrb_log_ep_conn(ep, "INI Connection Rejected");
+	vrb_put_shared_ini_conn(ep);
+	ep->conn_state = VRB_XRC_ERROR;
 }
 
-void fi_ibv_ep_tgt_conn_done(struct fi_ibv_xrc_ep *ep)
+void vrb_ep_tgt_conn_done(struct vrb_xrc_ep *ep)
 {
-	fi_ibv_log_ep_conn(ep, "TGT Connection Done\n");
+	vrb_log_ep_conn(ep, "TGT Connection Done\n");
 
 	if (ep->tgt_id->qp) {
 		assert(ep->tgt_ibv_qp == ep->tgt_id->qp);
 		ep->tgt_id->qp = NULL;
 	}
-	ep->conn_setup->tgt_connected = 1;
 }
 
 /* Caller must hold the eq:lock */
-int fi_ibv_accept_xrc(struct fi_ibv_xrc_ep *ep, int reciprocal,
+int vrb_resend_shared_accept_xrc(struct vrb_xrc_ep *ep,
+				    struct vrb_connreq *connreq,
+				    struct rdma_cm_id *id)
+{
+	struct rdma_conn_param conn_param = { 0 };
+	struct vrb_xrc_cm_data *cm_data = ep->accept_param_data;
+
+	assert(cm_data && ep->tgt_ibv_qp);
+	assert(ep->tgt_ibv_qp->qp_num == connreq->xrc.tgt_qpn);
+	assert(ep->peer_srqn == connreq->xrc.peer_srqn);
+
+	vrb_set_xrc_cm_data(cm_data, connreq->xrc.is_reciprocal,
+			       connreq->xrc.conn_tag, connreq->xrc.port,
+			       0, ep->srqn);
+	conn_param.private_data = cm_data;
+	conn_param.private_data_len = ep->accept_param_len;
+
+	conn_param.responder_resources = RDMA_MAX_RESP_RES;
+	conn_param.initiator_depth = RDMA_MAX_INIT_DEPTH;
+	conn_param.flow_control = 1;
+	conn_param.rnr_retry_count = 7;
+	if (ep->base_ep.srq_ep)
+		conn_param.srq = 1;
+	conn_param.qp_num = ep->tgt_ibv_qp->qp_num;
+
+	return rdma_accept(id, &conn_param);
+}
+
+/* Caller must hold the eq:lock */
+int vrb_accept_xrc(struct vrb_xrc_ep *ep, int reciprocal,
 		      void *param, size_t paramlen)
 {
 	struct sockaddr *addr;
-	struct fi_ibv_connreq *connreq;
+	struct vrb_connreq *connreq;
 	struct rdma_conn_param conn_param = { 0 };
-	struct fi_ibv_xrc_cm_data *cm_data = param;
+	struct vrb_xrc_cm_data *cm_data = param;
+	struct vrb_xrc_cm_data connect_cm_data;
 	int ret;
 
 	addr = rdma_get_local_addr(ep->tgt_id);
 	if (addr)
-		ofi_straddr_dbg(&fi_ibv_prov, FI_LOG_CORE, "src_addr", addr);
+		ofi_straddr_dbg(&vrb_prov, FI_LOG_CORE, "src_addr", addr);
 
 	addr = rdma_get_peer_addr(ep->tgt_id);
 	if (addr)
-		ofi_straddr_dbg(&fi_ibv_prov, FI_LOG_CORE, "dest_addr", addr);
+		ofi_straddr_dbg(&vrb_prov, FI_LOG_CORE, "dest_addr", addr);
 
 	connreq = container_of(ep->base_ep.info->handle,
-			       struct fi_ibv_connreq, handle);
-	ret = fi_ibv_ep_create_tgt_qp(ep, connreq->xrc.conn_data);
+			       struct vrb_connreq, handle);
+	ret = vrb_ep_create_tgt_qp(ep, connreq->xrc.tgt_qpn);
 	if (ret)
 		return ret;
 
-	fi_ibv_set_xrc_cm_data(cm_data, connreq->xrc.is_reciprocal,
+	ep->peer_srqn = connreq->xrc.peer_srqn;
+	ep->remote_pep_port = connreq->xrc.port;
+	ep->recip_accept = connreq->xrc.is_reciprocal;
+	vrb_set_xrc_cm_data(cm_data, connreq->xrc.is_reciprocal,
 			       connreq->xrc.conn_tag, connreq->xrc.port,
-			       ep->srqn);
+			       0, ep->srqn);
 	conn_param.private_data = cm_data;
 	conn_param.private_data_len = paramlen;
 	conn_param.responder_resources = RDMA_MAX_RESP_RES;
@@ -323,36 +341,54 @@ int fi_ibv_accept_xrc(struct fi_ibv_xrc_ep *ep, int reciprocal,
 	if (ep->base_ep.srq_ep)
 		conn_param.srq = 1;
 
-	/* Shared INI/TGT QP connection use a temporarily reserved QP number
-	 * avoid the appearance of being a stale/duplicate IB CM message */
 	if (!ep->tgt_id->qp)
-		conn_param.qp_num = ep->conn_setup->rsvd_tgt_qpn->qp_num;
+		conn_param.qp_num = ep->tgt_ibv_qp->qp_num;
 
-	if (!connreq->xrc.is_reciprocal)
-		ep->conn_setup->conn_tag = connreq->xrc.conn_tag;
+	ep->conn_setup->remote_conn_tag = connreq->xrc.conn_tag;
 
-	assert(ep->conn_state == FI_IBV_XRC_UNCONNECTED ||
-	       ep->conn_state == FI_IBV_XRC_ORIG_CONNECTED);
-	fi_ibv_next_xrc_conn_state(ep);
+	assert(ep->conn_state == VRB_XRC_UNCONNECTED ||
+	       ep->conn_state == VRB_XRC_ORIG_CONNECTED);
+	vrb_next_xrc_conn_state(ep);
 
 	ret = rdma_accept(ep->tgt_id, &conn_param);
 	if (OFI_UNLIKELY(ret)) {
 		ret = -errno;
 		VERBS_WARN(FI_LOG_EP_CTRL,
 			   "XRC TGT, rdma_accept error %d\n", ret);
-		fi_ibv_prev_xrc_conn_state(ep);
-	} else
-		free(connreq);
+		vrb_prev_xrc_conn_state(ep);
+		return ret;
+	}
+	free(connreq);
+
+	if (ep->tgt_id->ps == RDMA_PS_UDP &&
+	    vrb_eq_add_sidr_conn(ep, cm_data, paramlen))
+		VERBS_WARN(FI_LOG_EP_CTRL,
+			   "SIDR connection accept not added to map\n");
+
+	/* The passive side of the initial shared connection using
+	 * SIDR is complete, initiate reciprocal connection */
+	if (ep->tgt_id->ps == RDMA_PS_UDP && !reciprocal) {
+		vrb_next_xrc_conn_state(ep);
+		vrb_ep_tgt_conn_done(ep);
+		ret = vrb_connect_xrc(ep, NULL, VRB_RECIP_CONN,
+					 &connect_cm_data,
+					 sizeof(connect_cm_data));
+		if (ret) {
+			VERBS_WARN(FI_LOG_EP_CTRL,
+				   "XRC reciprocal connect error %d\n", ret);
+			vrb_prev_xrc_conn_state(ep);
+			ep->tgt_id->qp = NULL;
+		}
+	}
 
 	return ret;
 }
 
-int fi_ibv_process_xrc_connreq(struct fi_ibv_ep *ep,
-			       struct fi_ibv_connreq *connreq)
+int vrb_process_xrc_connreq(struct vrb_ep *ep,
+			       struct vrb_connreq *connreq)
 {
-	struct fi_ibv_xrc_ep *xrc_ep = container_of(ep, struct fi_ibv_xrc_ep,
+	struct vrb_xrc_ep *xrc_ep = container_of(ep, struct vrb_xrc_ep,
 						    base_ep);
-	int ret;
 
 	assert(ep->info->src_addr);
 	assert(ep->info->dest_addr);
@@ -363,25 +399,15 @@ int fi_ibv_process_xrc_connreq(struct fi_ibv_ep *ep,
 			  "Unable to allocate connection setup memory\n");
 		return -FI_ENOMEM;
 	}
+	xrc_ep->conn_setup->conn_tag = VERBS_CONN_TAG_INVALID;
 
 	/* This endpoint was created on the passive side of a connection
 	 * request. The reciprocal connection request will go back to the
 	 * passive port indicated by the active side */
 	ofi_addr_set_port(ep->info->src_addr, 0);
 	ofi_addr_set_port(ep->info->dest_addr, connreq->xrc.port);
-
-	ret = fi_ibv_create_ep(ep->info, &ep->id);
-	if (ret) {
-		VERBS_WARN(FI_LOG_EP_CTRL,
-			   "Creation of INI cm_id failed %d\n", ret);
-		goto create_err;
-	}
 	xrc_ep->tgt_id = connreq->id;
 	xrc_ep->tgt_id->context = &ep->util_ep.ep_fid.fid;
 
 	return FI_SUCCESS;
-
-create_err:
-	free(xrc_ep->conn_setup);
-	return ret;
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018-2019 Amazon.com, Inc. or its affiliates. All rights reserved.
+ * Copyright (c) 2018-2020 Amazon.com, Inc. or its affiliates. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -50,13 +50,13 @@
 #include <sys/epoll.h>
 #include <uthash.h>
 
-#include "infiniband/efa_arch.h"
-#include "infiniband/efa_verbs.h"
 #include <rdma/fabric.h>
 #include <rdma/fi_cm.h>
 #include <rdma/fi_domain.h>
 #include <rdma/fi_endpoint.h>
 #include <rdma/fi_errno.h>
+
+#include <infiniband/verbs.h>
 
 #include "ofi.h"
 #include "ofi_enosys.h"
@@ -64,6 +64,7 @@
 #include "ofi_util.h"
 #include "ofi_file.h"
 
+#include "rxr.h"
 #define EFA_PROV_NAME "efa"
 #define EFA_PROV_VERS FI_VERSION(3, 0)
 
@@ -89,7 +90,20 @@
 #define EFA_MR_IOV_LIMIT 1
 #define EFA_MR_SUPPORTED_PERMISSIONS (FI_SEND | FI_RECV)
 
-#define EFA_DEF_NUM_MR_CACHE 36
+/*
+ * Multiplier to give some room in the device memory registration limits
+ * to allow processes added to a running job to bootstrap.
+ */
+#define EFA_MR_CACHE_LIMIT_MULT (.9)
+
+#define EFA_MIN_AV_SIZE (16384)
+
+/*
+ * Specific flags and attributes for shm provider
+ */
+#define EFA_SHM_MAX_AV_COUNT       (256)
+
+#define EFA_QKEY 0x11111111
 
 extern int efa_mr_cache_enable;
 extern size_t efa_mr_max_cached_count;
@@ -111,41 +125,39 @@ struct efa_ep_addr {
 
 #define EFA_EP_ADDR_LEN sizeof(struct efa_ep_addr)
 
+struct efa_ah {
+	struct ibv_ah	*ibv_ah;
+	uint16_t	ahn;
+};
+
 struct efa_conn {
-	struct efa_ah		*ah;
+	struct efa_ah		ah;
 	struct efa_ep_addr	ep_addr;
 };
 
 struct efa_domain {
 	struct util_domain	util_domain;
 	struct efa_context	*ctx;
-	struct efa_pd		*pd;
+	struct ibv_pd		*ibv_pd;
 	struct fi_info		*info;
 	struct efa_fabric	*fab;
 	int			rdm;
 	struct ofi_mr_cache	cache;
+	struct efa_qp		**qp_table;
+	size_t			qp_table_sz_m1;
 };
 
-struct fi_ops_mr efa_domain_mr_ops;
-struct fi_ops_mr efa_domain_mr_cache_ops;
+extern struct fi_ops_mr efa_domain_mr_ops;
+extern struct fi_ops_mr efa_domain_mr_cache_ops;
 int efa_mr_cache_entry_reg(struct ofi_mr_cache *cache,
 			   struct ofi_mr_entry *entry);
 void efa_mr_cache_entry_dereg(struct ofi_mr_cache *cache,
 			      struct ofi_mr_entry *entry);
 
 struct efa_wc {
-	uint64_t		wr_id;
-	/* Completion flags */
-	uint64_t		flags;
-	/* Immediate data in network byte order */
-	uint64_t		imm_data;
-	/* Size of received data */
-	uint32_t		byte_len;
-	uint32_t		comp_status;
-	struct efa_qp		*qp;
+	struct ibv_wc		ibv_wc;
 	/* Source address */
 	uint16_t		efa_ah;
-	uint16_t		src_qp;
 };
 
 struct efa_wce {
@@ -155,112 +167,28 @@ struct efa_wce {
 
 typedef void (*efa_cq_read_entry)(struct efa_wc *wc, int index, void *buf);
 
-struct efa_sub_cq {
-	uint16_t		consumed_cnt;
-	int			phase;
-	uint8_t			*buf;
-	int			qmask;
-	int			cqe_size;
-	uint32_t		ref_cnt;
-};
-
 struct efa_cq {
-	struct fid_cq		cq_fid;
+	struct util_cq		util_cq;
 	struct efa_domain	*domain;
 	size_t			entry_size;
 	efa_cq_read_entry	read_entry;
 	struct slist		wcq;
-	fastlock_t		outer_lock;
+	fastlock_t		lock;
 	struct ofi_bufpool	*wce_pool;
 
-	struct ibv_cq		ibv_cq;
-	uint8_t			*buf;
-	size_t			buf_size;
-	fastlock_t		inner_lock;
-	uint32_t		cqn;
-	int			cqe_size;
-	struct efa_sub_cq	*sub_cq_arr;
-	uint16_t		num_sub_cqs;
-	/* Index of next sub cq idx to poll. This is used to guarantee fairness for sub cqs */
-	uint16_t		next_poll_idx;
-};
-
-struct efa_device {
-	struct verbs_device		verbs_dev;
-	int				page_size;
-	int				abi_version;
+	struct ibv_cq		*ibv_cq;
 };
 
 struct efa_context {
-	struct ibv_context	ibv_ctx;
-	int			efa_everbs_cmd_fd;
-	struct efa_qp		**qp_table;
-	pthread_mutex_t		qp_table_mutex;
-
-	int			cqe_size;
-	uint16_t		sub_cqs_per_cq;
-	uint16_t		inject_size;
-	uint32_t		cmds_supp_udata;
-	uint32_t		max_llq_size;
+	struct ibv_context	*ibv_ctx;
 	uint64_t		max_mr_size;
-};
-
-struct efa_pd {
-	struct ibv_pd		ibv_pd;
-	struct efa_context	*context;
-	uint16_t		pdn;
-};
-
-struct efa_wq {
-	uint64_t			*wrid;
-	/* wrid_idx_pool: Pool of free indexes in the wrid array, used to select the
-	 * wrid entry to be used to hold the next tx packet's context.
-	 * At init time, entry N will hold value N, as OOO tx-completions arrive,
-	 * the value stored in a given entry might not equal the entry's index.
-	 */
-	uint32_t			*wrid_idx_pool;
-	uint32_t			wqe_cnt;
-	uint32_t			wqe_posted;
-	uint32_t			wqe_completed;
-	uint16_t			desc_idx;
-	uint16_t			desc_mask;
-	/* wrid_idx_pool_next: Index of the next entry to use in wrid_idx_pool. */
-	uint16_t			wrid_idx_pool_next;
-	int				max_sge;
-	int				phase;
-};
-
-struct efa_sq {
-	struct efa_wq	wq;
-	uint32_t	*db;
-	uint8_t		*desc;
-	uint32_t	desc_offset;
-	size_t		desc_ring_mmap_size;
-	size_t		max_inline_data;
-	size_t		immediate_data_width;
-	uint16_t	sub_cq_idx;
-};
-
-struct efa_rq {
-	struct efa_wq	wq;
-	uint32_t	*db;
-	uint8_t		*buf;
-	size_t		buf_size;
-	uint16_t	sub_cq_idx;
+	uint16_t		inline_buf_size;
 };
 
 struct efa_qp {
-	struct ibv_qp	ibv_qp;
+	struct ibv_qp	*ibv_qp;
 	struct efa_ep	*ep;
-	struct efa_sq	sq;
-	struct efa_rq	rq;
 	uint32_t	qp_num;
-	int		page_size;
-};
-
-struct efa_ah {
-	struct ibv_ah	ibv_ah;
-	uint16_t	efa_address_handle;
 };
 
 struct efa_mem_desc {
@@ -272,7 +200,7 @@ struct efa_mem_desc {
 };
 
 struct efa_ep {
-	struct fid_ep		ep_fid;
+	struct util_ep		util_ep;
 	struct efa_domain	*domain;
 	struct efa_qp		*qp;
 	struct efa_cq		*rcq;
@@ -280,6 +208,22 @@ struct efa_ep {
 	struct efa_av		*av;
 	struct fi_info		*info;
 	void			*src_addr;
+	struct ibv_send_wr	xmit_more_wr_head;
+	struct ibv_send_wr	*xmit_more_wr_tail;
+	struct ibv_recv_wr	recv_more_wr_head;
+	struct ibv_recv_wr	*recv_more_wr_tail;
+	struct ofi_bufpool	*send_wr_pool;
+	struct ofi_bufpool	*recv_wr_pool;
+};
+
+struct efa_send_wr {
+	struct ibv_send_wr wr;
+	struct ibv_sge sge[0];
+};
+
+struct efa_recv_wr {
+	struct ibv_recv_wr wr;
+	struct ibv_sge sge[0];
 };
 
 typedef struct efa_conn *
@@ -287,22 +231,32 @@ typedef struct efa_conn *
 	(struct efa_av *av, fi_addr_t addr);
 
 struct efa_av {
-	struct fid_av		av_fid;
-	struct efa_domain	*domain;
-	struct efa_ep		*ep;
-	size_t			count;
+	struct fid_av		*shm_rdm_av;
+	fi_addr_t		shm_rdm_addr_map[EFA_SHM_MAX_AV_COUNT];
+	struct efa_domain       *domain;
+	struct efa_ep           *ep;
 	size_t			used;
 	size_t			next;
-	uint64_t		flags;
 	enum fi_av_type		type;
 	efa_addr_to_conn_func	addr_to_conn;
 	struct efa_reverse_av	*reverse_av;
+	struct efa_av_entry     *av_map;
+	struct util_av		util_av;
+	enum fi_ep_type         ep_type;
 	/* Used only for FI_AV_TABLE */
-	struct efa_conn **conn_table;
+	struct efa_conn         **conn_table;
+};
+
+struct efa_av_entry {
+	uint8_t			ep_addr[EFA_EP_ADDR_LEN];
+	fi_addr_t		rdm_addr;
+	fi_addr_t		shm_rdm_addr;
+	bool			local_mapping;
+	UT_hash_handle		hh;
 };
 
 struct efa_ah_qpn {
-	uint16_t efa_ah;
+	uint16_t ahn;
 	uint16_t qpn;
 };
 
@@ -326,54 +280,12 @@ struct efa_device_attr {
 	uint16_t		max_rq_sge;
 };
 
-static inline struct efa_device *to_efa_dev(struct ibv_device *ibdev)
+
+static inline struct efa_av *rxr_ep_av(struct rxr_ep *ep)
 {
-	return container_of(ibdev, struct efa_device, verbs_dev);
+	return container_of(ep->util_ep.av, struct efa_av, util_av);
 }
 
-static inline struct efa_context *to_efa_ctx(struct ibv_context *ibctx)
-{
-	return container_of(ibctx, struct efa_context, ibv_ctx);
-}
-
-static inline struct efa_pd *to_efa_pd(struct ibv_pd *ibpd)
-{
-	return container_of(ibpd, struct efa_pd, ibv_pd);
-}
-
-static inline struct efa_cq *to_efa_cq(struct ibv_cq *ibcq)
-{
-	return container_of(ibcq, struct efa_cq, ibv_cq);
-}
-
-static inline struct efa_qp *to_efa_qp(struct ibv_qp *ibqp)
-{
-	return container_of(ibqp, struct efa_qp, ibv_qp);
-}
-
-static inline struct efa_ah *to_efa_ah(struct ibv_ah *ibah)
-{
-	return container_of(ibah, struct efa_ah, ibv_ah);
-}
-
-static inline unsigned long align(unsigned long val, unsigned long align)
-{
-	return (val + align - 1) & ~(align - 1);
-}
-
-static inline uint32_t align_up_queue_size(uint32_t req)
-{
-	req--;
-	req |= req >> 1;
-	req |= req >> 2;
-	req |= req >> 4;
-	req |= req >> 8;
-	req |= req >> 16;
-	req++;
-	return req;
-}
-
-#define is_power_of_2(x) (!(x == 0) && !(x & (x - 1)))
 #define align_down_to_power_of_2(x)		\
 	({					\
 		__typeof__(x) n = (x);		\
@@ -385,8 +297,14 @@ static inline uint32_t align_up_queue_size(uint32_t req)
 extern const struct efa_ep_domain efa_rdm_domain;
 extern const struct efa_ep_domain efa_dgrm_domain;
 
-struct fi_ops_cm efa_ep_cm_ops;
-struct fi_ops_msg efa_ep_msg_ops;
+extern struct fi_ops_cm efa_ep_cm_ops;
+extern struct fi_ops_msg efa_ep_msg_ops;
+
+int efa_device_init(void);
+void efa_device_free(void);
+
+struct efa_context **efa_device_get_context_list(int *num_ctx);
+void efa_device_free_context_list(struct efa_context **list);
 
 const struct fi_info *efa_get_efa_info(const char *domain_name);
 int efa_domain_open(struct fid_fabric *fabric_fid, struct fi_info *info,
@@ -398,13 +316,21 @@ int efa_av_open(struct fid_domain *domain_fid, struct fi_av_attr *attr,
 int efa_cq_open(struct fid_domain *domain_fid, struct fi_cq_attr *attr,
 		struct fid_cq **cq_fid, void *context);
 
+/* AV sub-functions */
+int efa_av_insert_addr(struct efa_av *av, struct efa_ep_addr *addr,
+		       fi_addr_t *fi_addr, uint64_t flags, void *context);
+
 /* Caller must hold cq->inner_lock. */
 void efa_cq_inc_ref_cnt(struct efa_cq *cq, uint8_t sub_cq_idx);
 /* Caller must hold cq->inner_lock. */
 void efa_cq_dec_ref_cnt(struct efa_cq *cq, uint8_t sub_cq_idx);
 
-fi_addr_t efa_ah_qpn_to_addr(struct efa_ep *ep, uint16_t ah, uint16_t qpn);
+fi_addr_t efa_ahn_qpn_to_addr(struct efa_av *av, uint16_t ahn, uint16_t qpn);
 
 struct fi_provider *init_lower_efa_prov();
+
+ssize_t efa_cq_readfrom(struct fid_cq *cq_fid, void *buf, size_t count, fi_addr_t *src_addr);
+
+ssize_t efa_cq_readerr(struct fid_cq *cq_fid, struct fi_cq_err_entry *entry, uint64_t flags);
 
 #endif /* EFA_H */
