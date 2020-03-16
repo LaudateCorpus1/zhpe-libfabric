@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2014 Intel Corporation, Inc.  All rights reserved.
- * Copyright (c) 2017-2019 Hewlett Packard Enterprise Development LP.  All rights reserved.
+ * Copyright (c) 2017-2020 Hewlett Packard Enterprise Development LP.  All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -33,470 +33,802 @@
 
 #include <zhpe.h>
 
-#define ZHPE_LOG_DBG(...) _ZHPE_LOG_DBG(FI_LOG_EP_DATA, __VA_ARGS__)
-#define ZHPE_LOG_ERROR(...) _ZHPE_LOG_ERROR(FI_LOG_EP_DATA, __VA_ARGS__)
+#define ZHPE_SUBSYS	FI_LOG_EP_DATA
 
-int zhpe_check_user_rma(const struct fi_rma_iov *urma, size_t urma_cnt,
-			uint32_t qaccess,
-			struct zhpe_iov_state *rstate, size_t riov_max,
-			size_t *total_len, struct zhpe_conn *conn)
+/* Assumptions. */
+static_assert(ZHPE_EP_MAX_IOV == 2, "iov_len");
+
+int zhpe_compare_mem_tkeys(struct ofi_rbmap *map, void *key, void *data)
 {
-	int			ret = 0;
-	struct zhpe_iov		*riov = rstate->viov;
-	size_t			i;
-	size_t			j;
-	struct zhpe_rkey_data	*rkey;
-	struct zhpe_key		zkey;
+	int			ret;
+	struct zhpe_mem_tree_key *k1 = key;
+	struct zhpe_mem_tree_key *k2 = data;
 
-	*total_len = 0;
-	for (i = 0, j = 0; i < urma_cnt; i++) {
-		if (OFI_UNLIKELY(!urma[i].len))
-			continue;
-		if (urma[i].len > ZHPE_EP_MAX_IOV_LEN || j >= riov_max) {
-			ret = -FI_EMSGSIZE;
-			goto done;
-		}
-		riov[j].iov_raddr = urma[i].addr;
-		riov[j].iov_len = urma[i].len;
-		*total_len += urma[i].len;
-		riov[j].iov_key = urma[i].key;
-		zhpe_ziov_to_zkey(&riov[j], &zkey);
-		rkey = zhpe_conn_rkey_get(conn, &zkey);
-		if (!rkey) {
-			if (conn->fam) {
-				ret = -FI_ENOKEY;
-				goto done;
-			}
-			rstate->missing |= (1U << j);
-			rstate->cnt = ++j;
-			continue;
-		}
-		riov[j].iov_rkey = rkey;
-		ret = zhpeq_rem_key_access(rkey->kdata,
-					   riov[j].iov_raddr, riov[j].iov_len,
-					   qaccess, &riov[j].iov_zaddr);
-		rstate->cnt = ++j;
-		if (ret < 0)
-			goto done;
-	}
- done:
+	ret = arithcmp(k1->rem_gcid, k2->rem_gcid);
+	if (ret)
+		return ret;
+	ret = arithcmp(k1->rem_rspctxid, k2->rem_rspctxid);
+	if (ret)
+		return ret;
+	ret = arithcmp(k1->key, k2->key);
+
 	return ret;
 }
 
-static inline ssize_t do_rma_msg(struct fid_ep *fid_ep,
-				 const struct fi_msg_rma *msg,
-				 uint64_t flags)
+void zhpe_rma_rkey_free(struct zhpe_rkey *rkey)
 {
-	int64_t			ret = -FI_EINVAL;
-	int64_t			tindex = -1;
-	struct zhpe_pe_entry	*pe_entry;
-	struct zhpe_conn	*conn;
-	struct zhpe_tx_ctx	*tx_ctx;
-	uint64_t		rma_len;
-	uint64_t		op_flags;
-	struct zhpe_ep		*zep;
-	struct zhpe_ep_attr	*zep_attr;
-	struct zhpe_msg_hdr	ohdr;
+	/* rkey->conn->zctx lock must be held. */
+	if (rkey->qkdata) {
+		zhpeq_qkdata_free(rkey->qkdata);
+		zhpe_send_key_release(rkey->conn, rkey->tkey.key);
+	}
+	free(rkey);
+}
 
-	zhpe_stats_start(zhpe_stats_subid(RMA, 0));
+void zhpe_rma_rkey_import(struct zhpe_conn *conn, uint64_t key,
+			  const char *blob, size_t blob_len)
+{
+	/* conn->zctx lock must be held. */
+	struct zhpe_ctx		*zctx = conn->zctx;
+	struct zhpe_mem_tree_key tkey = {
+		.rem_gcid	= conn->tkey.rem_gcid,
+		.rem_rspctxid	= conn->rem_rspctxid,
+		.key		= key,
+	};
+	struct ofi_rbnode	*rbnode;
+	struct zhpe_rkey	*rkey;
+	struct zhpe_rkey_wait	*rkey_wait;
+	struct dlist_entry	*next;
+	int			status;
+	int			rc;
 
-	switch (fid_ep->fid.fclass) {
-
-	case FI_CLASS_EP:
-		zep = fid2zep(&fid_ep->fid);
-		tx_ctx = zep->attr->tx_ctx;
-		zep_attr = zep->attr;
-		op_flags = zep->tx_attr.op_flags;
-		break;
-
-	case FI_CLASS_TX_CTX:
-		tx_ctx = container_of(fid_ep, struct zhpe_tx_ctx, ctx);
-		zep_attr = tx_ctx->ep_attr;
-		op_flags = tx_ctx->attr.op_flags;
-		break;
-
-	default:
-		zhpe_stats_stop(zhpe_stats_subid(RMA, 0));
-		ZHPE_LOG_ERROR("Invalid EP type\n");
-		goto done;
+	/* Sequencing and locking on the sender means the entry must exist. */
+	rbnode = ofi_rbmap_find(&zctx->rkey_tree, &tkey);
+	assert_always(rbnode != NULL);
+	rkey = rbnode->data;
+	if (OFI_LIKELY(blob_len)) {
+		rc = zhpeq_qkdata_import(zctx2zdom(zctx)->zqdom,
+					 conn->addr_cookie, blob, blob_len,
+					 &rkey->qkdata);
+		assert_always(!rc);
+		rc = zhpeq_zmmu_reg(rkey->qkdata);
+		assert_always(!rc);
+		if (conn->rem_rma_flags & FI_ZHPE_RMA_ZERO_OFF)
+			rkey->offset = rkey->qkdata->z.vaddr;
+		status = 0;
+	} else {
+		ofi_rbmap_delete(&zctx->rkey_tree, rbnode);
+		status = -FI_ENOKEY;
 	}
 
-	if (!tx_ctx->enabled) {
-		ret = -FI_EOPBADSTATE;
-		goto done;
+	dlist_foreach_container_safe(&rkey->rkey_wait_list,
+				     struct zhpe_rkey_wait, rkey_wait, dentry,
+				     next) {
+		rkey_wait->handler(rkey_wait->handler_arg, status);
+		dlist_remove(&rkey_wait->dentry);
+		free(rkey_wait);
 	}
 
-	if (msg->iov_count > ZHPE_EP_MAX_IOV_LIMIT)
-		goto done;
+	if (OFI_UNLIKELY(status < 0))
+		zhpe_rma_rkey_free(rkey);
+}
 
-	if (msg->rma_iov_count > ZHPE_EP_MAX_IOV_LIMIT)
-		goto done;
+void zhpe_rma_rkey_revoke(struct zhpe_conn *conn, uint64_t key)
+{
+	/* conn->zctx lock must be held. */
+	struct zhpe_ctx		*zctx = conn->zctx;
+	struct zhpe_mem_tree_key tkey = {
+		.rem_gcid	= conn->tkey.rem_gcid,
+		.rem_rspctxid	= conn->rem_rspctxid,
+		.key		= key,
+	};
+	struct ofi_rbnode	*rbnode;
+	struct zhpe_rkey	*rkey;
 
-	if (OFI_LIKELY(!(flags & ZHPE_TRIGGERED_OP))) {
-		switch (flags & (FI_READ | FI_WRITE)) {
+	/* Sequencing and locking on the sender means the entry must exist. */
+	rbnode = ofi_rbmap_find(&zctx->rkey_tree, &tkey);
+	assert_always(rbnode);
+	rkey = rbnode->data;
+	ofi_rbmap_delete(&zctx->rkey_tree, rbnode);
+	zhpe_rma_rkey_put(rkey);
+}
 
-		case FI_READ:
-			if (flags &
-			    ~(ZHPE_NO_COMPLETION | ZHPE_USE_OP_FLAGS |
-			      FI_COMPLETION | FI_TRIGGER |
-			      FI_FENCE | FI_RMA | FI_READ))
-				goto done;
-			if (op_flags & FI_RMA_EVENT)
-				flags |= FI_REMOTE_READ;
-			break;
+struct zhpe_rkey *
+zhpe_rma_rkey_lookup(struct zhpe_conn *conn, uint64_t key,
+		     void *(*wait_prep)(void *prep_arg),
+		     void (*wait_handler)(void *handler_arg, int status),
+		     void *prep_arg)
+{
+	struct zhpe_rkey	*rkey;
+	struct zhpe_ctx		*zctx = conn->zctx;
+	struct zhpe_mem_tree_key tkey = {
+		.rem_gcid	= conn->tkey.rem_gcid,
+		.rem_rspctxid	= conn->rem_rspctxid,
+		.key		= key,
+	};
+	struct zhpe_rkey_wait   *rkey_wait;
+	struct ofi_rbnode	*rbnode;
+	int			rc;
 
-		case FI_WRITE:
-			if (flags &
-			    ~(ZHPE_NO_COMPLETION | ZHPE_USE_OP_FLAGS |
-			      FI_COMPLETION | FI_TRIGGER |
-			      FI_FENCE | FI_RMA | FI_WRITE |
-			      FI_INJECT | FI_INJECT_COMPLETE |
-			      FI_TRANSMIT_COMPLETE | FI_DELIVERY_COMPLETE |
-			      FI_REMOTE_CQ_DATA))
-				goto done;
-			if (op_flags & FI_RMA_EVENT)
-				flags |= FI_REMOTE_WRITE;
-			break;
+	rbnode = ofi_rbmap_find(&zctx->rkey_tree, &tkey);
+	if (OFI_UNLIKELY(!rbnode)) {
+		rkey = xmalloc(sizeof(*rkey));
+		rkey->tkey = tkey;
+		rkey->conn = conn;
+		rkey->offset = 0;
+		rkey->qkdata = NULL;
+		dlist_init(&rkey->rkey_wait_list);
+		rkey->ref = 2;
+		rc = ofi_rbmap_insert(&zctx->rkey_tree, &tkey, rkey, NULL);
+		assert_always(!rc);
+		zhpe_send_key_request(conn, &key, 1);
+	} else {
+		rkey = rbnode->data;
+		zhpe_rma_rkey_get(rkey);
+		if (OFI_LIKELY(rkey->qkdata != NULL))
+			return rkey;
+	}
 
-		default:
-			goto done;
+	/* Build the wait list entry: wait_prep returns the handler_arg. */
+	rkey_wait = xmalloc(sizeof(*rkey_wait));
+	rkey_wait->handler = wait_handler;
+	rkey_wait->handler_arg = wait_prep(prep_arg);
+	dlist_insert_tail(&rkey_wait->dentry, &rkey->rkey_wait_list);
+
+	return rkey;
+}
+
+static void rma_rkey_fixup(struct zhpe_rma_entry *rma_entry)
+{
+	int			rc;
+	struct zhpe_iov3	*riov;
+	uint32_t		qaccess;
+
+	if (OFI_UNLIKELY(!rma_entry->rstate.cnt))
+		return;
+	qaccess = (rma_entry->tx_entry.rma_get ? ZHPEQ_MR_GET_REMOTE :
+		   ZHPEQ_MR_PUT_REMOTE);
+	riov = rma_entry->riov;
+	riov->iov_base += riov->iov_rkey->offset;
+	rc = zhpeq_rem_key_access(riov->iov_rkey->qkdata, riov->iov_base,
+				  riov->iov_len, qaccess, &riov->iov_base);
+	zhpe_cstat_update_status(&rma_entry->tx_entry.cstat, rc);
+	if (rma_entry->rstate.cnt > 1) {
+		riov++;
+		riov->iov_base += riov->iov_rkey->offset;
+		rc = zhpeq_rem_key_access(riov->iov_rkey->qkdata,
+					  riov->iov_base, riov->iov_len,
+					  qaccess, &riov->iov_base);
+		zhpe_cstat_update_status(&rma_entry->tx_entry.cstat, rc);
+	}
+}
+
+static void *rma_rkey_wait_prep(void *prep_arg)
+{
+	struct zhpe_rma_entry	*rma_entry = prep_arg;
+	struct zhpe_tx_entry	*tx_entry = &rma_entry->tx_entry;
+
+	tx_entry->cstat.completions++;
+	tx_entry->cstat.flags |= ZHPE_CS_FLAG_KEY_WAIT;
+
+	return rma_entry;
+}
+
+static void rma_rkey_wait_handler(void *handler_arg, int status)
+{
+	struct zhpe_rma_entry	*rma_entry = handler_arg;
+	struct zhpe_tx_entry	*tx_entry = &rma_entry->tx_entry;
+
+	zhpe_cstat_update_status(&tx_entry->cstat, status);
+	if (tx_entry->cstat.completions-- > 1)
+		return;
+	assert(!tx_entry->cstat.completions);
+	if (OFI_LIKELY(!tx_entry->cstat.status))
+		rma_rkey_fixup(rma_entry);
+	tx_entry->cstat.flags &= ~ZHPE_CS_FLAG_KEY_WAIT;
+	if (OFI_UNLIKELY(tx_entry->cstat.flags & ZHPE_CS_FLAG_FENCE))
+		return;
+
+	zhpe_rma_tx_start(rma_entry);
+}
+
+static void rma_rkey_lookup(struct zhpe_rma_entry *rma_entry,
+			    const struct fi_rma_iov *urma)
+
+{
+	struct zhpe_tx_entry	*tx_entry = &rma_entry->tx_entry;
+	struct zhpe_iov3	*riov;
+
+	riov = &rma_entry->riov[rma_entry->rstate.cnt++];
+	riov->iov_rkey = zhpe_rma_rkey_lookup(tx_entry->conn, urma->key,
+					      rma_rkey_wait_prep,
+					      rma_rkey_wait_handler, rma_entry);
+	riov->iov_base = urma->addr;
+	riov->iov_len = urma->len;
+}
+
+void zhpe_rma_tx_start(struct zhpe_rma_entry *rma_entry)
+{
+	struct zhpe_tx_entry	*tx_entry = &rma_entry->tx_entry;
+	struct zhpe_conn	*conn = tx_entry->conn;
+
+	/* conn->zctx lock must be held. */
+	if (OFI_LIKELY(!tx_entry->cstat.status)) {
+		if (!(tx_entry->cstat.flags & ZHPE_CS_FLAG_RMA_DONE)) {
+			if (OFI_LIKELY(!conn->eflags)) {
+				zhpe_iov_rma(tx_entry, ZHPE_SEG_MAX_BYTES,
+					     ZHPE_SEG_MAX_OPS);
+				return;
+			}
+			tx_entry->cstat.status =
+				zhpe_conn_eflags_error(conn->eflags);
 		}
-
-		flags = zhpe_tx_fixup_completion(flags, op_flags, tx_ctx);
+		if (OFI_UNLIKELY(conn->rem_rma_flags & rma_entry->op_flags))
+			zhpe_send_writedata(conn, rma_entry->op_flags,
+					    rma_entry->cq_data);
 	}
 
-	if (flags & FI_TRIGGER) {
-		ret = zhpe_queue_rma_op(fid_ep, msg, flags,
-					((flags & FI_READ) ?
-					 FI_OP_READ : FI_OP_WRITE));
-		if (ret != 1)
-			goto done;
-	}
+	zhpe_rma_complete(rma_entry);
+}
 
+static void rma_iov_start(struct zhpe_rma_entry *rma_entry, uint64_t opt_flags,
+			  const struct fi_rma_iov *urma, size_t urma_cnt)
+{
+	struct zhpe_tx_entry	*tx_entry = &rma_entry->tx_entry;
+	struct zhpe_conn	*conn = tx_entry->conn;
+	struct zhpe_ctx		*zctx = conn->zctx;
+	struct zhpe_tx_queue_entry *txqe;
+
+	assert(urma_cnt <= ZHPE_EP_MAX_IOV);
+	if (OFI_LIKELY(urma_cnt > 0)) {
+		rma_rkey_lookup(rma_entry,  &urma[0]);
+		if (OFI_LIKELY(urma_cnt > 1))
+			rma_rkey_lookup(rma_entry, &urma[1]);
+	}
+	/*
+	 * The context tracks the notional RMA outstanding,
+	 * not the number of actual I/Os.
+	 */
+	/* Optimize for immediate send. */
+	zhpe_iov_state_reset(&rma_entry->lstate);
+	zhpe_iov_state_reset(&rma_entry->rstate);
+	zhpe_conn_fence_check(tx_entry, opt_flags, rma_entry->op_flags);
+
+	if (OFI_UNLIKELY(tx_entry->cstat.flags & ZHPE_CS_FLAG_FENCE)) {
+		tx_entry->cstat.flags |= ZHPE_CS_FLAG_QUEUED;
+		zctx->tx_queued++;
+		txqe = zhpe_buf_alloc(&zctx->tx_queue_pool);
+		txqe->tx_entry = tx_entry;
+		dlist_insert_tail(&txqe->dentry, &conn->tx_queue);
+	} else if (OFI_LIKELY(!tx_entry->cstat.completions)) {
+		rma_rkey_fixup(rma_entry);
+		zhpe_rma_tx_start(rma_entry);
+	}
+	zctx->pe_ctx_ops->signal(zctx);
+}
+
+
+static int rma_iov_op(struct zhpe_ctx *zctx, void *op_context, uint64_t cq_data,
+		      uint64_t op_flags, uint64_t opt_flags, bool get,
+		      const struct iovec *uiov, void **udesc, size_t uiov_cnt,
+		      const struct fi_rma_iov *urma, size_t urma_cnt,
+		      uint64_t total, fi_addr_t rem_addr)
+{
+	int			rc;
+	struct zhpe_conn	*conn;
+	struct zhpe_rma_entry	*rma_entry;
+
+	if (OFI_UNLIKELY(zctx->zep->disabled))
+		return -FI_EOPBADSTATE;
+
+	zctx_lock(zctx);
 	zhpe_stats_start(zhpe_stats_subid(RMA, 10));
-	ret = zhpe_ep_get_conn(zep_attr, msg->addr, &conn);
+	conn = zhpe_conn_av_lookup(zctx, rem_addr);
 	zhpe_stats_stop(zhpe_stats_subid(RMA, 10));
-	if (ret < 0)
-		goto done;
 
-	ret = zhpe_tx_reserve(conn->ztx, 0);
-	if (ret < 0)
-		goto done;
-	tindex = ret;
-	pe_entry = &conn->ztx->pentries[tindex];
-	pe_entry->pe_root.handler = zhpe_pe_tx_handle_rma;
-	pe_entry->pe_root.conn = conn;
-	pe_entry->pe_root.context = msg->context;
-	pe_entry->pe_root.compstat.status = 0;
-	pe_entry->pe_root.compstat.completions = 1;
-	pe_entry->pe_root.compstat.flags |= ZHPE_PE_KEY_WAIT;
-	pe_entry->cq_data = msg->data;
-	pe_entry->rx_id = zhpe_get_rx_id(tx_ctx, msg->addr);
+	zhpe_stats_start(zhpe_stats_subid(RMA, 40));
+	rma_entry = zhpe_rma_entry_alloc(zctx);
+	rma_entry->tx_entry.conn = conn;
+	rma_entry->tx_entry.rma_get = get;
+	rma_entry->op_flags = op_flags;
+	rma_entry->op_context = op_context;
 
-	zhpe_stats_start(zhpe_stats_subid(RMA, 20));
-	ret = zhpe_check_user_iov(msg->msg_iov, msg->desc, msg->iov_count,
-				  ((flags & FI_READ) ?
-				   ZHPEQ_MR_GET : ZHPEQ_MR_PUT),
-				  &pe_entry->lstate, ZHPE_EP_MAX_IOV_LIMIT,
-				  &pe_entry->rem);
-	zhpe_stats_stop(zhpe_stats_subid(RMA, 20));
-	if (ret < 0)
-		goto done;
+	if (OFI_UNLIKELY(total <= ZHPEQ_MAX_IMM)) {
+		if (OFI_LIKELY(total)) {
+			zhpe_stats_start(zhpe_stats_subid(RMA, 20));
+			zhpe_get_uiov_buffered(uiov, udesc, uiov_cnt,
+					       &rma_entry->lstate);
+			zhpe_stats_stop(zhpe_stats_subid(RMA, 20));
+			if (!get && (op_flags & FI_INJECT)) {
+				zhpe_copy_iov_to_mem(rma_entry->inline_data,
+						     total, &rma_entry->lstate);
+				zhpe_iov_state_reset(&rma_entry->lstate);
+				rma_entry->lstate.cnt = 1;
+				rma_entry->liov[0].iov_base =
+					(uintptr_t)rma_entry->inline_data;
+				rma_entry->liov[0].iov_len = total;
+			}
+		} else {
+			/* Too much trouble to special case any further. */
+			rma_entry->lstate.cnt = 0;
+			rma_entry->tx_entry.cstat.flags |=
+				ZHPE_CS_FLAG_RMA_DONE;
+		}
+	} else {
+		zhpe_stats_start(zhpe_stats_subid(RMA, 20));
+		zctx_unlock(zctx);
+		rc = zhpe_get_uiov(zctx, uiov, udesc, uiov_cnt,
+				   (get ? ZHPEQ_MR_GET : ZHPEQ_MR_PUT),
+				   rma_entry->liov);
+		zctx_lock(zctx);
+		zhpe_stats_stop(zhpe_stats_subid(RMA, 20));
+		if (OFI_UNLIKELY(rc < 0)) {
+			zhpe_rma_entry_free(rma_entry);
+			zctx_unlock(zctx);
+
+			return rc;
+		}
+		rma_entry->lstate.cnt = rc;
+		rma_entry->lstate.held = true;
+	}
+
+	/* Check eflags after we may have dropped and reacquired the lock. */
+	if (OFI_UNLIKELY(conn->eflags)) {
+		rc = zhpe_conn_eflags_error(conn->eflags);
+		zhpe_rma_entry_free(rma_entry);
+		zctx_unlock(zctx);
+		return rc;
+	}
 
 	zhpe_stats_start(zhpe_stats_subid(RMA, 30));
-	ret = zhpe_check_user_rma(msg->rma_iov, msg->rma_iov_count,
-				  ((flags & FI_READ) ?
-				   ZHPEQ_MR_GET_REMOTE : ZHPEQ_MR_PUT_REMOTE),
-				  &pe_entry->rstate, ZHPE_EP_MAX_IOV_LIMIT,
-				  &rma_len, conn);
+	rma_iov_start(rma_entry, opt_flags, urma, urma_cnt);
 	zhpe_stats_stop(zhpe_stats_subid(RMA, 30));
-	if (ret < 0)
-		goto done;
-	if (pe_entry->rem != rma_len) {
-		ret = -FI_EINVAL;
-		goto done;
-	}
+	zctx_unlock(zctx);
 
-	if (pe_entry->rem <= ZHPEQ_IMM_MAX) {
-		zhpe_stats_start(zhpe_stats_subid(RMA, 40));
-		flags |= FI_INJECT;
-		if (flags & FI_WRITE) {
-			copy_iov_to_mem(pe_entry->inline_data,
-					&pe_entry->lstate, pe_entry->rem);
-			zhpe_pe_tx_report_complete(pe_entry,
-						   FI_INJECT_COMPLETE);
-		}
-		zhpe_stats_stop(zhpe_stats_subid(RMA, 40));
-	} else if (pe_entry->lstate.missing) {
-		zhpe_stats_start(zhpe_stats_subid(RMA, 50));
-		ret = zhpe_mr_reg_int_iov(zep_attr->domain, &pe_entry->lstate);
-		zhpe_stats_stop(zhpe_stats_subid(RMA, 50));
-		if (ret < 0)
-			goto done;
-	}
-
-	pe_entry->flags = flags;
-	if (pe_entry->rstate.missing) {
-		zhpe_stats_start(zhpe_stats_subid(RMA, 60));
-		ohdr.rx_id = pe_entry->rx_id;
-		ohdr.pe_entry_id = htons(tindex);
-		zhpe_pe_rkey_request(conn, ohdr, &pe_entry->rstate,
-				     &pe_entry->pe_root.compstat.completions);
-		zhpe_stats_stop(zhpe_stats_subid(RMA, 60));
-	} else {
-		zhpe_stats_start(zhpe_stats_subid(RMA, 70));
-		zhpe_pe_tx_handle_rma(&pe_entry->pe_root, NULL);
-		zhpe_stats_stop(zhpe_stats_subid(RMA, 70));
-	}
- done:
-	if (ret < 0 && tindex != -1)
-		zhpe_tx_release(pe_entry);
-	zhpe_stats_stop(zhpe_stats_subid(RMA, 0));
-
-	return ret;
+	return 0;
 }
 
-ssize_t zhpe_do_rma_msg(struct fid_ep *ep, const struct fi_msg_rma *msg,
-			uint64_t flags)
-{
-	/* Used by trigger: flags are assumed to be correct. */
-	return do_rma_msg(ep, msg, flags);
+#define RD_FLAGS	(ZHPE_EP_TX_OP_FLAGS | FI_MORE)
+#define WR_FLAGS	(RD_FLAGS | FI_REMOTE_CQ_DATA)
+
+#define RMA_OPS(_name, _opt)						\
+									\
+static ssize_t zhpe_rma_readmsg##_name(struct fid_ep *fid_ep,		\
+				       const struct fi_msg_rma *msg,	\
+				       uint64_t flags)			\
+{									\
+	int			ret;					\
+	uint64_t		opt_flags = (_opt);			\
+	struct zhpe_ctx		*zctx;					\
+	uint64_t		op_flags;				\
+	uint64_t		bad_mask;				\
+	uint64_t		total_uiov;				\
+	uint64_t		total;					\
+									\
+	zhpe_stats_start(zhpe_stats_subid(RMA, 0));			\
+									\
+	bad_mask = ~(RD_FLAGS |						\
+		     ((opt_flags & ZHPE_OPT_FENCE) ? FI_FENCE : 0));	\
+	if (OFI_UNLIKELY(!msg || msg->iov_count > ZHPE_EP_MAX_IOV ||	\
+			 (msg->iov_count && !msg->msg_iov) ||		\
+			 msg->rma_iov_count > ZHPE_EP_MAX_IOV ||	\
+			 (msg->rma_iov_count && !msg->rma_iov) ||	\
+			 (flags & bad_mask))) {				\
+		ret = -FI_EINVAL;					\
+		goto done;						\
+	}								\
+									\
+	ret = zhpe_get_uiov_len(msg->msg_iov, msg->iov_count,		\
+				&total_uiov);				\
+	if (OFI_UNLIKELY(ret < 0))					\
+		goto done;						\
+	ret = zhpe_get_urma_len(msg->rma_iov, msg->rma_iov_count,	\
+				&total);				\
+	if (OFI_UNLIKELY(ret < 0))					\
+		goto done;						\
+	if (total_uiov != total) {					\
+		ret = -FI_EINVAL;					\
+		goto done;						\
+	}								\
+									\
+	zctx = fid2zctx(&fid_ep->fid);					\
+	op_flags = flags | zctx->util_ep.tx_msg_flags | FI_READ;	\
+									\
+	ret = rma_iov_op(zctx, msg->context, msg->data,			\
+			 op_flags, opt_flags, true,			\
+			 msg->msg_iov, msg->desc, msg->iov_count,	\
+			 msg->rma_iov, msg->rma_iov_count,		\
+			 total, msg->addr);				\
+									\
+ done:									\
+	zhpe_stats_stop(zhpe_stats_subid(RMA, 0));			\
+									\
+	return ret;							\
+}									\
+									\
+static ssize_t zhpe_rma_readv##_name(struct fid_ep *fid_ep,		\
+				     const struct iovec *iov,		\
+				     void **desc, size_t count,		\
+				     fi_addr_t src_addr,		\
+				     uint64_t raddr, uint64_t rkey,	\
+				     void *op_context)			\
+{									\
+	int			ret;					\
+	uint64_t		opt_flags = (_opt);			\
+	struct zhpe_ctx		*zctx;					\
+	uint64_t		op_flags;				\
+	struct fi_rma_iov	rma_iov;				\
+	uint64_t		total;					\
+									\
+	zhpe_stats_start(zhpe_stats_subid(RMA, 0));			\
+									\
+	if (OFI_UNLIKELY(count > ZHPE_EP_MAX_IOV ||			\
+			 (count && (!iov || !desc)))) {			\
+		ret = -FI_EINVAL;					\
+		goto done;						\
+	}								\
+									\
+	ret = zhpe_get_uiov_len(iov, count, &total);			\
+	if (OFI_UNLIKELY(ret < 0))					\
+		goto done;						\
+									\
+	zctx = fid2zctx(&fid_ep->fid);					\
+	op_flags = zctx->util_ep.tx_op_flags | FI_READ;			\
+									\
+	rma_iov.addr = raddr;						\
+	rma_iov.key = rkey;						\
+	rma_iov.len = total;						\
+									\
+	ret = rma_iov_op(zctx, op_context, 0,				\
+			 op_flags, opt_flags, true,			\
+			 iov, desc, count, &rma_iov, 1,			\
+			 total, src_addr);				\
+									\
+ done:									\
+	zhpe_stats_stop(zhpe_stats_subid(RMA, 0));			\
+									\
+	return ret;							\
+}									\
+									\
+static ssize_t zhpe_rma_read##_name(struct fid_ep *fid_ep, void *buf,	\
+				    size_t len,	void *desc,		\
+				    fi_addr_t src_addr,			\
+				    uint64_t raddr, uint64_t rkey,	\
+				    void *op_context)			\
+{									\
+	int			ret;					\
+	uint64_t		opt_flags = (_opt);			\
+	struct zhpe_ctx		*zctx;					\
+	uint64_t		op_flags;				\
+	struct iovec		msg_iov;				\
+	struct fi_rma_iov	rma_iov;				\
+									\
+	zhpe_stats_start(zhpe_stats_subid(RMA, 0));			\
+									\
+	if (OFI_UNLIKELY(len && !buf)) {				\
+		ret = -FI_EINVAL;					\
+		goto done;						\
+	}								\
+									\
+	zctx = fid2zctx(&fid_ep->fid);					\
+	op_flags = zctx->util_ep.tx_op_flags | FI_READ;			\
+									\
+	msg_iov.iov_base = buf;						\
+	msg_iov.iov_len = len;						\
+									\
+	rma_iov.addr = raddr;						\
+	rma_iov.key = rkey;						\
+	rma_iov.len = len;						\
+									\
+	ret = rma_iov_op(zctx, op_context, 0,				\
+			 op_flags, opt_flags, true,			\
+			 &msg_iov, &desc, 1, &rma_iov, 1,		\
+			 len, src_addr);				\
+									\
+ done:									\
+	zhpe_stats_stop(zhpe_stats_subid(RMA, 0));			\
+									\
+	return ret;							\
+}									\
+									\
+static ssize_t zhpe_rma_writemsg##_name(struct fid_ep *fid_ep,		\
+					const struct fi_msg_rma *msg,	\
+					uint64_t flags)			\
+{									\
+	int			ret;					\
+	uint64_t		opt_flags = (_opt);			\
+	struct zhpe_ctx		*zctx;					\
+	uint64_t		op_flags;				\
+	uint64_t		bad_mask;				\
+	uint64_t		total_uiov;				\
+	uint64_t		total;					\
+									\
+	zhpe_stats_start(zhpe_stats_subid(RMA, 0));			\
+									\
+	bad_mask = ~(WR_FLAGS |						\
+		     ((opt_flags & ZHPE_OPT_FENCE) ? FI_FENCE : 0));	\
+	if (OFI_UNLIKELY(!msg || msg->iov_count > ZHPE_EP_MAX_IOV ||	\
+			 (msg->iov_count && !msg->msg_iov) ||		\
+			 msg->rma_iov_count > ZHPE_EP_MAX_IOV ||	\
+			 (msg->rma_iov_count && !msg->rma_iov) ||	\
+			 (flags & bad_mask))) {				\
+		ret = -FI_EINVAL;					\
+		goto done;						\
+	}								\
+									\
+	ret = zhpe_get_uiov_len(msg->msg_iov, msg->iov_count,		\
+				&total_uiov);				\
+	if (OFI_UNLIKELY(ret < 0))					\
+		goto done;						\
+	ret = zhpe_get_urma_len(msg->rma_iov, msg->rma_iov_count,	\
+				&total);				\
+	if (OFI_UNLIKELY(ret < 0))					\
+		goto done;						\
+	if (total_uiov != total) {					\
+		ret = -FI_EINVAL;					\
+		goto done;						\
+	}								\
+									\
+	zctx = fid2zctx(&fid_ep->fid);					\
+	op_flags = flags | zctx->util_ep.tx_msg_flags | FI_WRITE;	\
+									\
+	ret = rma_iov_op(zctx, msg->context, msg->data,			\
+			 op_flags, opt_flags, false,			\
+			 msg->msg_iov, msg->desc, msg->iov_count,	\
+			 msg->rma_iov, msg->rma_iov_count,		\
+			 total, msg->addr);				\
+									\
+ done:									\
+	zhpe_stats_stop(zhpe_stats_subid(RMA, 0));			\
+									\
+	return ret;							\
+}									\
+									\
+static ssize_t zhpe_rma_writev##_name(struct fid_ep *fid_ep,		\
+				      const struct iovec *iov,		\
+				      void **desc, size_t count,	\
+				      fi_addr_t dst_addr,		\
+				      uint64_t raddr, uint64_t rkey,	\
+				      void *op_context)			\
+{									\
+	int			ret;					\
+	uint64_t		opt_flags = (_opt);			\
+	struct zhpe_ctx		*zctx;					\
+	uint64_t		op_flags;				\
+	struct fi_rma_iov	rma_iov;				\
+	uint64_t		total;					\
+									\
+	zhpe_stats_start(zhpe_stats_subid(RMA, 0));			\
+									\
+	if (OFI_UNLIKELY(count > ZHPE_EP_MAX_IOV ||			\
+			 (count && (!iov || !desc)))) {			\
+		ret = -FI_EINVAL;					\
+		goto done;						\
+	}								\
+									\
+	ret = zhpe_get_uiov_len(iov, count, &total);			\
+	if (OFI_UNLIKELY(ret < 0))					\
+		goto done;						\
+									\
+	zctx = fid2zctx(&fid_ep->fid);					\
+	op_flags = zctx->util_ep.tx_op_flags | FI_WRITE;		\
+									\
+	rma_iov.addr = raddr;						\
+	rma_iov.key = rkey;						\
+	rma_iov.len = total;						\
+									\
+	ret = rma_iov_op(zctx, op_context, 0,				\
+			 op_flags, opt_flags, false,			\
+			 iov, desc, count, &rma_iov, 1,			\
+			 total, dst_addr);				\
+									\
+ done:									\
+	zhpe_stats_stop(zhpe_stats_subid(RMA, 0));			\
+									\
+	return ret;							\
+}									\
+									\
+static ssize_t zhpe_rma_write##_name(struct fid_ep *fid_ep,		\
+				     const void *buf, size_t len,	\
+				     void *desc, fi_addr_t dst_addr,	\
+				     uint64_t raddr, uint64_t rkey,	\
+				     void *op_context)			\
+{									\
+	int			ret;					\
+	uint64_t		opt_flags = (_opt);			\
+	struct zhpe_ctx		*zctx;					\
+	uint64_t		op_flags;				\
+	struct iovec		msg_iov;				\
+	struct fi_rma_iov	rma_iov;				\
+									\
+	zhpe_stats_start(zhpe_stats_subid(RMA, 0));			\
+									\
+	if (OFI_UNLIKELY(len && !buf)) {				\
+		ret = -FI_EINVAL;					\
+		goto done;						\
+	}								\
+									\
+	zctx = fid2zctx(&fid_ep->fid);					\
+	op_flags = zctx->util_ep.tx_op_flags | FI_WRITE;		\
+									\
+	msg_iov.iov_base = (void *)buf;					\
+	msg_iov.iov_len = len;						\
+									\
+	rma_iov.addr = raddr;						\
+	rma_iov.key = rkey;						\
+	rma_iov.len = len;						\
+									\
+	ret = rma_iov_op(zctx, op_context, 0,				\
+			 op_flags, opt_flags, false,			\
+			 &msg_iov, &desc, 1, &rma_iov, 1,		\
+			 len, dst_addr);				\
+									\
+ done:									\
+	zhpe_stats_stop(zhpe_stats_subid(RMA, 0));			\
+									\
+	return ret;							\
+}									\
+									\
+static ssize_t zhpe_rma_writedata##_name(struct fid_ep *fid_ep,		\
+					 const void *buf, size_t len,	\
+					 void *desc, uint64_t cq_data,	\
+					 fi_addr_t dst_addr,		\
+					 uint64_t raddr, uint64_t rkey,	\
+					 void *op_context)		\
+{									\
+	int			ret;					\
+	uint64_t		opt_flags = (_opt);			\
+	struct zhpe_ctx		*zctx;					\
+	uint64_t		op_flags;				\
+	struct iovec		msg_iov;				\
+	struct fi_rma_iov	rma_iov;				\
+									\
+	zhpe_stats_start(zhpe_stats_subid(RMA, 0));			\
+									\
+	if (OFI_UNLIKELY(len && !buf)) {				\
+		ret = -FI_EINVAL;					\
+		goto done;						\
+	}								\
+									\
+	zctx = fid2zctx(&fid_ep->fid);					\
+	op_flags = (zctx->util_ep.tx_op_flags | FI_WRITE |		\
+		    FI_REMOTE_CQ_DATA);					\
+									\
+	msg_iov.iov_base = (void *)buf;					\
+	msg_iov.iov_len = len;						\
+									\
+	rma_iov.addr = raddr;						\
+	rma_iov.key = rkey;						\
+	rma_iov.len = len;						\
+									\
+	ret = rma_iov_op(zctx, op_context, cq_data,			\
+			 op_flags, opt_flags, false,			\
+			 &msg_iov, &desc, 1, &rma_iov, 1,		\
+			 len, dst_addr);				\
+									\
+ done:									\
+	zhpe_stats_stop(zhpe_stats_subid(RMA, 0));			\
+									\
+	return ret;							\
+}									\
+									\
+static ssize_t zhpe_rma_inject##_name(struct fid_ep *fid_ep,		\
+				      const void *buf, size_t len,	\
+				      fi_addr_t dst_addr,		\
+				      uint64_t raddr, uint64_t rkey)	\
+{									\
+	int			ret;					\
+	uint64_t		opt_flags = (_opt);			\
+	struct zhpe_ctx		*zctx;					\
+	uint64_t		op_flags;				\
+	struct iovec		msg_iov;				\
+	struct fi_rma_iov	rma_iov;				\
+									\
+	zhpe_stats_start(zhpe_stats_subid(RMA, 0));			\
+									\
+	if (OFI_UNLIKELY(len && !buf)) {				\
+		ret = -FI_EINVAL;					\
+		goto done;						\
+	}								\
+									\
+	if (len > ZHPE_MAX_IMM) {					\
+		ret = -FI_EINVAL;					\
+		goto done;						\
+	}								\
+									\
+	zctx = fid2zctx(&fid_ep->fid);					\
+	op_flags = zctx->util_ep.inject_op_flags | FI_WRITE;		\
+									\
+	msg_iov.iov_base = (void *)buf;					\
+	msg_iov.iov_len = len;						\
+									\
+	rma_iov.addr = raddr;						\
+	rma_iov.key = rkey;						\
+	rma_iov.len = len;						\
+									\
+	ret = rma_iov_op(zctx, NULL, 0,					\
+			 op_flags, opt_flags, false,			\
+			 &msg_iov, NULL, 1, &rma_iov, 1,		\
+			 len, dst_addr);				\
+									\
+	zhpe_stats_stop(zhpe_stats_subid(RMA, 0));			\
+									\
+ done:									\
+	return ret;							\
+}									\
+									\
+static ssize_t								\
+zhpe_rma_injectdata##_name(struct fid_ep *fid_ep,			\
+			   const void *buf, size_t len,			\
+			   uint64_t cq_data, fi_addr_t dst_addr,	\
+			   uint64_t raddr, uint64_t rkey)		\
+{									\
+	int			ret;					\
+	uint64_t		opt_flags = (_opt);			\
+	struct zhpe_ctx		*zctx;					\
+	uint64_t		op_flags;				\
+	struct iovec		msg_iov;				\
+	struct fi_rma_iov	rma_iov;				\
+									\
+	zhpe_stats_start(zhpe_stats_subid(RMA, 0));			\
+									\
+	if (OFI_UNLIKELY(len && !buf)) {				\
+		ret = -FI_EINVAL;					\
+		goto done;						\
+	}								\
+									\
+	if (len > ZHPE_MAX_IMM) {					\
+		ret = -FI_EINVAL;					\
+		goto done;						\
+	}								\
+									\
+	zctx = fid2zctx(&fid_ep->fid);					\
+	op_flags = (zctx->util_ep.inject_op_flags | FI_WRITE |		\
+		    FI_REMOTE_CQ_DATA);					\
+									\
+	msg_iov.iov_base = (void *)buf;					\
+	msg_iov.iov_len = len;						\
+									\
+	rma_iov.addr = raddr;						\
+	rma_iov.key = rkey;						\
+	rma_iov.len = len;						\
+									\
+	ret = rma_iov_op(zctx, NULL, cq_data,				\
+			 op_flags, opt_flags, false,			\
+			 &msg_iov, NULL, 1, &rma_iov, 1,		\
+			 len, dst_addr);				\
+									\
+	zhpe_stats_stop(zhpe_stats_subid(RMA, 0));			\
+									\
+ done:									\
+	return ret;							\
+}									\
+									\
+struct fi_ops_rma zhpe_ep_rma##_name##_ops = {				\
+	.size			= sizeof(struct fi_ops_rma),		\
+	.read			= zhpe_rma_read##_name,			\
+	.readv			= zhpe_rma_readv##_name,		\
+	.readmsg		= zhpe_rma_readmsg##_name,		\
+	.write			= zhpe_rma_write##_name,		\
+	.writev			= zhpe_rma_writev##_name,		\
+	.writemsg		= zhpe_rma_writemsg##_name,		\
+	.inject			= zhpe_rma_inject##_name,		\
+	.injectdata		= zhpe_rma_injectdata##_name,		\
+	.writedata		= zhpe_rma_writedata##_name,		\
 }
 
-static ssize_t zhpe_ep_rma_readmsg(struct fid_ep *ep,
-				   const struct fi_msg_rma *msg,
-				   uint64_t flags)
-{
-	if (flags & (ZHPE_BAD_FLAGS_MASK | FI_WRITE))
-		return -EINVAL;
+RMA_OPS(  , 0);
+RMA_OPS(_f, ZHPE_OPT_FENCE);
 
-	return do_rma_msg(ep, msg, flags | FI_READ);
-}
-
-static ssize_t zhpe_ep_rma_read(struct fid_ep *ep, void *buf, size_t len,
-				void *desc, fi_addr_t src_addr, uint64_t addr,
-				uint64_t key, void *context)
-{
-	struct fi_msg_rma msg;
-	struct iovec msg_iov;
-	struct fi_rma_iov rma_iov;
-
-	memset(&msg, 0, sizeof(msg));
-	msg_iov.iov_base = (void *) buf;
-	msg_iov.iov_len = len;
-	msg.msg_iov = &msg_iov;
-	msg.desc = &desc;
-	msg.iov_count = 1;
-
-	rma_iov.addr = addr;
-	rma_iov.key = key;
-	rma_iov.len = len;
-	msg.rma_iov_count = 1;
-	msg.rma_iov = &rma_iov;
-
-	msg.addr = src_addr;
-	msg.context = context;
-
-	return do_rma_msg(ep, &msg, ZHPE_USE_OP_FLAGS | FI_READ);
-}
-
-static ssize_t zhpe_ep_rma_readv(struct fid_ep *ep, const struct iovec *iov,
-				 void **desc, size_t count,
-				 fi_addr_t src_addr, uint64_t addr,
-				 uint64_t key,void *context)
-{
-	size_t len, i;
-	struct fi_msg_rma msg;
-	struct fi_rma_iov rma_iov;
-
-	memset(&msg, 0, sizeof(msg));
-	msg.msg_iov = iov;
-	msg.desc = desc;
-	msg.iov_count = count;
-	msg.rma_iov_count = 1;
-
-	rma_iov.addr = addr;
-	rma_iov.key = key;
-
-	for (i = 0, len = 0; i < count; i++)
-		len += iov[i].iov_len;
-	rma_iov.len = len;
-
-	msg.rma_iov = &rma_iov;
-	msg.addr = src_addr;
-	msg.context = context;
-
-	return do_rma_msg(ep, &msg, ZHPE_USE_OP_FLAGS | FI_READ);
-}
-
-static ssize_t zhpe_ep_rma_writemsg(struct fid_ep *ep,
-				    const struct fi_msg_rma *msg,
-				    uint64_t flags)
-{
-	if (flags & (ZHPE_BAD_FLAGS_MASK | FI_READ))
-		return -EINVAL;
-
-	return do_rma_msg(ep, msg, flags | FI_WRITE);
-}
-
-static ssize_t zhpe_ep_rma_write(struct fid_ep *ep, const void *buf,
-				 size_t len, void *desc, fi_addr_t dest_addr,
-				 uint64_t addr, uint64_t key, void *context)
-{
-	struct fi_msg_rma msg;
-	struct iovec msg_iov;
-	struct fi_rma_iov rma_iov;
-
-	memset(&msg, 0, sizeof(msg));
-	msg_iov.iov_base = (void *) buf;
-	msg_iov.iov_len = len;
-
-	msg.msg_iov = &msg_iov;
-	msg.desc = &desc;
-	msg.iov_count = 1;
-
-	rma_iov.addr = addr;
-	rma_iov.key = key;
-	rma_iov.len = len;
-
-	msg.rma_iov_count = 1;
-	msg.rma_iov = &rma_iov;
-
-	msg.addr = dest_addr;
-	msg.context = context;
-
-	return do_rma_msg(ep, &msg, ZHPE_USE_OP_FLAGS | FI_WRITE);
-}
-
-static ssize_t zhpe_ep_rma_writev(struct fid_ep *ep, const struct iovec *iov,
-				  void **desc, size_t count,
-				  fi_addr_t dest_addr,
-				  uint64_t addr, uint64_t key, void *context)
-{
-	size_t i;
-	size_t len;
-	struct fi_msg_rma msg;
-	struct fi_rma_iov rma_iov;
-
-	memset(&msg, 0, sizeof(msg));
-	msg.msg_iov = iov;
-	msg.desc = desc;
-	msg.iov_count = count;
-	msg.rma_iov_count = 1;
-
-	for (i = 0, len = 0; i < count; i++)
-		len += iov[i].iov_len;
-
-	rma_iov.addr = addr;
-	rma_iov.key = key;
-	rma_iov.len = len;
-
-	msg.rma_iov = &rma_iov;
-	msg.context = context;
-	msg.addr = dest_addr;
-
-	return do_rma_msg(ep, &msg, ZHPE_USE_OP_FLAGS | FI_WRITE);
-}
-
-static ssize_t zhpe_ep_rma_writedata(struct fid_ep *ep, const void *buf,
-				     size_t len, void *desc, uint64_t data,
-				     fi_addr_t dest_addr, uint64_t addr,
-				     uint64_t key, void *context)
-{
-	struct fi_msg_rma msg;
-	struct iovec msg_iov;
-	struct fi_rma_iov rma_iov;
-
-	msg_iov.iov_base = (void *) buf;
-	msg_iov.iov_len = len;
-	msg.desc = &desc;
-	msg.iov_count = 1;
-	msg.rma_iov_count = 1;
-
-	rma_iov.addr = addr;
-	rma_iov.key = key;
-	rma_iov.len = len;
-
-	msg.rma_iov = &rma_iov;
-	msg.msg_iov = &msg_iov;
-
-	msg.addr = dest_addr;
-	msg.context = context;
-	msg.data = data;
-
-	return do_rma_msg(ep, &msg,
-			  FI_REMOTE_CQ_DATA | ZHPE_USE_OP_FLAGS | FI_WRITE);
-}
-
-static ssize_t zhpe_ep_rma_inject(struct fid_ep *ep, const void *buf,
-				  size_t len, fi_addr_t dest_addr,
-				  uint64_t addr, uint64_t key)
-{
-	struct fi_msg_rma msg;
-	struct iovec msg_iov;
-	struct fi_rma_iov rma_iov;
-
-	memset(&msg, 0, sizeof(msg));
-	msg_iov.iov_base = (void *) buf;
-	msg_iov.iov_len = len;
-	msg.msg_iov = &msg_iov;
-	msg.iov_count = 1;
-	msg.rma_iov_count = 1;
-
-	rma_iov.addr = addr;
-	rma_iov.key = key;
-	rma_iov.len = len;
-
-	msg.rma_iov = &rma_iov;
-	msg.msg_iov = &msg_iov;
-	msg.addr = dest_addr;
-
-	return do_rma_msg(ep, &msg,
-			  (FI_INJECT | ZHPE_NO_COMPLETION |
-			   ZHPE_USE_OP_FLAGS | FI_WRITE));
-}
-
-static ssize_t zhpe_ep_rma_injectdata(struct fid_ep *ep, const void *buf,
-				      size_t len, uint64_t data,
-				      fi_addr_t dest_addr, uint64_t addr,
-				      uint64_t key)
-{
-	struct fi_msg_rma msg;
-	struct iovec msg_iov;
-	struct fi_rma_iov rma_iov;
-
-	memset(&msg, 0, sizeof(msg));
-	msg_iov.iov_base = (void *) buf;
-	msg_iov.iov_len = len;
-	msg.msg_iov = &msg_iov;
-	msg.iov_count = 1;
-	msg.rma_iov_count = 1;
-
-	rma_iov.addr = addr;
-	rma_iov.key = key;
-	rma_iov.len = len;
-
-	msg.rma_iov = &rma_iov;
-	msg.msg_iov = &msg_iov;
-	msg.addr = dest_addr;
-	msg.data = data;
-
-	return do_rma_msg(ep, &msg,
-			  (FI_INJECT | FI_REMOTE_CQ_DATA |
-			   ZHPE_NO_COMPLETION | ZHPE_USE_OP_FLAGS | FI_WRITE));
-}
-
-
-struct fi_ops_rma zhpe_ep_rma = {
-	.size  = sizeof(struct fi_ops_rma),
-	.read = zhpe_ep_rma_read,
-	.readv = zhpe_ep_rma_readv,
-	.readmsg = zhpe_ep_rma_readmsg,
-	.write = zhpe_ep_rma_write,
-	.writev = zhpe_ep_rma_writev,
-	.writemsg = zhpe_ep_rma_writemsg,
-	.inject = zhpe_ep_rma_inject,
-	.injectdata = zhpe_ep_rma_injectdata,
-	.writedata = zhpe_ep_rma_writedata,
+struct fi_ops_rma zhpe_ep_rma_bad_ops = {
+	.size			= sizeof(struct fi_ops_rma),
+	.read			= fi_no_rma_read,
+	.readv			= fi_no_rma_readv,
+	.readmsg		= fi_no_rma_readmsg,
+	.write			= fi_no_rma_write,
+	.writev			= fi_no_rma_writev,
+	.writemsg		= fi_no_rma_writemsg,
+	.inject			= fi_no_rma_inject,
+	.injectdata		= fi_no_rma_injectdata,
+	.writedata		= fi_no_rma_writedata,
 };
-

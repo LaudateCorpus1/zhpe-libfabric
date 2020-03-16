@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2014 Intel Corporation, Inc.  All rights reserved.
- * Copyright (c) 2017-2019 Hewlett Packard Enterprise Development LP.  All rights reserved.
+ * Copyright (c) 2017-2020 Hewlett Packard Enterprise Development LP.  All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -33,651 +33,776 @@
 
 #include <zhpe.h>
 
-#if HAVE_GETIFADDRS
-#include <net/if.h>
-#else
-#error getifaddrs() required
-#endif
+#define ZHPE_SUBSYS	FI_LOG_EP_CTRL
 
-#define ZHPE_LOG_DBG(...) _ZHPE_LOG_DBG(FI_LOG_EP_CTRL, __VA_ARGS__)
-#define ZHPE_LOG_ERROR(...) _ZHPE_LOG_ERROR(FI_LOG_EP_CTRL, __VA_ARGS__)
+/* Assumptions. */
+static_assert(FI_READ * 2 == FI_WRITE, "FI_WRITE");
 
-
-void zhpe_conn_list_destroy(struct zhpe_ep_attr *ep_attr)
+static void conn_dequeue_rma(struct zhpe_conn *conn,
+			     struct zhpe_tx_queue_entry *txqe)
 {
-	struct zhpe_conn	*conn;
+	struct zhpe_tx_entry	*tx_entry = txqe->tx_entry;
 
-	/* Called only during ep teardown. No locking. */
-	while (!dlist_empty(&ep_attr->conn_list)) {
-		dlist_pop_front(&ep_attr->conn_list, struct zhpe_conn,
-				conn, ep_lentry);
-		zhpe_conn_z_free(conn);
-		free(conn);
-	}
+	zhpe_iov_rma(tx_entry, ZHPE_SEG_MAX_BYTES, ZHPE_SEG_MAX_OPS);
+	if (OFI_UNLIKELY(!tx_entry->cstat.completions))
+		return;
+
+	conn->zctx->tx_queued--;
+	assert(conn->zctx->tx_queued >= 0);
+	tx_entry->cstat.flags &= ~ZHPE_CS_FLAG_QUEUED;
+	dlist_remove(&txqe->dentry);
+	zhpe_buf_free(&conn->zctx->tx_queue_pool, txqe);
 }
 
-void zhpe_conn_release_entry(struct zhpe_ep_attr *ep_attr,
-			     struct zhpe_conn *conn)
-
+static void conn_dequeue_wqe(struct zhpe_conn *conn,
+			     struct zhpe_tx_queue_entry *txqe)
 {
-	mutex_lock(&ep_attr->conn_mutex);
-	assert(conn->state != ZHPE_CONN_STATE_READY);
-	dlist_remove_init(&conn->ep_lentry);
-	cond_broadcast(&ep_attr->conn_cond);
-	mutex_unlock(&ep_attr->conn_mutex);
-	zhpe_conn_z_free(conn);
-	free(conn);
-}
+	struct zhpe_ctx		*zctx = conn->zctx;
+	struct zhpe_tx_entry	*tx_entry = txqe->tx_entry;
+	union zhpe_hw_wq_entry	*wqe;
+	struct zhpe_msg		*msg;
+	int32_t			reservation;
 
-struct zhpe_conn *zhpe_conn_insert(struct zhpe_ep_attr *ep_attr,
-				   const union sockaddr_in46 *addr,
-				   bool local)
-{
-	struct zhpe_conn	*conn;
-
-	conn = calloc_cachealigned(1, sizeof(*conn));
-	if (!conn)
-		goto done;
-
-	conn->ep_attr = ep_attr;
-	conn->fi_addr = FI_ADDR_NOTAVAIL;
-	conn->zq_index = FI_ADDR_NOTAVAIL;
-	conn->state = ZHPE_CONN_STATE_INIT;
-	sockaddr_cpy(&conn->addr, addr);
-	conn->local = local;
-	conn->fam = (addr->sa_family == AF_ZHPE &&
-		     ((addr->zhpe.sz_queue & ZHPE_SA_TYPE_MASK) ==
-		      ZHPE_SA_TYPE_FAM));
-	dlist_insert_tail(&conn->ep_lentry, &ep_attr->conn_list);
- done:
-	return conn;;
-}
-
-struct zhpe_conn *zhpe_conn_lookup(struct zhpe_ep_attr *ep_attr,
-				   const union sockaddr_in46 *addr,
-				   bool local)
-{
-	struct zhpe_conn	*ret;
-
-	dlist_foreach_container(&ep_attr->conn_list, struct zhpe_conn,
-				ret, ep_lentry) {
-		if (ret->state == ZHPE_CONN_STATE_RACED)
-			continue;
-
-		if (local && ret->local && !sockaddr_portcmp(&ret->addr, addr))
-			return ret;
-		if (!sockaddr_cmp(&ret->addr, addr))
-			return ret;
+	reservation = zhpeq_tq_reserve(zctx->ztq_hi);
+	if (OFI_UNLIKELY(reservation < 0)) {
+		assert(reservation == -EAGAIN);
+		return;
 	}
 
-	return NULL;
-}
-
-int zhpe_set_sockopt_reuseaddr(int sock)
-{
-	int			ret = 0;
-	int			optval = 1;
-
-	if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &optval,
-		       sizeof(optval)) == -1) {
-		ret = -errno;
-		ZHPE_LOG_ERROR("setsockopt reuseaddr failed:%s\n",
-			       strerror(-ret));
-	}
-	return ret;
-}
-
-int zhpe_set_sockopt_nodelay(int sock)
-{
-	int			ret = 0;
-	int			optval = 1;
-
-	if (setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &optval,
-		       sizeof(optval)) == -1) {
-		ret = -errno;
-		ZHPE_LOG_ERROR("setsockopt tcp_nodelay failed:%s\n",
-			       strerror(-ret));
-	}
-
-	return ret;
-}
-
-int zhpe_set_fd_cloexec(int fd)
-{
-	int			ret = 0;
-	int			flags;
-
-	flags = fcntl(fd, F_GETFL);
-	if (flags == -1) {
-		ret = -errno;
-		ZHPE_LOG_ERROR("fcntl getfl failed:%s\n",
-			       strerror(-ret));
-		goto done;
-	}
-	if (fcntl(fd, F_SETFL, flags | O_CLOEXEC) == -1) {
-		ret = -errno;
-		ZHPE_LOG_ERROR("fcntl setfl cloexec failed:%s\n",
-			       strerror(-ret));
-	}
- done:
-	return ret;
-}
-
-int zhpe_set_fd_nonblock(int fd)
-{
-	int			ret;
-
-	ret = fi_fd_nonblock(fd);
-	if (ret < 0)
-		ZHPE_LOG_ERROR("fi_fd_nonblock() failed:%s\n",
-			       fi_strerror(-ret));
-
-	return ret;
-}
-
-int zhpe_set_sockopts_connect(int sock)
-{
-	int			ret;
-
-	ret = zhpe_set_sockopt_reuseaddr(sock);
-	if (ret < 0)
-		goto done;
-	ret = zhpe_set_sockopt_nodelay(sock);
-	if (ret < 0)
-		goto done;
-	ret = zhpe_set_fd_cloexec(sock);
-	if (ret < 0)
-		goto done;
-	ret = zhpe_set_fd_nonblock(sock);
-
- done:
-	return ret;
-}
-
-int zhpe_set_sockopts_listen(int sock)
-{
-	int			ret;
-
-	ret = zhpe_set_sockopt_reuseaddr(sock);
-	if (ret < 0)
-		goto done;
-	ret = zhpe_set_fd_cloexec(sock);
- done:
-	return ret;
-}
-
-int zhpe_set_sockopts_accept(int sock)
-{
-	int			ret;
-
-	ret = zhpe_set_sockopt_nodelay(sock);
-	if (ret < 0)
-		goto done;
-	ret = zhpe_set_fd_cloexec(sock);
- done:
-	return ret;
-}
-
-static void *_zhpe_conn_listen(void *arg)
-{
-	int			rc;
-	struct zhpe_ep_attr	*ep_attr = (struct zhpe_ep_attr *)arg;
-	struct zhpe_conn_listener *listener = &ep_attr->listener;
-	int			conn_fd = -1;
-	union sockaddr_in46	local46;
-	union sockaddr_in46	remote46;
-	socklen_t		addr_len;
-	char			tmp;
-	struct pollfd		poll_fds[2];
-	struct zhpe_conn	*conn;
-	uint8_t			action;
-	bool			rem_local;
-#if ENABLE_DEBUG
-	char			ntop[INET6_ADDRSTRLEN];
-#endif
-
-	poll_fds[0].fd = listener->sock;
-	poll_fds[1].fd = listener->signal_fds[1];
-	poll_fds[0].events = poll_fds[1].events = POLLIN;
-
-	for (;;) {
-		if (conn_fd >= 0)
-			close(conn_fd);
-		conn_fd = -1;
-		if (!listener->do_listen)
-			break;
-		if (poll(poll_fds, 2, -1) > 0) {
-			if (poll_fds[1].revents & POLLIN) {
-				rc = ofi_read_socket(listener->signal_fds[1],
-						      &tmp, 1);
-				if (rc != 1) {
-					ZHPE_LOG_ERROR("Invalid signal\n");
-					goto err;
-				}
-				continue;
-			}
-		} else {
-			goto err;
+	if (OFI_LIKELY(txqe->wqe.hdr.opcode == ZHPE_HW_OPCODE_ENQA)) {
+		if (OFI_UNLIKELY(!zhpe_tx_entry_slot_alloc(tx_entry))) {
+			zhpeq_tq_unreserve(zctx->ztq_hi, reservation);
+			return;
 		}
-
-		addr_len = sizeof(remote46);
-		conn_fd = accept(listener->sock, (struct sockaddr *)&remote46,
-				 &addr_len);
-		ZHPE_LOG_DBG("CONN: accepted conn-req: %d\n", conn_fd);
-		if (conn_fd == -1) {
-			ZHPE_LOG_ERROR("failed to accept: %s\n",
-				       strerror(errno));
-			continue;
-		}
-		ZHPE_LOG_DBG("ACCEPT: %s, %d\n",
-			     sockaddr_ntop(&remote46, ntop, sizeof(ntop)),
-			     ntohs(remote46.sin_port));
-		rc = zhpe_set_sockopts_accept(conn_fd);
-		if (rc < 0)
-			continue;
-
-		/* remote46 has ephermeral port, but we need listening port.
-		 * connect() side will send it.
-		 */
-		rc = zhpe_recv_fixed_blob(conn_fd, &remote46.sin_port,
-					  sizeof(remote46.sin_port));
-		if (rc < 0)
-			continue;
-
-		addr_len = sizeof(local46);
-		rc = getsockname(conn_fd, (struct sockaddr *)&local46,
-				 &addr_len);
-		if (rc == -1) {
-			ZHPE_LOG_ERROR("getsockname() failed: %s\n",
-				       strerror(errno));
-			continue;
-		}
-
-		/* The conns containing outgoing EP addresses; the listener
-		 * thread makes a check to see if the incoming connection
-		 * already exists and we must handle the multiple interface
-		 * problem. So, we need to check if the address is local and,
-		 if it is, then we just need to compare the ports.
-		 * XXX: cache the ifaddr list? It can change.
-		 */
-		rc = zhpe_checklocaladdr(NULL, &remote46);
-		if (rc < 0)
-			continue;
-		rem_local = !!rc;
-
-		action = ZHPE_CONN_ACTION_NEW;
-		/* We can only go forward with a conn we create;
-		 * if we are racing, we need to break the tie and,
-		 * if we win, mark the current conn as RACED.
-		 */
-		mutex_lock(&ep_attr->conn_mutex);
-		conn = zhpe_conn_lookup(ep_attr, &remote46, rem_local);
-		if (conn) {
-			if (rem_local)
-				rc = sockaddr_portcmp(&local46, &remote46);
-			else
-				rc = sockaddr_cmp(&local46, &remote46);
-			if (!rc)
-				action = ZHPE_CONN_ACTION_SELF;
-			else if (rc < 0)
-				action = ZHPE_CONN_ACTION_DROP;
-			if (action == ZHPE_CONN_ACTION_NEW) {
-				assert(conn->state == ZHPE_CONN_STATE_INIT);
-				conn->state = ZHPE_CONN_STATE_RACED;
-				cond_broadcast(&ep_attr->conn_cond);
-			}
-		}
-		if (action == ZHPE_CONN_ACTION_NEW) {
-			conn = zhpe_conn_insert(ep_attr, &remote46, rem_local);
-			if (!conn)
-				action = ZHPE_CONN_ACTION_DROP;
-		}
-		mutex_unlock(&ep_attr->conn_mutex);
-		rc = zhpe_send_blob(conn_fd, &action, sizeof(action));
-		if (rc < 0 || action != ZHPE_CONN_ACTION_NEW)
-			continue;
-		rc = zhpe_conn_z_setup(conn, conn_fd);
-		if (rc >= 0)
-			zhpe_pe_signal(ep_attr->domain->pe);
-		else
-			zhpe_conn_release_entry(ep_attr, conn);
+		msg = (void *)&txqe->wqe.enqa.payload;
+		msg->hdr.cmp_idxn = htons(tx_entry->cmp_idx);
 	}
 
-err:
-	ofi_close_socket(listener->sock);
-	ZHPE_LOG_DBG("Listener thread exited\n");
-	return NULL;
+	conn->tx_queued++;
+	/* "Consumes" the zctx->tx_queued that was added when queued. */
+
+	tx_entry->cstat.flags &= ~ZHPE_CS_FLAG_QUEUED;
+	wqe = zhpeq_tq_get_wqe(zctx->ztq_hi, reservation);
+	zhpeq_tq_set_context(zctx->ztq_hi, reservation, tx_entry);
+	memcpy(wqe, &txqe->wqe, sizeof(*wqe));
+	zhpeq_tq_insert(zctx->ztq_hi, reservation);
+	zhpeq_tq_commit(zctx->ztq_hi);
+	zctx->pe_ctx_ops->signal(zctx);
+	dlist_remove(&txqe->dentry);
+	zhpe_buf_free(&zctx->tx_queue_pool, txqe);
 }
 
-int zhpe_listen(const struct fi_info *info,
-		union sockaddr_in46 *ep_addr, int backlog)
+static void conn_dequeue_wqe_throttled(struct zhpe_conn *conn,
+				      struct zhpe_tx_queue_entry *txqe)
 {
-	int			ret = 0;
-	int			listen_fd = -1;
-	socklen_t		addr_len;
-	struct addrinfo		ai;
-	struct addrinfo		*rai;
-#if ENABLE_DEBUG
-	char			ntop[INET6_ADDRSTRLEN];
-#endif
+	/* For now, no throttling. */
+	conn_dequeue_wqe(conn, txqe);
+}
 
-	if (info->src_addr)
-		sockaddr_cpy(ep_addr, info->src_addr);
-	else {
-		zhpe_getaddrinfo_hints_init(&ai,
-					    zhpe_sa_family(info->addr_format));
-		ai.ai_flags |= AI_PASSIVE;
-		ret = zhpe_getaddrinfo(NULL, "0", &ai, &rai);
-		if (ret < 0)
-			goto done;
-		sockaddr_cpy(ep_addr, rai->ai_addr);
-		freeaddrinfo(rai);
+static void conn_dequeue(struct zhpe_conn *conn)
+{
+	struct zhpe_tx_queue_entry *txqe;
+
+	if (dlist_empty(&conn->tx_queue)) {
+		if (OFI_LIKELY(conn->flags != ZHPE_CONN_FLAG_CLEANUP))
+			return;
+		conn->flags = 0;
+		dlist_remove_init(&conn->tx_dequeue_dentry);
+		return;
 	}
 
-	listen_fd = ofi_socket(ep_addr->sa_family,  SOCK_STREAM, IPPROTO_TCP);
-	if (listen_fd == -1) {
-		ret = -errno;
-		ZHPE_LOG_ERROR("failed to create socket: %s\n",
-			       strerror(-ret));
-		goto done;
+	/* One at a time: round-robin tx queue amongst conns. */
+	txqe = container_of(conn->tx_queue.next, struct zhpe_tx_queue_entry,
+			    dentry);
+
+	/* Handle RMA retry. */
+	if (OFI_UNLIKELY(txqe->tx_entry->cstat.flags & ZHPE_CS_FLAG_RMA)) {
+		conn_dequeue_rma(conn, txqe);
+		return;
 	}
-	ret = zhpe_set_sockopts_listen(listen_fd);
-	if (ret < 0)
-		goto done;
-	if (bind(listen_fd, (struct sockaddr *)ep_addr,
-		 sizeof(*ep_addr)) == -1) {
-		ret = -errno;
-		ZHPE_LOG_ERROR("failed to bind socket: %s\n",
-			       strerror(-ret));
-		goto done;
-	}
-	/* Is there any platform where the ntohs() makes a difference, here? */
-	if (!ntohs(ep_addr->sin_port)) {
-		addr_len = sizeof(*ep_addr);
-		if (getsockname(listen_fd, (struct sockaddr *)ep_addr,
-				&addr_len) == -1) {
-			ret = -errno;
-			ZHPE_LOG_ERROR("getsockname failed: error %d:%s\n",
-				       ret, strerror(-ret));
-			goto done;
-		}
-	}
-	ZHPE_LOG_DBG("Bound to:%s:%u\n",
-		     sockaddr_ntop(ep_addr, ntop, sizeof(ntop)),
-		     ntohs(ep_addr->sin_port));
-	ret = zhpe_set_sockopts_listen(listen_fd);
-	if (ret < 0)
-		goto done;
-	if (listen(listen_fd, backlog) == -1) {
-		ret = -errno;
-		ZHPE_LOG_ERROR("failed to listen socket: %s\n",
-			       strerror(-ret));
-		goto done;
-	}
- done:
-	if (ret >= 0)
-		ret = listen_fd;
+
+	/* Assume backoff is the reason we're here. */
+	if (OFI_LIKELY(conn->flags & ZHPE_CONN_FLAG_BACKOFF))
+		conn_dequeue_wqe_throttled(conn, txqe);
 	else
-		ofi_close_socket(listen_fd);
-
-	return ret;
+		conn_dequeue_wqe(conn, txqe);
 }
 
-int zhpe_conn_listen(struct zhpe_ep_attr *ep_attr)
+void zhpe_conn_dequeue_fence(struct zhpe_conn *conn)
 {
-	int			ret;
-	struct zhpe_conn_listener *listener = &ep_attr->listener;
+	struct zhpe_tx_queue_entry *txqe;
 
-	listener->sock = -1;
-	ret = zhpe_listen(&ep_attr->info, &ep_attr->src_addr,
-			  zhpe_cm_def_map_sz);
-	if (ret < 0)
-		goto done;
-	listener->sock = ret;
-	ep_attr->msg_src_port = ntohs(ep_attr->src_addr.sin_port);
+	if (OFI_UNLIKELY(dlist_empty(&conn->tx_queue)))
+		/* Should never get here because of fence logic below. */
+		assert_always(false);
 
-	if (socketpair(AF_UNIX, SOCK_STREAM, 0, listener->signal_fds) == -1) {
-		ret = -errno;
-		ZHPE_LOG_ERROR("failed to create socketpair: %s\n",
-			       strerror(-ret));
-		goto done;
-	}
-	ret = zhpe_set_fd_nonblock(listener->signal_fds[1]);
-	if (ret < 0)
-		goto done;
+	/* One at a time: round-robin tx queue amongst conns. */
+	txqe = container_of(conn->tx_queue.next, struct zhpe_tx_queue_entry,
+			    dentry);
 
-	listener->do_listen = 1;
-
-	ret = -pthread_create(&listener->listener_thread, 0,
-			      _zhpe_conn_listen, ep_attr);
-	if (ret < 0) {
-		ZHPE_LOG_ERROR("failed to create conn listener thread:%s\n",
-			       strerror(-ret));
-		goto done;
-	}
-	listener->listener_thread_valid = true;
- done:
-	if (ret < 0 && listener->sock != -1) {
-		ofi_close_socket(listener->sock);
-		listener->sock = -1;
+	if (txqe->tx_entry->cstat.flags & ZHPE_CS_FLAG_FENCE) {
+		if (OFI_LIKELY(conn->tx_queued))
+			return;
+		/* A fenced RMA/Atomic could be waiting on key responses. */
+		if (txqe->tx_entry->cstat.flags & ZHPE_CS_FLAG_KEY_WAIT)
+			return;
+		txqe->tx_entry->cstat.flags &= ~ZHPE_CS_FLAG_FENCE;
+		conn->tx_fences--;
+		assert_always(conn->tx_fences >= 0);
+		if (OFI_LIKELY(!conn->tx_fences))
+			conn->tx_dequeue = conn_dequeue;
 	}
 
-	return ret;
+	/* Handle RMA retry. */
+	if (OFI_UNLIKELY(txqe->tx_entry->cstat.flags & ZHPE_CS_FLAG_RMA)) {
+		conn_dequeue_rma(conn, txqe);
+		return;
+	}
+
+	/* Assume backoff isn't the reason we're here. */
+	if (OFI_UNLIKELY(conn->flags & ZHPE_CONN_FLAG_BACKOFF))
+		conn_dequeue_wqe_throttled(conn, txqe);
+	else
+		conn_dequeue_wqe(conn, txqe);
 }
 
-int zhpe_ep_connect(struct zhpe_ep_attr *ep_attr, struct zhpe_conn *conn)
+static void conn_dequeue_connect(struct zhpe_conn *conn)
 {
-	int			ret = 0;
-	int			conn_fd = -1;
-	uint8_t			action;
-#if ENABLE_DEBUG
-	char			ntop[INET6_ADDRSTRLEN];
-#endif
+	struct zhpe_tx_queue_entry *txqe;
+	struct zhpe_msg		*msg;
 
-	if (conn->fam) {
-		ret = zhpe_conn_fam_setup(conn);
-		goto done;
+	if (!(conn->flags & ZHPE_CONN_FLAG_CONNECT_MASK)) {
+		if (conn->tx_fences)
+			conn->tx_dequeue = zhpe_conn_dequeue_fence;
+		else
+			conn->tx_dequeue = conn_dequeue;
+		conn->tx_dequeue(conn);
+		return;
 	}
+	if (dlist_empty(&conn->tx_queue))
+		return;
 
-	conn_fd = ofi_socket(conn->addr.sa_family, SOCK_STREAM, IPPROTO_TCP);
-	if (conn_fd == -1) {
-		ZHPE_LOG_ERROR("failed to create conn_fd, errno: %d\n", errno);
-		ret = -FI_EOTHER;
-		goto done;
-	}
+	/* One at a time: round-robin tx queue amongst conns. */
+	txqe = container_of(conn->tx_queue.next, struct zhpe_tx_queue_entry,
+			    dentry);
 
-	ZHPE_LOG_DBG("Connecting to: %s:%d\n",
-		     sockaddr_ntop(&conn->addr, ntop, sizeof(ntop)),
-		     ntohs(conn->addr.sin_port));
-	ZHPE_LOG_DBG("Connecting using address:%s\n",
-		     sockaddr_ntop(&ep_attr->src_addr, ntop, sizeof(ntop)));
+	msg = (void *)&txqe->wqe.enqa.payload;
 
-	ret = connect(conn_fd, (struct sockaddr *)&conn->addr,
-		      sizeof(conn->addr));
-	if (ret == -1) {
-		ret = -errno;
-		ZHPE_LOG_DBG("connect() error - %s: %d\n",
-			     strerror(-ret), conn_fd);
-		goto done;
-	}
+	switch (msg->hdr.op) {
 
-	/* Send the listening port to the other side. */
-	ret = zhpe_send_blob(conn_fd, &ep_attr->src_addr.sin_port,
-			     sizeof(ep_attr->src_addr.sin_port));
-	if (ret < 0)
-		goto done;
-	ret = zhpe_recv_fixed_blob(conn_fd, &action, sizeof(action));
-	if (ret < 0)
-		goto done;
-	if (action == ZHPE_CONN_ACTION_DROP) {
-		ret = -FI_EAGAIN;
-		goto done;
-	}
-
-	ret = zhpe_conn_z_setup(conn,
-				(action != ZHPE_CONN_ACTION_SELF ?
-				 conn_fd : -1));
- done:
-	if (conn_fd != -1)
-		close(conn_fd);
-
-	return ret;
-}
-
-struct addrinfo *zhpe_findaddrinfo(struct addrinfo *res, int family)
-{
-	for (; res; res = res->ai_next) {
-		if (res->ai_family == family)
-			return res;
-	}
-
-	return NULL;
-}
-
-void zhpe_getaddrinfo_hints_init(struct addrinfo *hints, int family)
-{
-	memset(hints, 0, sizeof(*hints));
-	hints->ai_socktype = SOCK_STREAM;
-	hints->ai_flags = AI_ADDRCONFIG;
-	hints->ai_family = family;
-}
-
-int zhpe_getaddrinfo(const char *node, const char *service,
-		     struct addrinfo *hints, struct addrinfo **res)
-{
-	int			ret = 0;
-	int			rc;
-
-	rc = getaddrinfo(node, service, hints, res);
-	if (rc) {
-		if (rc == EAI_SYSTEM)
-			ret = -errno;
-	}
-
-	switch (rc) {
-
-	case 0:
-	case EAI_SYSTEM:
-		break;
-
-	case EAI_ADDRFAMILY:
-	case EAI_NODATA:
-	case EAI_NONAME:
-	case EAI_SERVICE:
-		ret = -ENOENT;
-		break;
-
-	case EAI_AGAIN:
-		ret = -EAGAIN;
-		break;
-
-	case EAI_FAIL:
-		ret = -EIO;
-		break;
-
-	case EAI_MEMORY:
-		ret = -ENOMEM;
+	case ZHPE_OP_CONNECT2:
+	case ZHPE_OP_CONNECT3:
 		break;
 
 	default:
-		ret = -EINVAL;
-		break;
+		return;
 	}
 
-	if (ret < 0) {
-		ZHPE_LOG_DBG("getaddrinfo(%s,%s) returned gai %d:%s,\n"
-			     "    errno %d:%s\n",
-			     node ?: "", service ?: "", rc, gai_strerror(rc),
-			     -ret, (ret < 0 ? strerror(-ret) : ""));
-		ZHPE_LOG_DBG("zhpe_getaddrinfo() returned %d:%s\n",
-			     ret, strerror(-ret));
-		*res = NULL;
-	}
-
-	return ret;
+	/* Assume backoff isn't the reason we're here. */
+	if (OFI_UNLIKELY(conn->flags & ZHPE_CONN_FLAG_BACKOFF))
+		conn_dequeue_wqe_throttled(conn, txqe);
+	else
+		conn_dequeue_wqe(conn, txqe);
 }
 
-int zhpe_gethostaddr(sa_family_t family, union sockaddr_in46 *addr)
+struct zhpe_conn *zhpe_conn_alloc(struct zhpe_ctx *zctx)
 {
-	int			ret = 0;
-	struct addrinfo		ai;
-	struct addrinfo		*rai;
-	in_port_t		port;
-	char			hostname[HOST_NAME_MAX];
-	struct ifaddrs		*ifaddrs;
-	struct ifaddrs		*ifa;
+	struct zhpe_conn	*conn;
 
-	/* FIXME: How to bulletproof this. */
-	if (gethostname(hostname, sizeof(hostname)) == -1) {
-		ret = -errno;
-		ZHPE_LOG_ERROR("gethostname failed:error %d:%s\n",
-			       ret, strerror(-ret));
-		goto getifs;
+	conn = zhpe_ibuf_alloc(&zctx->conn_pool);
+	conn->zctx = zctx;
+	conn->tx_entry_inject.conn = conn;
+	conn->tx_entry_inject.tx_handler = ZHPE_TX_HANDLE_MSG_INJECT;
+	conn->tx_entry_prov.conn = conn;
+	conn->tx_entry_prov.tx_handler = ZHPE_TX_HANDLE_MSG_PROV;
+	dlist_init(&conn->tx_queue);
+	dlist_init(&conn->tx_dequeue_dentry);
+	conn->tx_dequeue = conn_dequeue_connect;
+	conn->rx_msg_handler = zhpe_rx_msg_handler_connected;
+	conn->rx_zseq.alloc = zhpe_rx_oos_alloc;
+	conn->rx_zseq.free = zhpe_rx_oos_free;
+	do {
+		conn->rx_zseq.seq = random();
+	} while (!conn->rx_zseq.seq);
+	conn->fiaddr = FI_ADDR_NOTAVAIL;
+
+	return conn;
+}
+
+static struct zhpe_conn *
+conn_tree_lookup(struct zhpe_ctx *zctx, struct zhpe_conn_tree_key *tkey,
+		 bool *new)
+{
+	struct zhpe_conn	*conn;
+	struct ofi_rbnode	*rbnode;
+	int			rc;
+
+	rbnode = ofi_rbmap_find(&zctx->conn_tree, tkey);
+	if (OFI_LIKELY(rbnode != NULL)) {
+		*new = false;
+
+		return rbnode->data;
 	}
-	zhpe_getaddrinfo_hints_init(&ai, family);
-	ret = zhpe_getaddrinfo(hostname, NULL, &ai, &rai);
-	if (ret < 0)
-		goto getifs;
-	/* Copy address, preserve port. */
-	if (sockaddr_loopback(rai->ai_addr, true))
-		goto getifs;
-	port = addr->sin_port;
-	sockaddr_cpy(addr, rai->ai_addr);
-	addr->sin_port = port;
-	freeaddrinfo(rai);
-	goto done;
- getifs:
-	ret = ofi_getifaddrs(&ifaddrs);
-	if (ret < 0) {
-		ZHPE_LOG_ERROR("ofi_getifaddrs() failed: %s\n",
-			       strerror(errno));
-		goto done;
-	}
-	for (ifa = ifaddrs ; ifa ; ifa = ifa->ifa_next) {
-		if (!ifa->ifa_addr || !(ifa->ifa_flags & IFF_UP) ||
-		    !sockaddr_valid(ifa->ifa_addr, 0, false) ||
-		    sockaddr_loopback(ifa->ifa_addr, true))
+
+	*new = true;
+	conn = zhpe_conn_alloc(zctx);
+	conn->tkey = *tkey;
+	rc = ofi_rbmap_insert(&zctx->conn_tree, &conn->tkey, conn, NULL);
+	assert_always(!rc);
+
+	return conn;
+}
+
+static void conn_connect_fixup(struct zhpe_conn *conn,
+			       struct dlist_entry *queue_head, uint32_t msgs)
+{
+	struct zhpe_tx_queue_entry *txqe;
+	struct zhpe_msg		*msg;
+
+	conn->tx_seq += msgs;
+	dlist_init(queue_head);
+	dlist_splice_tail(queue_head, &conn->tx_queue);
+	dlist_foreach_container(queue_head, struct zhpe_tx_queue_entry,
+				txqe, dentry) {
+		if (txqe->tx_entry->cstat.flags & ZHPE_CS_FLAG_RMA)
 			continue;
-		port = addr->sin_port;
-		sockaddr_cpy(addr, ifa->ifa_addr);
-		addr->sin_port = port;
-		break;
+		/* Fix rspctxid, sequence, and conn_idx. */
+		msg = zhpeq_tq_enqa(&txqe->wqe, 0,
+				    conn->tkey.rem_gcid, conn->rem_rspctxid);
+		msg->hdr.seqn = htonl(conn->tx_seq++);
+		msg->hdr.conn_idxn = conn->rem_conn_idxn;
 	}
-	freeifaddrs(ifaddrs);
+}
 
- done:
+static void conn_connect_status_tx(struct zhpe_conn *conn, int status,
+				   uint32_t tx_seq)
+{
+	struct zhpe_msg_connect_status connect_status;
+
+	assert((int16_t)status == status);
+	connect_status.statusn = htons(status);
+	zhpe_msg_prov_no_eflags(conn, ZHPE_OP_CONNECT_STATUS, &connect_status,
+				sizeof(connect_status), 0, tx_seq);
+}
+
+static void conn_tx_queue_flush(struct zhpe_conn *conn, int error)
+{
+	struct zhpe_ctx		*zctx = conn->zctx;
+	bool			first = true;
+	struct zhpe_tx_queue_entry *txqe;
+	struct zhpe_tx_entry	*tx_entry;
+	struct dlist_entry	*next;
+	struct zhpe_msg		*msg;
+
+	/*
+	 * This is only useful when the connection protocol fails. This
+	 * is because none of the real traffic has been sent.
+	 */
+	assert_always(error < 0);
+	assert_always(error >= INT16_MIN);
+
+	dlist_foreach_container_safe(&conn->tx_queue,
+				     struct zhpe_tx_queue_entry, txqe,
+				     dentry, next) {
+		tx_entry = txqe->tx_entry;
+		/* Unwind tx_seq. */
+		if (OFI_UNLIKELY(first) &&
+		    !(tx_entry->cstat.flags & ZHPE_CS_FLAG_RMA)) {
+			msg = (void *)&txqe->wqe.enqa.payload;
+			conn->tx_seq = ntohl(msg->hdr.seqn);
+			first = false;
+		}
+		if (tx_entry->cstat.status >= 0)
+			tx_entry->cstat.status = error;
+		tx_entry->cstat.completions = 1;
+		dlist_remove(&txqe->dentry);
+		zhpe_buf_free(&zctx->tx_queue_pool, txqe);
+		zhpe_tx_call_handler_fake(tx_entry, 0xFF);
+	}
+}
+
+static void conn_connect_error(struct zhpe_conn *conn, int error, bool send)
+{
+	struct zhpe_ctx		*zctx = conn->zctx;
+
+	assert_always(error < 0);
+	assert_always(error >= INT16_MIN);
+
+	/*
+	 * ZZZ:Delete the conn from the tree and the index-map. However,
+	 * leave the conn structure in existence to deal with any
+	 * late messages.
+	 */
+	(void)ofi_rbmap_find_delete(&zctx->conn_tree, &conn->tkey);
+	if (conn->fiaddr != FI_ADDR_NOTAVAIL) {
+		ofi_idm_clear(&zctx->conn_av_idm,
+			      zhpe_av_get_tx_idx(zctx2zav(zctx), conn->fiaddr));
+		conn->fiaddr = FI_ADDR_NOTAVAIL;
+	}
+	/* Return error for any pending ops. */
+	conn_tx_queue_flush(conn, error);
+	conn->eflags |= ZHPE_CONN_EFLAG_ERROR;
+	conn->rx_msg_handler = zhpe_rx_msg_handler_drop;
+	if (send)
+		conn_connect_status_tx(conn, error, conn->tx_seq++);
+}
+
+static uint8_t conn_wire_rma_flags(struct zhpe_ctx *zctx)
+{
+	uint8_t			ret = 0;
+
+	if (zctx->util_ep.rem_rd_cntr)
+		ret |= ZHPE_CONN_RMA_REM_RD;
+	if (zctx->util_ep.rem_wr_cntr)
+		ret |= ZHPE_CONN_RMA_REM_WR;
+	if (!(zdom2map(zctx2zdom(zctx))->mode & FI_MR_VIRT_ADDR))
+		ret |= ZHPE_CONN_RMA_ZERO_OFF;
+
 	return ret;
 }
 
-int zhpe_checklocaladdr(const struct ifaddrs *ifaddrs,
-			const union sockaddr_in46 *addr)
+static uint64_t conn_rem_rma_flags(uint64_t wire_rma_flags)
 {
-	int			ret = 1;
-	struct ifaddrs		*ifaddrs_local = NULL;
-	const struct ifaddrs	*ifa;
+	uint64_t		ret = FI_REMOTE_CQ_DATA;
 
-	if (sockaddr_loopback(addr, true))
-		goto done;
+	if (wire_rma_flags & ZHPE_CONN_RMA_ZERO_OFF)
+		ret |= FI_ZHPE_RMA_ZERO_OFF;
+	wire_rma_flags &= ZHPE_CONN_RMA_REM_OP;
+	ret |= wire_rma_flags * FI_READ;
 
-	if (!ifaddrs) {
-		ret = ofi_getifaddrs(&ifaddrs_local);
-		if (ret < 0) {
-			ZHPE_LOG_ERROR("ofi_getifaddrs() failed: %s\n",
-				       strerror(errno));
-			goto done;
+	return ret;
+}
+
+static void conn_connect1_tx(struct zhpe_conn *conn, uuid_t uuid)
+{
+	struct zhpe_ctx		*zctx = conn->zctx;
+	struct zhpe_msg_connect1 connect1;
+
+	connect1.versionn = htons(ZHPE_PROTO_VERSION);
+	connect1.src_conn_idxn = htons(zhpe_ibuf_index(&zctx->conn_pool, conn));
+	connect1.src_rspctxid0n = htonl(zctx->zep->zctx[0]->lcl_rspctxid);
+	connect1.src_rspctxidn = htonl(zctx->lcl_rspctxid);
+	connect1.src_ctx_idx = htons(zctx->ctx_idx);
+	connect1.dst_ctx_idx = htons(conn->tkey.rem_ctx_idx);
+	connect1.src_rma_flags = conn_wire_rma_flags(zctx);
+	memcpy(connect1.dst_uuid, uuid, sizeof(connect1.dst_uuid));
+
+	zhpe_msg_connect(zctx, ZHPE_OP_CONNECT1, &connect1, sizeof(connect1),
+			 conn->rx_zseq.seq, conn->tkey.rem_gcid,
+			 conn->tkey.rem_rspctxid0);
+}
+
+static void conn_connect1_nak_tx(struct zhpe_ctx *zctx,
+				 struct zhpe_conn_tree_key *tkey,
+				 uint16_t rem_conn_idxn, int error)
+{
+	struct zhpe_msg_connect1_nak nak;
+
+	assert_always(error < 0);
+	assert_always(error >= INT16_MIN);
+
+	nak.version = htons(ZHPE_PROTO_VERSION);
+	assert((int16_t)error == error);
+	nak.errorn = htons(error);
+	nak.ctx_idx = htons(tkey->rem_ctx_idx);
+	nak.conn_idxn = rem_conn_idxn;
+	zhpe_msg_connect(zctx, ZHPE_OP_CONNECT1_NAK, &nak, sizeof(nak), 0,
+			 tkey->rem_gcid, tkey->rem_rspctxid0);
+}
+
+static void conn_connect23_tx(struct zhpe_conn *conn)
+{
+	int			rc;
+	struct zhpe_ctx		*zctx = conn->zctx;
+	struct zhpe_msg_connect2 connect2;
+	struct zhpe_msg_connect3 connect3;
+	size_t			blob_off;
+	size_t			blob_len;
+	struct dlist_entry	queue_head;
+	uint32_t		tx_seq;
+	uint32_t		msgs;
+
+	connect2.rspctxidn = htonl(zctx->lcl_rspctxid);
+	connect2.rx_seqn = htonl(conn->rx_zseq.seq);
+	connect2.conn_idxn = htons(zhpe_ibuf_index(&zctx->conn_pool, conn));
+	connect2.rma_flags = conn_wire_rma_flags(zctx);
+	memcpy(connect2.uuid, zctx->zep->uuid, sizeof(connect2.uuid));
+
+	blob_off = offsetof(struct zhpe_msg_connect3, blob);
+	blob_len = sizeof(connect3) - blob_off;
+	rc = zhpeq_qkdata_export(zctx2zdom(zctx)->reg_zmr->qkdata,
+				  connect3.blob, &blob_len);
+	assert_always(rc >= 0);
+	if (rc < 0) {
+		conn_connect_error(conn, rc, true);
+		return;
+	}
+
+	msgs = 2;
+	if (conn->flags & ZHPE_CONN_FLAG_CONNECT1)
+		msgs++;
+	tx_seq = conn->tx_seq;
+	conn_connect_fixup(conn, &queue_head, msgs);
+	zhpe_msg_prov_no_eflags(conn, ZHPE_OP_CONNECT2, &connect2,
+				sizeof(connect2), 0, tx_seq++);
+	zhpe_msg_prov_no_eflags(conn, ZHPE_OP_CONNECT3, &connect3,
+				blob_off + blob_len, 0, tx_seq++);
+	if (msgs == 3)
+		conn_connect_status_tx(conn, 0, tx_seq++);
+	dlist_splice_tail(&conn->tx_queue, &queue_head);
+}
+
+void zhpe_conn_connect1_rx(struct zhpe_ctx *zctx, struct zhpe_msg *msg,
+			   uint32_t rem_gcid)
+{
+	struct zhpe_msg_connect1 *connect1 = (void *)msg->payload;
+	struct zhpe_conn_tree_key tkey = {
+		.rem_gcid	= rem_gcid,
+		.rem_rspctxid0	= ntohl(connect1->src_rspctxid0n),
+		.rem_ctx_idx	= ntohs(connect1->src_ctx_idx),
+	};
+	uint16_t		rem_conn_idxn = connect1->src_conn_idxn;
+	struct zhpe_ctx		*cctx;
+	struct zhpe_conn	*conn;
+	bool			new;
+	int			rc;
+
+	if (ntohs(connect1->versionn) != ZHPE_PROTO_VERSION) {
+		rc = -EPROTO;
+		goto err;
+	} else if (zctx->shutdown) {
+		rc = -FI_EBUSY;
+		goto err;
+	} else if (connect1->dst_ctx_idx >= zctx->zep->num_rx_ctx) {
+		rc = -ENXIO;
+		goto err;
+	}
+
+	/* ZZZ: nested locks. */
+	cctx = zctx->zep->zctx[connect1->dst_ctx_idx];
+	if (cctx != zctx)
+		zctx_lock(cctx);
+	conn = conn_tree_lookup(cctx, &tkey, &new);
+	if (!new) {
+		/* Some ugly stale edges? */
+		if (!(conn->flags & ZHPE_CONN_FLAG_CONNECT))
+			return;
+		/* Some kind of race: lower address wins. */
+		rc = arithcmp(rem_gcid, cctx->lcl_gcid);
+		if (!rc)
+		    rc = arithcmp(tkey.rem_rspctxid0,
+				  cctx->zep->zctx[0]->lcl_rspctxid);
+		/* Quit if higher or self. */
+		if (rc >= 0)
+			return;
+	}
+	assert_always(!conn->rem_rspctxid);
+	assert_always(!(conn->flags & ZHPE_CONN_FLAG_CONNECT1));
+	zhpe_conn_flags_set(conn, ZHPE_CONN_FLAG_CONNECT1);
+	conn->tx_seq = ntohl(msg->hdr.seqn);
+	conn->rem_conn_idxn = rem_conn_idxn;
+	conn->rem_rspctxid = ntohl(connect1->src_rspctxidn);
+	conn->rem_rma_flags = conn_rem_rma_flags(connect1->src_rma_flags);
+	conn_connect23_tx(conn);
+	if (cctx != zctx)
+		zctx_unlock(cctx);
+
+	return;
+
+ err:
+	conn_connect1_nak_tx(zctx, &tkey, rem_conn_idxn, rc);
+}
+
+void zhpe_conn_connect1_nak_rx(struct zhpe_ctx *zctx,
+			       struct zhpe_msg *msg)
+{
+	struct zhpe_msg_connect1_nak *nak = (void *)msg->payload;
+	struct zhpe_ctx		*cctx;
+	struct zhpe_conn	*conn;
+	int			error;
+
+	cctx = zctx->zep->zctx[ntohs(nak->ctx_idx)];
+	if (cctx != zctx)
+		zctx_lock(cctx);
+	conn = zhpe_ibuf_get(&zctx->conn_pool, ntohs(nak->conn_idxn));
+	error = (int16_t)ntohs(nak->errorn);
+	assert_always(error < 0);
+	conn_connect_error(conn, error, false);
+	if (cctx != zctx)
+		zctx_unlock(cctx);
+}
+
+void zhpe_conn_connect2_rx(struct zhpe_conn *conn, struct zhpe_msg *msg)
+{
+	struct zhpe_ctx		*zctx = conn->zctx;
+	struct zhpe_msg_connect2 *connect2 = (void *)msg->payload;
+	struct sockaddr_zhpe	sz = {
+		.sz_family	= AF_ZHPE,
+		.sz_queue	= connect2->rspctxidn,
+	};
+	struct zhpe_av		*zav = zctx2zav(zctx);
+	int			rc;
+
+	assert_always(!conn->eflags);
+	assert_always(conn->flags & ZHPE_CONN_FLAG_CONNECT_MASK);
+	if (!conn->rem_rspctxid) {
+		conn->tx_seq = ntohl(connect2->rx_seqn);
+		conn->rem_rspctxid = ntohl(sz.sz_queue);
+		conn->rem_conn_idxn = connect2->conn_idxn;
+		conn->rem_rma_flags = conn_rem_rma_flags(connect2->rma_flags);
+	} else
+		assert_always(conn->flags & ZHPE_CONN_FLAG_CONNECT1);
+
+	memcpy(sz.sz_uuid, connect2->uuid, sizeof(sz.sz_uuid));
+	zav_lock(zav);
+	(void)zhpe_av_update_addr_unsafe(zav, &sz);
+	zav_unlock(zav);
+	rc = zhpeq_domain_insert_addr(zctx2zdom(zctx)->zqdom, &sz,
+				      &conn->addr_cookie);
+	assert_always(rc >= 0);
+	if (rc < 0)
+		conn_connect_error(conn, rc, true);
+}
+
+void zhpe_conn_connect3_rx(struct zhpe_conn *conn, struct zhpe_msg *msg)
+{
+	struct zhpe_ctx		*zctx = conn->zctx;
+	struct zhpe_msg_connect3 *connect3 = (void *)msg->payload;
+	size_t			blob_len;
+	int			rc;
+
+	/* connect2 failed? */
+	if (!conn->addr_cookie)
+		return;
+
+	assert_always(!conn->eflags);
+	assert_always(conn->flags & ZHPE_CONN_FLAG_CONNECT_MASK);
+	assert_always(conn->rem_rspctxid);
+
+	blob_len = msg->hdr.len - offsetof(struct zhpe_msg_connect3, blob);
+	rc = zhpeq_qkdata_import(zctx2zdom(zctx)->zqdom, conn->addr_cookie,
+				 connect3->blob, blob_len, &conn->qkdata);
+	assert_always(!rc);
+	if (OFI_UNLIKELY(rc < 0)) {
+		conn_connect_error(conn, rc, true);
+		return;
+	}
+	rc = zhpeq_zmmu_reg(conn->qkdata);
+	assert_always(rc >= 0);
+	if (OFI_UNLIKELY(rc < 0)) {
+		conn_connect_error(conn, rc, true);
+		return;
+	}
+	conn->rx_reqzmmu = conn->qkdata->z.zaddr - conn->qkdata->z.vaddr;
+	if (conn->flags & ZHPE_CONN_FLAG_CONNECT1)
+		conn->flags &= ~ZHPE_CONN_FLAG_CONNECT_MASK;
+	else
+		conn_connect23_tx(conn);
+}
+
+void zhpe_conn_connect_status_rx(struct zhpe_conn *conn, struct zhpe_msg *msg)
+{
+	struct zhpe_msg_connect_status *connect_status = (void *)msg->payload;
+	int			status;
+
+	status = (int16_t)ntohs(connect_status->statusn);
+
+	assert_always(!conn->eflags);
+
+	if (status >= 0) {
+		assert_always(conn->flags & ZHPE_CONN_FLAG_CONNECT_MASK);
+		conn->flags &= ~ZHPE_CONN_FLAG_CONNECT_MASK;
+		return;
+	}
+	conn_connect_error(conn, status, false);
+}
+
+static void conn_fam_setup(struct zhpe_conn *conn, struct sockaddr_zhpe *sz)
+{
+	struct zhpe_ctx		*zctx = conn->zctx;
+	struct zhpeq_dom	*zqdom = zctx2zdom(conn->zctx)->zqdom;
+	size_t			n_qkdata = 0;
+	struct zhpeq_key_data	*qkdata[2];
+	struct zhpe_rkey	*rkey;
+	size_t			i;
+	int			rc;
+
+	/* zctx_lock() must be held. */
+	rc = zhpeq_domain_insert_addr(zqdom, sz, &conn->addr_cookie);
+	if (rc < 0) {
+		ZHPE_LOG_ERROR("%s,%u:zhpeq_fam_qkdata() error %d\n",
+			       __func__, __LINE__, rc);
+		goto error;
+	}
+	/* Get qkdata entries for FAM.*/
+	n_qkdata = ARRAY_SIZE(qkdata);
+	rc = zhpeq_fam_qkdata(zqdom, conn->addr_cookie, qkdata, &n_qkdata);
+	if (rc < 0) {
+		ZHPE_LOG_ERROR("%s,%u:zhpeq_fam_qkdata() error %d\n",
+			       __func__, __LINE__, rc);
+		goto error;
+	}
+	for (i = 0; i < n_qkdata; i++) {
+		rc = zhpeq_zmmu_reg(qkdata[i]);
+		if (rc < 0) {
+			ZHPE_LOG_ERROR("%s,%u:zhpeq_zmmu_reg() error %d\n",
+				       __func__, __LINE__, rc);
+			break;
 		}
 	}
-
-	ret = 0;
-	for (ifa = (ifaddrs ?: ifaddrs_local); ifa; ifa = ifa->ifa_next) {
-		if (!ifa->ifa_addr || !(ifa->ifa_flags & IFF_UP))
-			continue;
-		ret = !sockaddr_cmp_noport(addr, ifa->ifa_addr);
-		if (ret)
-			break;
+	if (rc < 0) {
+		for (i = 0; i < n_qkdata; i++)
+			zhpeq_qkdata_free(qkdata[i]);
+		goto error;
 	}
-	if (ifaddrs_local)
-		freeifaddrs(ifaddrs_local);
+	for (i = 0; i < n_qkdata; i++) {
+		rkey = xmalloc(sizeof(*rkey));
+		rkey->tkey.rem_gcid = conn->tkey.rem_gcid;
+		rkey->tkey.rem_rspctxid = conn->rem_rspctxid;
+		rkey->tkey.key = i;
+		rkey->conn = conn;
+		rkey->qkdata = qkdata[i];
+		dlist_init(&rkey->rkey_wait_list);
+		rkey->ref = 1;
+		rc = ofi_rbmap_insert(&zctx->rkey_tree, &rkey->tkey, rkey,
+				       NULL);
+		assert_always(rc >= 0);
+	}
+	conn->fam = true;
+
+	return;
+
+ error:
+	conn->eflags |= ZHPE_CONN_EFLAG_ERROR;
+}
+
+static struct zhpe_conn conn_error = {
+	.eflags			= ZHPE_CONN_EFLAG_ERROR,
+};
+
+struct zhpe_conn *zhpe_conn_av_lookup(struct zhpe_ctx *zctx, fi_addr_t fiaddr)
+{
+	struct zhpe_conn	*conn;
+	struct zhpe_av		*zav = zctx2zav(zctx);
+	uint64_t		av_idx = zhpe_av_get_tx_idx(zav, fiaddr);
+	struct sockaddr_zhpe	*sz;
+	struct sockaddr_zhpe	sz_copy;
+	struct zhpe_conn_tree_key tkey;
+	bool			new;
+	int			rc MAYBE_UNUSED;
+
+	conn = ofi_idm_lookup(&zctx->conn_av_idm, av_idx);
+	if (OFI_LIKELY(conn != NULL))
+		return conn;
+	zav = zctx2zav(zctx);
+	fastlock_acquire(&zav->util_av.lock);
+	sz = zhpe_av_get_addr_unsafe(zav, fiaddr);
+	if (OFI_UNLIKELY(!sz)) {
+		fastlock_release(&zav->util_av.lock);
+
+		return &conn_error;
+	}
+	memcpy(&sz_copy, sz, sizeof(sz_copy));
+	fastlock_release(&zav->util_av.lock);
+
+	tkey.rem_gcid = zhpeu_uuid_to_gcid(sz_copy.sz_uuid);
+	tkey.rem_rspctxid0 = ntohl(sz_copy.sz_queue);
+	tkey.rem_ctx_idx = zhpe_av_get_rx_idx(zav, fiaddr);
+	conn = conn_tree_lookup(zctx, &tkey, &new);
+	rc = ofi_idm_set(&zctx->conn_av_idm, av_idx, conn);
+	assert_always(rc != -1);
+	conn->fiaddr = fiaddr;
+	if (!new)
+		return conn;
+
+	if ((tkey.rem_rspctxid0 & ZHPE_SZQ_FLAGS_MASK) == ZHPE_SZQ_FLAGS_FAM)
+		conn_fam_setup(conn, &sz_copy);
+	else {
+		zhpe_conn_flags_set(conn, ZHPE_CONN_FLAG_CONNECT);
+		conn_connect1_tx(conn, sz_copy.sz_uuid);
+	}
+
+	return conn;
+}
+
+static int compare_conn_tkeys(struct ofi_rbmap *map, void *vkey,
+			      void *vconn)
+{
+	int			ret;
+	struct zhpe_conn_tree_key *k1 = vkey;
+	struct zhpe_conn_tree_key *k2 = &((struct zhpe_conn *)vconn)->tkey;
+
+	ret = arithcmp(k1->rem_gcid, k2->rem_gcid);
+	if (ret)
+		goto done;
+	ret = arithcmp(k1->rem_rspctxid0, k2->rem_rspctxid0);
+	if (ret)
+		goto done;
+	ret = arithcmp(k1->rem_ctx_idx, k2->rem_ctx_idx);
+
  done:
 	return ret;
 }
+
+int zhpe_conn_init(struct zhpe_ctx *zctx)
+{
+	int			ret = -FI_ENOMEM;
+
+	ofi_rbmap_init(&zctx->conn_tree, compare_conn_tkeys);
+
+	ret = zhpe_ibufpool_create(&zctx->conn_pool, "conn_pool",
+				   sizeof(struct zhpe_conn),
+				   zhpeu_init_time->l1sz, 0, 0,
+				   OFI_BUFPOOL_NO_TRACK, NULL, NULL);
+	if (ret < 0)
+		goto done;
+	zctx->conn0 = zhpe_conn_alloc(zctx);
+	assert_always(zctx->conn_pool.max_index == 1);
+	zctx->conn0->rx_msg_handler = zhpe_rx_msg_handler_unconnected;
+	ret = 0;
+
+ done:
+	return ret;
+}
+
+void zhpe_conn_fini(struct zhpe_ctx *zctx)
+{
+	if (zctx->conn_tree.root)
+		ofi_rbmap_cleanup(&zctx->conn_tree);
+	zctx->conn_tree.root = NULL;
+	ofi_idm_reset(&zctx->conn_av_idm);
+	if (zctx->conn0) {
+		zhpe_ibuf_free(&zctx->conn_pool, zctx->conn0);
+		zctx->conn0 = NULL;
+	}
+	zhpe_ibufpool_destroy(&zctx->conn_pool);
+}
+
+void zhpe_conn_cleanup(struct zhpe_ctx *zctx)
+{
+	struct zhpe_dom		*zdom = zctx2zdom(zctx);
+	struct zhpe_conn	*conn;
+	size_t			i;
+
+	for (i = zctx->conn_pool.max_index; i > 1;) {
+		i--;
+		conn = zhpe_ibuf_get(&zctx->conn_pool, i);
+		if (!conn)
+			continue;
+		assert_always(conn->zctx);
+		zhpeq_qkdata_free(conn->qkdata);
+		conn->qkdata = NULL;
+		zhpeq_domain_remove_addr(zdom->zqdom, conn->addr_cookie);
+		zhpe_ibuf_free(&zctx->conn_pool, conn);
+	}
+	zctx->conn_pool.max_index = i;
+}
+
+int zhpe_conn_eflags_error(uint8_t eflags)
+{
+	if (eflags & ~ZHPE_CONN_EFLAG_SHUTDOWN3)
+		return -FI_EIO;
+
+	return -FI_ESHUTDOWN;
+}
+

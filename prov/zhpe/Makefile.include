@@ -10,7 +10,6 @@ _zhpe_files = \
 	prov/zhpe/src/zhpe_av.c \
 	prov/zhpe/src/zhpe_cntr.c \
 	prov/zhpe/src/zhpe_conn.c \
-	prov/zhpe/src/zhpe_ctx.c \
 	prov/zhpe/src/zhpe_cq.c \
 	prov/zhpe/src/zhpe_dom.c \
 	prov/zhpe/src/zhpe_ep.c \
@@ -21,7 +20,6 @@ _zhpe_files = \
 	prov/zhpe/src/zhpe_msg.c \
 	prov/zhpe/src/zhpe_progress.c \
 	prov/zhpe/src/zhpe_rma.c \
-	prov/zhpe/src/zhpe_trigger.c \
 	prov/zhpe/src/zhpe_zq.c
 
 

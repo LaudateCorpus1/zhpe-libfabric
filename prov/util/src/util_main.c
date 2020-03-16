@@ -127,9 +127,17 @@ static int util_find_domain(struct dlist_entry *item, const void *arg)
 		 ((info->domain_attr->mr_mode & domain->mr_mode) == domain->mr_mode);
 }
 
-int util_getinfo(const struct util_prov *util_prov, uint32_t version,
-		 const char *node, const char *service, uint64_t flags,
-		 const struct fi_info *hints, struct fi_info **info)
+int util_getinfo_genaddr(const struct util_prov *util_prov, uint32_t version,
+			 const char *node, const char *service, uint64_t flags,
+			 const struct fi_info *hints, struct fi_info **info,
+			 int (*get_addr)(uint32_t *addr_format, uint64_t flags,
+					 const char *node, const char *service,
+					 void **addr, size_t *addrlen),
+			 int (*get_src_addr)(uint32_t addr_format,
+					     const void *dest_addr,
+					     size_t dest_addrlen,
+					     void **src_addr,
+					     size_t *src_addrlen))
 {
 	struct util_fabric *fabric;
 	struct util_domain *domain;
@@ -185,9 +193,9 @@ int util_getinfo(const struct util_prov *util_prov, uint32_t version,
 		pthread_mutex_unlock(&common_locks.util_fabric_lock);
 
 		if (flags & FI_SOURCE) {
-			ret = ofi_get_addr(&(*info)->addr_format, flags,
-					  node, service, &(*info)->src_addr,
-					  &(*info)->src_addrlen);
+			ret = get_addr(&(*info)->addr_format, flags,
+				       node, service, &(*info)->src_addr,
+				       &(*info)->src_addrlen);
 			if (ret) {
 				FI_INFO(prov, FI_LOG_CORE,
 					"source address not available\n");
@@ -197,10 +205,10 @@ int util_getinfo(const struct util_prov *util_prov, uint32_t version,
 		} else {
 			if (node || service) {
 				copy_dest = 0;
-				ret = ofi_get_addr(&(*info)->addr_format,
-						   flags, node, service,
-						   &(*info)->dest_addr,
-						   &(*info)->dest_addrlen);
+				ret = get_addr(&(*info)->addr_format,
+					       flags, node, service,
+					       &(*info)->dest_addr,
+					       &(*info)->dest_addrlen);
 				if (ret) {
 					FI_INFO(prov, FI_LOG_CORE,
 						"cannot resolve dest address\n");
@@ -234,11 +242,11 @@ int util_getinfo(const struct util_prov *util_prov, uint32_t version,
 		}
 
 		if ((*info)->dest_addr && !(*info)->src_addr) {
-			ret = ofi_get_src_addr((*info)->addr_format,
-					       (*info)->dest_addr,
-					       (*info)->dest_addrlen,
-					       &(*info)->src_addr,
-					       &(*info)->src_addrlen);
+			ret = get_src_addr((*info)->addr_format,
+					   (*info)->dest_addr,
+					   (*info)->dest_addrlen,
+					   &(*info)->src_addr,
+					   &(*info)->src_addrlen);
 			if (ret) {
 				FI_INFO(prov, FI_LOG_CORE,
 					"cannot resolve source address\n");
@@ -253,4 +261,13 @@ int util_getinfo(const struct util_prov *util_prov, uint32_t version,
 err:
 	fi_freeinfo(*info);
 	return ret;
+}
+
+int util_getinfo(const struct util_prov *util_prov, uint32_t version,
+		 const char *node, const char *service, uint64_t flags,
+		 const struct fi_info *hints, struct fi_info **info)
+{
+	return util_getinfo_genaddr(util_prov, version, node, service, flags,
+				    hints, info, ofi_get_addr,
+				    ofi_get_src_addr);
 }

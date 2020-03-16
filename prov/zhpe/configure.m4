@@ -15,7 +15,7 @@ AC_DEFUN([FI_ZHPE_CONFIGURE],
   [
     # Set up zhpe-support paths
     zhpe_happy=1
-    FI_CHECK_PACKAGE([zhpe], [zhpeq.h], [zhpeq], [zhpeq_alloc], [],
+    FI_CHECK_PACKAGE([zhpe], [zhpeq.h], [zhpeq], [zhpeq_init], [],
                      [$zhpe_PREFIX], [$zhpe_LIBDIR],, [zhpe_happy=0])
     # Build with Carbon stats support
     AC_ARG_WITH(

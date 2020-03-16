@@ -57,12 +57,10 @@ static int wait_for_send_comp(int count)
 	return 0;
 }
 
-static int tag_queue_op(uint64_t tag, int recv, uint64_t flags)
+static int tag_op_queue(uint64_t tag, int recv, uint64_t flags)
 {
 	int ret;
-	struct fi_cq_tagged_entry comp;
 	struct fi_msg_tagged msg = {0};
-	struct fi_cq_err_entry cq_err;
 	struct iovec iov;
 	void *desc;
 
@@ -79,10 +77,18 @@ static int tag_queue_op(uint64_t tag, int recv, uint64_t flags)
 	msg.context = &fi_context;
 
 	ret = fi_trecvmsg(ep, &msg, flags);
-	if (ret) {
+	if (ret)
 		FT_PRINTERR("fi_trecvmsg", ret);
-		return ret;
-	}
+
+	return ret;
+}
+
+
+static int tag_op_wait(uint64_t tag)
+{
+	int ret;
+	struct fi_cq_tagged_entry comp;
+	struct fi_cq_err_entry cq_err;
 
 	ret = fi_cq_sread(rxcq, &comp, 1, NULL, -1);
 	if (ret != 1) {
@@ -95,7 +101,23 @@ static int tag_queue_op(uint64_t tag, int recv, uint64_t flags)
 		} else {
 			FT_PRINTERR("fi_cq_sread", ret);
 		}
+	} else if (comp.tag != tag) {
+		FT_ERR("Tag mismatch!. Expected: %"PRIu64", actual: %"
+		       PRIu64, tag, comp.tag);
+		ret = -FI_EINVAL;
 	}
+
+	return ret;
+}
+
+static int tag_queue_op(uint64_t tag, int recv, uint64_t flags)
+{
+	int ret;
+
+	ret = tag_op_queue(tag, recv, flags);
+	if (!ret)
+		ret = tag_op_wait(tag);
+
 	return ret;
 }
 
@@ -209,6 +231,7 @@ static int run(void)
 		ret = wait_for_send_comp(5);
 		if (ret)
 			return ret;
+
 		ret = tag_queue_op(0xabc, 1, 0);
 		if (ret != 1) {
 			FT_PRINTERR("Receive sync", ret);

@@ -892,7 +892,17 @@ struct fi_info *ofi_allocinfo_internal(void);
 int util_getinfo(const struct util_prov *util_prov, uint32_t version,
 		 const char *node, const char *service, uint64_t flags,
 		 const struct fi_info *hints, struct fi_info **info);
-
+int util_getinfo_genaddr(const struct util_prov *util_prov, uint32_t version,
+			 const char *node, const char *service, uint64_t flags,
+			 const struct fi_info *hints, struct fi_info **info,
+			 int (*get_addr)(uint32_t *addr_format, uint64_t flags,
+					 const char *node, const char *service,
+					 void **addr, size_t *addrlen),
+			 int (*get_src_addr)(uint32_t addr_format,
+					     const void *dest_addr,
+					     size_t dest_addrlen,
+					     void **src_addr,
+					     size_t *src_addrlen));
 
 struct fid_list_entry {
 	struct dlist_entry	entry;

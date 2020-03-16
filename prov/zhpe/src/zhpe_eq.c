@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2014,2018 Intel Corporation, Inc.  All rights reserved.
- * Copyright (c) 2017-2018 Hewlett Packard Enterprise Development LP.  All rights reserved.
+ * Copyright (c) 2017-2019 Hewlett Packard Enterprise Development LP.  All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -33,8 +33,7 @@
 
 #include <zhpe.h>
 
-#define ZHPE_LOG_DBG(...) _ZHPE_LOG_DBG(FI_LOG_EQ, __VA_ARGS__)
-#define ZHPE_LOG_ERROR(...) _ZHPE_LOG_ERROR(FI_LOG_EQ, __VA_ARGS__)
+#define ZHPE_SUBSYS	FI_LOG_EQ
 
 ssize_t zhpe_eq_report_event(struct util_eq *eq, uint32_t event,
 			     const void *buf, size_t len)
@@ -105,7 +104,7 @@ int zhpe_eq_open(struct fid_fabric *fid_fabric, struct fi_eq_attr *attr,
 {
 	int			ret = -FI_EINVAL;
 	struct zhpe_eq		*zeq = NULL;
-	struct fi_eq_attr	attr_copy;
+	struct fi_eq_attr	eq_attr;
 
 	if (!fid_eq)
 		goto done;
@@ -113,18 +112,17 @@ int zhpe_eq_open(struct fid_fabric *fid_fabric, struct fi_eq_attr *attr,
 	if (!fid_fabric || !attr)
 		goto done;
 
+	eq_attr = *attr;
+	if (!eq_attr.size)
+		eq_attr.size = zhpe_eq_def_sz;
+
 	zeq = calloc(1, sizeof(*zeq));
 	if (!zeq) {
 		ret = -FI_ENOMEM;
 		goto done;
 	}
 
-	attr_copy = *attr;
-	attr = &attr_copy;
-	if (!attr->size)
-		attr->size = zhpe_eq_def_sz;
-
-	ret = ofi_eq_init(fid_fabric, attr, &zeq->util_eq.eq_fid, context);
+	ret = ofi_eq_init(fid_fabric, &eq_attr, &zeq->util_eq.eq_fid, context);
 	if (ret < 0)
 		goto done;
 

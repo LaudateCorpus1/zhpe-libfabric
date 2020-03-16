@@ -316,6 +316,9 @@ struct ofi_bufpool {
 	size_t				alloc_size;
 	size_t				region_size;
 	struct ofi_bufpool_attr		attr;
+#ifndef NDEBUG
+	size_t 				max_index;
+#endif
 };
 
 struct ofi_bufpool_region {
@@ -423,10 +426,11 @@ static inline void *ofi_bufpool_get_ibuf(struct ofi_bufpool *pool, size_t index)
 {
 	void *buf;
 
+	assert(index < pool->max_index);
+
 	buf = pool->region_table[(size_t)(index / pool->attr.chunk_cnt)]->
 		mem_region + (index % pool->attr.chunk_cnt) * pool->entry_size;
 
-	assert(ofi_buf_region(buf)->use_cnt);
 	return buf;
 }
 
@@ -488,6 +492,10 @@ static inline void *ofi_ibuf_alloc(struct ofi_bufpool *pool)
 
 	if (dlist_empty(&buf_region->free_list))
 		dlist_remove_init(&buf_region->entry);
+#ifndef NDEBUG
+	if (OFI_LIKELY(buf_hdr->index >= pool->max_index))
+		pool->max_index = buf_hdr->index + 1;
+#endif
 	return ofi_buf_data(buf_hdr);
 }
 

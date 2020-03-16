@@ -415,3 +415,48 @@ struct ofi_rbnode *ofi_rbmap_search(struct ofi_rbmap *map, void *key,
 	}
 	return NULL;
 }
+
+static struct ofi_rbnode *find_leftmost(struct ofi_rbmap *map,
+					struct ofi_rbnode *rbnode)
+{
+	for (; rbnode->left != &map->sentinel; rbnode = rbnode->left);
+
+	return rbnode;
+}
+
+static struct ofi_rbnode *find_next(struct ofi_rbmap *map,
+				    struct ofi_rbnode *rbnode)
+{
+	struct ofi_rbnode *parent;
+	if (rbnode->right != &map->sentinel) {
+		/* Find the leftmost entry in the right subtree. */
+		rbnode = find_leftmost(map, rbnode);
+	} else {
+		/* As long as you are the right child, chain up. */
+		parent = rbnode->parent;
+		while (parent && rbnode == parent->right) {
+			rbnode = parent;
+			parent = rbnode->parent;
+		}
+		rbnode = parent;
+	}
+
+	return rbnode;
+}
+
+void ofi_rbmap_walk(struct ofi_rbmap *map, void *handler_arg,
+		    void (*handler)(struct ofi_rbmap *map, void *handler_arg,
+				    struct ofi_rbnode *rbnode))
+{
+	struct ofi_rbnode *rbnode = map->root;
+	struct ofi_rbnode *next;
+
+	if (rbnode == &map->sentinel)
+		return;
+
+	rbnode = find_leftmost(map, map->root);
+	do {
+		next = find_next(map, rbnode);
+		handler(map, handler_arg, rbnode);
+	} while ((rbnode = next));
+}
