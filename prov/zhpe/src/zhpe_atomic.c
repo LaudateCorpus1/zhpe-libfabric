@@ -58,12 +58,11 @@ static int get_atomic_1op(struct atomic_op *aop, enum fi_datatype datatype,
 	if (OFI_UNLIKELY(!op1))
 		return -FI_EINVAL;
 
-	aop->fi_type = datatype;
-
 	switch (datatype) {
 
 	case FI_INT8:
 	case FI_UINT8:
+		aop->fi_type = FI_UINT8;
 		aop->bytes = sizeof(uint8_t);
 		ZHPEU_FAB_ATOMIC_LOAD_SIZE(8, op1, aop->operands[0]);
 		aop->hw_type = ZHPEQ_ATOMIC_SIZE_NONE;
@@ -71,6 +70,7 @@ static int get_atomic_1op(struct atomic_op *aop, enum fi_datatype datatype,
 
 	case FI_INT16:
 	case FI_UINT16:
+		aop->fi_type = FI_UINT16;
 		aop->bytes = sizeof(uint16_t);
 		ZHPEU_FAB_ATOMIC_LOAD_SIZE(16, op1, aop->operands[0]);
 		aop->hw_type = ZHPEQ_ATOMIC_SIZE_NONE;
@@ -78,6 +78,7 @@ static int get_atomic_1op(struct atomic_op *aop, enum fi_datatype datatype,
 
 	case FI_INT32:
 	case FI_UINT32:
+		aop->fi_type = FI_UINT32;
 		aop->bytes = sizeof(uint32_t);
 		ZHPEU_FAB_ATOMIC_LOAD_SIZE(32, op1, aop->operands[0]);
 		aop->hw_type = ZHPEQ_ATOMIC_SIZE32;
@@ -86,6 +87,7 @@ static int get_atomic_1op(struct atomic_op *aop, enum fi_datatype datatype,
 
 	case FI_INT64:
 	case FI_UINT64:
+		aop->fi_type = FI_UINT64;
 		aop->bytes = sizeof(uint64_t);
 		ZHPEU_FAB_ATOMIC_LOAD_SIZE(64, op1, aop->operands[0]);
 		aop->hw_type = ZHPEQ_ATOMIC_SIZE64;
@@ -94,6 +96,7 @@ static int get_atomic_1op(struct atomic_op *aop, enum fi_datatype datatype,
 
 	case FI_FLOAT:
 		/* ZZZ: if this works on x86, it won't be portable. */
+		aop->fi_type = FI_FLOAT;
 		aop->bytes = sizeof(float);
 		ZHPEU_FAB_ATOMIC_LOAD_SIZE(32, op1, aop->operands[0]);
 		aop->hw_type = ZHPEQ_ATOMIC_SIZE32;
@@ -102,6 +105,7 @@ static int get_atomic_1op(struct atomic_op *aop, enum fi_datatype datatype,
 
 	case FI_DOUBLE:
 		/* ZZZ: if this works on x86, it won't be portable. */
+		aop->fi_type = FI_DOUBLE;
 		aop->bytes = sizeof(double);
 		ZHPEU_FAB_ATOMIC_LOAD_SIZE(64, op1, aop->operands[0]);
 		aop->hw_type = ZHPEQ_ATOMIC_SIZE64;
@@ -121,12 +125,11 @@ static int get_atomic_2op(struct atomic_op *aop, enum fi_datatype datatype,
 	if (OFI_UNLIKELY(!op1 || !op2))
 		return -FI_EINVAL;
 
-	aop->fi_type = datatype;
-
 	switch (datatype) {
 
 	case FI_INT8:
 	case FI_UINT8:
+		aop->fi_type = FI_UINT8;
 		aop->bytes = sizeof(uint8_t);
 		ZHPEU_FAB_ATOMIC_LOAD_SIZE(8, op1, aop->operands[0]);
 		ZHPEU_FAB_ATOMIC_LOAD_SIZE(8, op2, aop->operands[1]);
@@ -135,6 +138,7 @@ static int get_atomic_2op(struct atomic_op *aop, enum fi_datatype datatype,
 
 	case FI_INT16:
 	case FI_UINT16:
+		aop->fi_type = FI_UINT16;
 		aop->bytes = sizeof(uint16_t);
 		ZHPEU_FAB_ATOMIC_LOAD_SIZE(16, op1, aop->operands[0]);
 		ZHPEU_FAB_ATOMIC_LOAD_SIZE(16, op2, aop->operands[1]);
@@ -143,6 +147,7 @@ static int get_atomic_2op(struct atomic_op *aop, enum fi_datatype datatype,
 
 	case FI_INT32:
 	case FI_UINT32:
+		aop->fi_type = FI_UINT32;
 		aop->bytes = sizeof(uint32_t);
 		ZHPEU_FAB_ATOMIC_LOAD_SIZE(32, op1, aop->operands[0]);
 		ZHPEU_FAB_ATOMIC_LOAD_SIZE(32, op2, aop->operands[1]);
@@ -152,6 +157,7 @@ static int get_atomic_2op(struct atomic_op *aop, enum fi_datatype datatype,
 
 	case FI_INT64:
 	case FI_UINT64:
+		aop->fi_type = FI_UINT64;
 		aop->bytes = sizeof(uint64_t);
 		ZHPEU_FAB_ATOMIC_LOAD_SIZE(64, op1, aop->operands[0]);
 		ZHPEU_FAB_ATOMIC_LOAD_SIZE(64, op2, aop->operands[1]);
