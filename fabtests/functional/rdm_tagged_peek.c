@@ -219,6 +219,10 @@ static int run(void)
 		if (ret)
 			return ret;
 	} else {
+		ret = tag_op_queue(0xabc, 1, 0);
+		if (ret)
+			return ret;
+
 		printf("Sending five tagged messages\n");
 		for(i = 0; i < 5; i++) {
 			ret = fi_tsend(ep, tx_buf, tx_size, mr_desc,
@@ -232,7 +236,7 @@ static int run(void)
 		if (ret)
 			return ret;
 
-		ret = tag_queue_op(0xabc, 1, 0);
+		ret = tag_op_wait(0xabc);
 		if (ret != 1) {
 			FT_PRINTERR("Receive sync", ret);
 			return ret;
