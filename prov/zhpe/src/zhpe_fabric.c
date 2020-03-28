@@ -407,10 +407,12 @@ int zhpe_fabric(struct fi_fabric_attr *attr, struct fid_fabric **fabric,
 
 int zhpe_getinfo(uint32_t api_version, const char *node, const char *service,
 		 uint64_t flags, const struct fi_info *hints,
-		 struct fi_info **info)
+		 struct fi_info **info_out)
 {
 	int			ret = -FI_ENODATA;
+	struct fi_info		*info1 = NULL;
 	int			rc;
+	struct fi_info		*info;
 
 	/*
 	 * info is not a chain of infos from other providers, it is
@@ -434,15 +436,63 @@ int zhpe_getinfo(uint32_t api_version, const char *node, const char *service,
 
 	mutex_lock(&zhpe_fabdom_close_mutex);
 	ret = util_getinfo(&zhpe_util_prov, api_version, node, service, flags,
-			  hints, info);
+			  hints, info_out);
 	mutex_unlock(&zhpe_fabdom_close_mutex);
 	if (ret < 0)
 		goto done;
 
-	if ((*info)->src_addr)
-	     zhpe_straddr_dbg(FI_LOG_FABRIC, "src_addr", (*info)->src_addr);
-	if ((*info)->dest_addr)
-		zhpe_straddr_dbg(FI_LOG_FABRIC, "dst_addr", (*info)->dest_addr);
+	info1 = *info_out;
+	if (info1->src_addr)
+		zhpe_straddr_dbg(FI_LOG_FABRIC, "src_addr", info1->src_addr);
+	if (info1->dest_addr)
+		zhpe_straddr_dbg(FI_LOG_FABRIC, "dst_addr", info1->dest_addr);
+
+	/* Fixup return values based on hints. */
+	if (!hints) {
+		/* Fixup supported modes and default queue size. */
+		info1->mode |= ZHPE_EP_MODE_SUPPORTED;
+		if (FI_VERSION_LT(api_version, FI_VERSION(1, 5)))
+			info1->mode |= FI_LOCAL_MR;
+		else
+			info1->domain_attr->mr_mode |=
+				ZHPE_DOM_MR_MODE_SUPPORTED;
+		info1->rx_attr->mode |= ZHPE_EP_MODE_SUPPORTED;
+		info1->rx_attr->size = ZHPE_EP_DEF_RX_SZ;
+		info1->tx_attr->mode |= ZHPE_EP_MODE_SUPPORTED;
+		info1->tx_attr->size = ZHPE_EP_DEF_TX_SZ;
+	} else {
+		/*
+		 * util_getinfo() only preserves required modes; allow
+		 * supported modes.
+		 */
+		info1->mode |= (hints->mode & ZHPE_EP_MODE_SUPPORTED);
+		if (FI_VERSION_LT(api_version, FI_VERSION(1, 5)))
+			info1->mode |= (hints->mode & FI_LOCAL_MR);
+		else if (hints->domain_attr)
+			info1->domain_attr->mr_mode |=
+				(hints->domain_attr->mr_mode &
+				 ZHPE_DOM_MR_MODE_SUPPORTED);
+		if (hints->rx_attr) {
+			info1->rx_attr->mode |= (hints->rx_attr->mode &
+						 ZHPE_EP_MODE_SUPPORTED);
+			if (!hints->rx_attr->size)
+				info1->rx_attr->size = ZHPE_EP_DEF_RX_SZ;
+		}
+		if (hints->tx_attr) {
+			info1->tx_attr->mode |= (hints->tx_attr->mode &
+						 ZHPE_EP_MODE_SUPPORTED);
+			if (!hints->tx_attr->size)
+				info1->tx_attr->size = ZHPE_EP_DEF_TX_SZ;
+		}
+	}
+	for (info = info1->next; info; info = info->next) {
+		info->mode = info1->mode;
+		info->domain_attr->mr_mode = info1->domain_attr->mr_mode;
+		info->rx_attr->mode = info1->rx_attr->mode;
+		info->rx_attr->size = info1->rx_attr->size;
+		info->tx_attr->mode = info1->tx_attr->mode;
+		info->tx_attr->size = info1->tx_attr->size;
+	}
  done:
 
 	return ret;

@@ -163,12 +163,23 @@ static inline void *zhpe_mremap(void *old_address, size_t old_size,
 #endif
 }
 
+#define ZHPE_DOM_MR_MODE_REQUIRED					\
+	(FI_MR_ALLOCATED)
+#define ZHPE_DOM_MR_MODE_SUPPORTED					\
+	(ZHPE_DOM_MR_MODE_REQUIRED | FI_MR_PROV_KEY |			\
+	 FI_MR_VIRT_ADDR | FI_MR_LOCAL)
+
+#define ZHPE_EP_DEF_RX_SZ	(16383U)
+#define ZHPE_EP_DEF_TX_SZ	(1023U)
 #define ZHPE_EP_MAX_CM_DATA_SZ  (256)
 #define ZHPE_EP_MAX_CTX_BITS	(16)
 #define ZHPE_EP_MAX_IOV_LEN	(1ULL << 31)
 #define ZHPE_EP_MAX_IOV_LIMIT	(1)
 #define ZHPE_EP_MAX_RETRY	(5)
 #define ZHPE_EP_MIN_MULTI_RECV	(64)
+#define ZHPE_EP_MODE_REQUIRED	(0)
+#define ZHPE_EP_MODE_SUPPORTED						\
+	(ZHPE_EP_MODE_REQUIRED | FI_CONTEXT | FI_CONTEXT2)
 
 #define ZHPE_SEG_MAX_BYTES	(16UL * 1024 * 1024)
 #define ZHPE_SEG_MAX_OPS	(2)
@@ -972,8 +983,7 @@ struct zhpe_msg_status {
 };
 
 struct zhpe_msg_atomic_req {
-	uint64_t		operand;
-	uint64_t		compare;
+	uint64_t		operands[2];
 	uint64_t		vaddr;
 	struct zhpe_key		zkey;
 	uint8_t			op;
@@ -2056,5 +2066,12 @@ static inline void *zhpe_rbtKeyValue(RbtHandle h, RbtIterator i)
 
 	return kval;
 }
+
+int zhpe_atomic_op(enum fi_datatype type, enum fi_op op,
+		   uint64_t operand0, uint64_t operand1,
+		   void *dst, uint64_t *original);
+int zhpe_atomic_load(enum fi_datatype type, const void *src, uint64_t *value);
+int zhpe_atomic_store(enum fi_datatype type, void *dst, uint64_t value);
+int zhpe_atomic_copy(enum fi_datatype type, const void *src, void *dst);
 
 #endif /* _ZHPE_H_ */

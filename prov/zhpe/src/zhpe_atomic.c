@@ -62,8 +62,8 @@ ssize_t zhpe_do_tx_atomic(struct fid_ep *fid_ep,
 	void			*vaddr;
 	size_t			cmd_len;
 	enum fi_datatype	datatype;
-	uint64_t		o64;
-	uint64_t		c64;
+	uint64_t		operand0;
+	uint64_t		operand1;
 	uint64_t		dontcare;
 	struct fi_rma_iov	rma_iov;
 	void			*result;
@@ -170,7 +170,7 @@ ssize_t zhpe_do_tx_atomic(struct fid_ep *fid_ep,
 	 * and we don't. So, if the descriptor is passed, don't check any
 	 * permissions flags and just do a bounds check.
 	 */
-	o64 = 0;
+	operand0 = 0;
 	if (msg->op != FI_ATOMIC_READ) {
 		vaddr  = msg->msg_iov[0].addr;
 		if (msg->desc)
@@ -183,10 +183,10 @@ ssize_t zhpe_do_tx_atomic(struct fid_ep *fid_ep,
 			if (ret < 0)
 				goto done;
 		}
-		(void)zhpeu_fab_atomic_load(datatype, vaddr, &o64);
+		(void)zhpe_atomic_load(datatype, vaddr, &operand0);
 	}
 
-	c64 = 0;
+	operand1 = 0;
 	if (comparev) {
 		vaddr = comparev[0].addr;
 		if (compare_desc)
@@ -199,7 +199,8 @@ ssize_t zhpe_do_tx_atomic(struct fid_ep *fid_ep,
 			if (ret < 0)
 				goto done;
 		}
-		(void)zhpeu_fab_atomic_load(datatype, vaddr, &c64);
+		operand1 = operand0;
+		(void)zhpe_atomic_load(datatype, vaddr, &operand0);
 	}
 
 	result = NULL;
@@ -257,13 +258,17 @@ ssize_t zhpe_do_tx_atomic(struct fid_ep *fid_ep,
 		switch ((int)hw_size) {
 
 		case ZHPEQ_ATOMIC_SIZE32:
-			if ((uint32_t)c64 == ~(uint32_t)0)
+			if ((uint32_t)operand0 == ~(uint32_t)0) {
+				operand0 = operand1;
 				hw_op = ZHPEQ_ATOMIC_SWAP;
+			}
 			break;
 
 		case ZHPEQ_ATOMIC_SIZE64:
-			if (c64 == ~(uint64_t)0)
+			if (operand0 == ~(uint64_t)0) {
+				operand0 = operand1;
 				hw_op = ZHPEQ_ATOMIC_SWAP;
+			}
 			break;
 		}
 		flags |= FI_WRITE;
@@ -318,8 +323,8 @@ ssize_t zhpe_do_tx_atomic(struct fid_ep *fid_ep,
 		pe_entry->pe_root.handler = zhpe_pe_tx_handle_hw_atomic;
 		pe_entry->atomic_op = hw_op;
 		pe_entry->atomic_size = hw_size;
-		pe_entry->atomic_operands[0] = o64;
-		pe_entry->atomic_operands[1] = c64;
+		pe_entry->atomic_operands[0] = operand0;
+		pe_entry->atomic_operands[1] = operand1;
 		flags |= FI_TRANSMIT_COMPLETE;
 		pe_entry->flags = flags;
 
@@ -343,8 +348,8 @@ ssize_t zhpe_do_tx_atomic(struct fid_ep *fid_ep,
 
 	zpay = zhpe_pay_ptr(conn, zhdr, 0, __alignof__(*zpay));
 
-	zpay->atomic_req.operand = htobe64(o64);
-	zpay->atomic_req.compare = htobe64(c64);
+	zpay->atomic_req.operands[0] = htobe64(operand0);
+	zpay->atomic_req.operands[1] = htobe64(operand1);
 	zpay->atomic_req.vaddr = htobe64(msg->rma_iov[0].addr);
 	zpay->atomic_req.zkey.key = htobe64(msg->rma_iov[0].key);
 	zpay->atomic_req.zkey.internal = false;
@@ -743,3 +748,26 @@ struct fi_ops_atomic zhpe_ep_atomic = {
 	.readwritevalid = zhpe_ep_atomic_fetch_valid,
 	.compwritevalid = zhpe_ep_atomic_cswap_valid,
 };
+
+int zhpe_atomic_op(enum fi_datatype type, enum fi_op op,
+		   uint64_t operand0, uint64_t operand1,
+		   void *dst, uint64_t *original)
+{
+    return zhpeu_fab_atomic_op(type, op, operand0, operand1,
+			       dst, original);
+}
+
+int zhpe_atomic_load(enum fi_datatype type, const void *src, uint64_t *value)
+{
+    return zhpeu_fab_atomic_load(type, src, value);
+}
+
+int zhpe_atomic_store(enum fi_datatype type, void *dst, uint64_t value)
+{
+    return zhpeu_fab_atomic_store(type, dst, value);
+}
+
+int zhpe_atomic_copy(enum fi_datatype type, const void *src, void *dst)
+{
+    return zhpeu_fab_atomic_copy(type, src, dst);
+}

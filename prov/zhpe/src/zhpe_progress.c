@@ -627,8 +627,6 @@ static void zhpe_pe_rx_handle_atomic(struct zhpe_conn *conn,
 	int32_t			status = -FI_ENOKEY;
 	uint64_t		orig;
 	union zhpe_msg_payload	*zpay;
-	uint64_t		o64;
-	uint64_t		c64;
 	void			*dst;
 	struct zhpe_mr		*zmr;
 	uint64_t		dontcare;
@@ -636,14 +634,14 @@ static void zhpe_pe_rx_handle_atomic(struct zhpe_conn *conn,
 
 	zpay = zhpe_pay_ptr(conn, zhdr, 0, __alignof__(*zpay));
 
-	o64 = be64toh(zpay->atomic_req.operand);
-	c64 = be64toh(zpay->atomic_req.compare);
 	dst = (void *)(uintptr_t)be64toh(zpay->atomic_req.vaddr);
 
 	zkey.key = be64toh(zpay->atomic_req.zkey.key);
 	zkey.internal = !!zpay->atomic_req.zkey.internal;
 	zmr = zhpe_mr_find(conn->ep_attr->domain, &zkey);
 	if (zmr) {
+		if (zmr->kdata->z.access & ZHPEQ_MR_KEY_ZERO_OFF)
+			dst = (char *)dst + zmr->kdata->z.vaddr;
 		status = zhpeq_lcl_key_access(
 			zmr->kdata, dst, zpay->atomic_req.datasize,
 			ZHPEQ_MR_GET_REMOTE | ZHPEQ_MR_PUT_REMOTE, &dontcare);
@@ -652,8 +650,11 @@ static void zhpe_pe_rx_handle_atomic(struct zhpe_conn *conn,
 			goto done;
 	}
 
-	status = zhpeu_fab_atomic_op(zpay->atomic_req.datatype,
-				     zpay->atomic_req.op, o64, c64, dst, &orig);
+	status = zhpe_atomic_op(zpay->atomic_req.datatype, zpay->atomic_req.op,
+				be64toh(zpay->atomic_req.operands[0]),
+				be64toh(zpay->atomic_req.operands[1]),
+				dst, &orig);
+
  done:
 
 	if (zhdr->flags & ZHPE_MSG_DELIVERY_COMPLETE)
@@ -1189,8 +1190,8 @@ void zhpe_pe_tx_handle_atomic(struct zhpe_pe_root *pe_root,
 		goto complete;
 
 	if (pe_entry->result) {
-		rc = zhpeu_fab_atomic_store(pe_entry->result_type,
-					    pe_entry->result, pe_entry->rem);
+		rc = zhpe_atomic_store(pe_entry->result_type,
+				       pe_entry->result, pe_entry->rem);
 		assert(!rc);
 	}
 
@@ -1216,10 +1217,10 @@ int zhpe_pe_tx_hw_atomic(struct zhpe_pe_entry *pe_entry)
 		goto done;
 	zindex = ret;
 
-	ret = zhpeq_atomic(ztx->zq, zindex, false, true,
-			   pe_entry->atomic_size, pe_entry->atomic_op,
-			   zhpe_iov_state_zaddr(&pe_entry->rstate),
-			   pe_entry->atomic_operands, &pe_entry->pe_root);
+	zhpeq_atomic(ztx->zq, zindex, 0,
+		     pe_entry->atomic_size, pe_entry->atomic_op,
+		     zhpe_iov_state_zaddr(&pe_entry->rstate),
+		     pe_entry->atomic_operands, &pe_entry->pe_root);
 
 	ret = zhpe_zq_commit_spin(ztx->zq, zindex, 1);
 	if (ret < 0)
@@ -1263,9 +1264,8 @@ void zhpe_pe_tx_handle_hw_atomic(struct zhpe_pe_root *pe_root,
 		goto complete;
 	}
 	if (pe_entry->result) {
-		rc = zhpeu_fab_atomic_copy(pe_entry->result_type,
-					   zq_cqe->z.result.data,
-					   pe_entry->result);
+		rc = zhpe_atomic_copy(pe_entry->result_type,
+				      zq_cqe->z.result.data, pe_entry->result);
 		assert(!rc);
 	}
 
