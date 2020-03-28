@@ -436,8 +436,8 @@ static void tx_handle_atm_hw_res32(struct zhpe_tx_entry *tx_entry,
 	    return;
 
 	if (OFI_LIKELY(!tx_entry->cstat.status && tx_entry->ptrs[1]))
-		ZHPEU_FAB_ATOMIC_STORE_SIZE(32, (uint32_t *)tx_entry->ptrs[1],
-					    cqe->result.atomic32);
+		zhpeu_fab_atomic_store(FI_UINT32, (uint32_t *)tx_entry->ptrs[1],
+				       cqe->result.atomic32);
 
 	tx_handle_atm_hw_cmn(tx_entry, false);
 }
@@ -453,8 +453,8 @@ static void tx_handle_atm_hw_res32_free(struct zhpe_tx_entry *tx_entry,
 	    return;
 
 	if (OFI_LIKELY(!tx_entry->cstat.status && tx_entry->ptrs[1]))
-		ZHPEU_FAB_ATOMIC_STORE_SIZE(32, (uint32_t *)tx_entry->ptrs[1],
-					    cqe->result.atomic32);
+		zhpeu_fab_atomic_store(FI_UINT32, (uint32_t *)tx_entry->ptrs[1],
+				       cqe->result.atomic32);
 
 	tx_handle_atm_hw_cmn(tx_entry, true);
 }
@@ -470,8 +470,8 @@ static void tx_handle_atm_hw_res64(struct zhpe_tx_entry *tx_entry,
 	    return;
 
 	if (OFI_LIKELY(!tx_entry->cstat.status && tx_entry->ptrs[1]))
-		ZHPEU_FAB_ATOMIC_STORE_SIZE(64, (uint64_t *)tx_entry->ptrs[1],
-					    cqe->result.atomic64);
+		zhpeu_fab_atomic_store(FI_UINT64, (uint64_t *)tx_entry->ptrs[1],
+				       cqe->result.atomic64);
 
 	tx_handle_atm_hw_cmn(tx_entry, false);
 }
@@ -487,8 +487,8 @@ static void tx_handle_atm_hw_res64_free(struct zhpe_tx_entry *tx_entry,
 	    return;
 
 	if (OFI_LIKELY(!tx_entry->cstat.status && tx_entry->ptrs[1]))
-		ZHPEU_FAB_ATOMIC_STORE_SIZE(64, (uint64_t *)tx_entry->ptrs[1],
-					    cqe->result.atomic64);
+		zhpeu_fab_atomic_store(FI_UINT64, (uint64_t *)tx_entry->ptrs[1],
+				       cqe->result.atomic64);
 
 	tx_handle_atm_hw_cmn(tx_entry, true);
 }
@@ -540,7 +540,6 @@ static void zhpe_rx_entry_report_complete(const struct zhpe_rx_entry *rx_entry,
 {
 	struct util_ep		*ep = &rx_entry->zctx->util_ep;
 	uint64_t		rem;
-
 
 	if (OFI_UNLIKELY(rx_entry->total_wire > rx_entry->total_user)) {
 		if (OFI_LIKELY(err >= 0)) {

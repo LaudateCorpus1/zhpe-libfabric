@@ -1792,4 +1792,11 @@ static inline bool zhpe_addr_valid(const void *sa, size_t sa_len)
 	return (sz->sz_family == AF_ZHPE && sa_len >= sizeof(*sz));
 }
 
+int zhpe_atomic_op(enum fi_datatype type, enum fi_op op,
+		   uint64_t operand0, uint64_t operand1,
+		   void *dst, uint64_t *original);
+int zhpe_atomic_load(enum fi_datatype type, const void *src, uint64_t *value);
+int zhpe_atomic_store(enum fi_datatype type, void *dst, uint64_t value);
+int zhpe_atomic_copy(enum fi_datatype type, const void *src, void *dst);
+
 #endif /* _ZHPE_H_ */
