@@ -72,7 +72,7 @@ void zhpe_rma_rkey_import(struct zhpe_conn *conn, uint64_t key,
 	struct zhpe_ctx		*zctx = conn->zctx;
 	struct zhpe_mem_tree_key tkey = {
 		.rem_gcid	= conn->tkey.rem_gcid,
-		.rem_rspctxid	= conn->rem_rspctxid,
+		.rem_rspctxid	= conn->tkey.rem_rspctxid0,
 		.key		= key,
 	};
 	struct ofi_rbnode	*rbnode;
@@ -119,7 +119,7 @@ void zhpe_rma_rkey_revoke(struct zhpe_conn *conn, uint64_t key)
 	struct zhpe_ctx		*zctx = conn->zctx;
 	struct zhpe_mem_tree_key tkey = {
 		.rem_gcid	= conn->tkey.rem_gcid,
-		.rem_rspctxid	= conn->rem_rspctxid,
+		.rem_rspctxid	= conn->tkey.rem_rspctxid0,
 		.key		= key,
 	};
 	struct ofi_rbnode	*rbnode;
@@ -143,7 +143,7 @@ zhpe_rma_rkey_lookup(struct zhpe_conn *conn, uint64_t key,
 	struct zhpe_ctx		*zctx = conn->zctx;
 	struct zhpe_mem_tree_key tkey = {
 		.rem_gcid	= conn->tkey.rem_gcid,
-		.rem_rspctxid	= conn->rem_rspctxid,
+		.rem_rspctxid	= conn->tkey.rem_rspctxid0,
 		.key		= key,
 	};
 	struct zhpe_rkey_wait   *rkey_wait;
