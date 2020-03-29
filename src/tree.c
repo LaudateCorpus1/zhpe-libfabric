@@ -430,7 +430,7 @@ static struct ofi_rbnode *find_next(struct ofi_rbmap *map,
 	struct ofi_rbnode *parent;
 	if (rbnode->right != &map->sentinel) {
 		/* Find the leftmost entry in the right subtree. */
-		rbnode = find_leftmost(map, rbnode);
+		rbnode = find_leftmost(map, rbnode->right);
 	} else {
 		/* As long as you are the right child, chain up. */
 		parent = rbnode->parent;
