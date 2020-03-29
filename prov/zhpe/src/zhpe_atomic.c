@@ -228,14 +228,18 @@ static int get_atomic_2op(struct atomic_op *aop, enum fi_datatype datatype,
 
  		case ZHPEQ_ATOMIC_SIZE32:
 			if (OFI_LIKELY((uint32_t)aop->operands[0] ==
-				       ~(uint32_t)0))
+				       ~(uint32_t)0)) {
+				aop->operands[0] = aop->operands[1];
  				aop->hw_op = ZHPEQ_ATOMIC_SWAP;
+			}
  			break;
 
  		case ZHPEQ_ATOMIC_SIZE64:
 			if (OFI_LIKELY((uint64_t)aop->operands[0] ==
-				       ~(uint64_t)0))
+				       ~(uint64_t)0)) {
+				aop->operands[0] = aop->operands[1];
  				aop->hw_op = ZHPEQ_ATOMIC_SWAP;
+			}
  			break;
 
 		default:
@@ -353,6 +357,7 @@ static void atomic_rkey_wait_handler(void *handler_arg, int status)
 	memcpy(wqe, &txqe->wqe, sizeof(*wqe));
 	zhpeq_tq_insert(zctx->ztq_hi, res);
 	zhpeq_tq_commit(zctx->ztq_hi);
+	zctx->hw_atomics++;
 	zhpe_buf_free(&zctx->tx_queue_pool, txqe);
 }
 
@@ -383,7 +388,6 @@ static void atomic_hw(struct zhpe_conn *conn, struct atomic_op *aop,
 	struct zhpe_rkey	*rkey;
 	struct atomic_rkey_wait_prep_data wait_prep;
 
-	zctx->hw_atomics++;
 	if (OFI_LIKELY(op_flags & FI_COMPLETION))
 		cs_flags = ZHPE_CS_FLAG_COMPLETION;
 	else
@@ -406,6 +410,7 @@ static void atomic_hw(struct zhpe_conn *conn, struct atomic_op *aop,
 		atomic_rkey_fixup(tx_entry, wqe[0]);
 		zhpeq_tq_insert(zctx->ztq_hi, reservation[0]);
 		zhpeq_tq_commit(zctx->ztq_hi);
+		zctx->hw_atomics++;
 	} else {
 		atomic_hw_msg(&wait_prep.txqe->wqe, aop);
 		if (tx_entry->cstat.flags & ZHPE_CS_FLAG_FENCE) {
