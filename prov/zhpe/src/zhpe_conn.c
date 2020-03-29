@@ -431,7 +431,8 @@ static void conn_connect23_tx(struct zhpe_conn *conn)
 	blob_off = offsetof(struct zhpe_msg_connect3, blob);
 	blob_len = sizeof(connect3) - blob_off;
 	rc = zhpeq_qkdata_export(zctx2zdom(zctx)->reg_zmr->qkdata,
-				  connect3.blob, &blob_len);
+				 zctx2zdom(zctx)->reg_zmr->qkdata->z.access,
+				 connect3.blob, &blob_len);
 	assert_always(rc >= 0);
 	if (rc < 0) {
 		conn_connect_error(conn, rc, true);

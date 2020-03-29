@@ -615,6 +615,7 @@ struct zhpe_mr {
 	struct zhpeq_key_data	*qkdata;
 	struct dlist_entry	kexp_list;
 	struct dlist_entry	dentry;
+	uint32_t		qaccess;
 	ofi_atomic32_t		ref;
 	bool		        closed;
 };

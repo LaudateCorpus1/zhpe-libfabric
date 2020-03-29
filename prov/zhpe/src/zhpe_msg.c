@@ -106,6 +106,8 @@ static int get_buf_zmr(struct zhpe_ctx *zctx, void *base, size_t len,
 	if (OFI_UNLIKELY(!zmr))
 		ret = zhpe_dom_mr_reg(zctx2zdom(zctx), base, len, qaccess,
 				      true, zmr_out);
+	else if (OFI_UNLIKELY((zmr->qaccess & qaccess) != qaccess))
+		ret = -FI_EINVAL;
 	else {
 		ret = zhpeq_lcl_key_access(zmr->qkdata, base, len, qaccess);
 		if (OFI_LIKELY(ret >= 0)) {

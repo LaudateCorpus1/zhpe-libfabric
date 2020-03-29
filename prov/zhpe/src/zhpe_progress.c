@@ -973,8 +973,11 @@ static void rx_handle_msg_atomic_request(struct zhpe_conn *conn,
 		attr = rbnode->data;
 		zmr = attr->context;
 		dst += attr->offset;
-		status = zhpeq_lcl_key_access(zmr->qkdata, TO_PTR(dst),
-					      areq->bytes, qaccess);
+		if (OFI_LIKELY((zmr->qaccess & qaccess) == qaccess))
+			status = zhpeq_lcl_key_access(zmr->qkdata, TO_PTR(dst),
+						      areq->bytes, qaccess);
+		else
+			status = -FI_EINVAL;
 		if (OFI_LIKELY(status >= 0))
 			status = zhpeu_fab_atomic_op(areq->fi_type, areq->fi_op,
 						     operands[0], operands[1],

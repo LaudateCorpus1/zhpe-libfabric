@@ -372,8 +372,9 @@ void zhpe_dom_key_export(struct zhpe_conn *conn, uint64_t key)
 			assert_always(!rc);
 			dlist_insert_tail(&kexp->dentry, &kexp->zmr->kexp_list);
 			blob_len = sizeof(blob);
-			rc = zhpeq_qkdata_export(kexp->zmr->qkdata, blob,
-						 &blob_len);
+			rc = zhpeq_qkdata_export(kexp->zmr->qkdata,
+						 kexp->zmr->qaccess,
+						 blob, &blob_len);
 			assert_always(!rc);
 			zhpe_send_key_response(conn, key, blob, blob_len);
 			return;
@@ -404,6 +405,7 @@ int zhpe_dom_mr_reg(struct zhpe_dom *zdom, const void *buf, size_t len,
 	zmr->qkdata = NULL;
 	dlist_init(&zmr->kexp_list);
 	dlist_init(&zmr->dentry);
+	zmr->qaccess = qaccess;
 	ofi_atomic_initialize32(&zmr->ref, 1);
 
 	ret = zdom->qkdata_mr_reg(zdom, buf, len, qaccess, &zmr->qkdata);
