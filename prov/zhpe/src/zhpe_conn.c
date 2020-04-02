@@ -336,7 +336,9 @@ static void *_zhpe_conn_listen(void *arg)
 		rc = zhpe_send_blob(conn_fd, &action, sizeof(action));
 		if (rc < 0 || action != ZHPE_CONN_ACTION_NEW)
 			continue;
+		zhpe_stats_open(1000);
 		rc = zhpe_conn_z_setup(conn, conn_fd);
+		zhpe_stats_close();
 		if (rc >= 0)
 			zhpe_pe_signal(ep_attr->domain->pe);
 		else

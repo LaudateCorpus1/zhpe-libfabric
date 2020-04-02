@@ -474,7 +474,7 @@ static ssize_t do_sendmsg(struct fid_ep *fid_ep, const void *vmsg,
 	*zhdr = hdr;
 	pe_entry->flags = flags;
 	zhpe_stats_stamp(zhpe_stats_subid(SEND, 35), (uintptr_t)pe_entry,
-			 pe_entry->rem, fiaddr, flags, hdr.flags);
+			 pe_entry->rem, fiaddr, flags, hdr.flags, 0);
 	zhpe_stats_start(zhpe_stats_subid(SEND, 40));
 	ret = zhpe_pe_tx_ring(pe_entry, zhdr, lzaddr, cmd_len);
 	zhpe_stats_stop(zhpe_stats_subid(SEND, 40));
