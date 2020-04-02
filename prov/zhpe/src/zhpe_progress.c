@@ -1632,6 +1632,8 @@ static void *zhpe_pe_thread(void *data)
 
 	ZHPE_LOG_DBG("Progress thread started\n");
 
+	zhpe_stats_open(1000);
+
 	while (OFI_LIKELY(!pe->pe_exit)) {
 		rc = zhpeq_rq_epoll(pe->zepoll, (outstanding ? 0 : -1),
 				    NULL, true);
@@ -1647,6 +1649,8 @@ static void *zhpe_pe_thread(void *data)
 	}
 
  	ZHPE_LOG_DBG("Progress thread terminated\n");
+
+	zhpe_stats_close();
 
 	return NULL;
 }
