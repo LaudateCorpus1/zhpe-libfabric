@@ -948,7 +948,9 @@ struct zhpe_ctx {
 
 	uint32_t		tx_size;
 	int32_t			tx_queued;
-	uint32_t		tx_ztq_rotor;
+
+	uint8_t			tx_ztq_slices;
+	uint8_t			tx_ztq_rotor;
 
 	uint8_t		        ctx_idx;
 	uint8_t			shutdown;

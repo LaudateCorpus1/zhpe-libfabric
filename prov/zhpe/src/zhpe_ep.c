@@ -224,14 +224,19 @@ static int zhpe_ctx_qalloc(struct zhpe_ctx *zctx)
 		goto done;
 	}
 	/* Low priority for RMA. */
-	for (i = 0; i < zhpeq_attr.z.num_slices; i++) {
+	for (i = 0; i < ZHPE_MAX_SLICES; i++) {
 		/* ZZZ: Traffic class? */
 		ret = zhpeq_tq_alloc(zqdom, tx_size, tx_size, 0, ZHPEQ_PRIO_LO,
-				     1U << i, &zctx->ztq_lo[i]);
+				     SLICE_DEMAND | (1U << i),
+				     &zctx->ztq_lo[zctx->tx_ztq_slices]);
 		if (ret < 0) {
+			if (ret == -ENOENT)
+				continue;
 			ZHPE_LOG_ERROR("zhpe_tq_alloc() error %d\n", ret);
 			goto done;
 		}
+		if (++(zctx->tx_ztq_slices) >= zhpeq_attr.z.num_slices)
+			break;
 	}
 	if (info->src_addr && info->src_addrlen) {
 		qspecific = ((struct sockaddr_zhpe *)info->src_addr)->sz_queue;
