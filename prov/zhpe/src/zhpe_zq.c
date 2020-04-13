@@ -225,7 +225,7 @@ int zhpe_slab_init(struct zhpe_slab *slab, size_t size,
 	chunk = _next_chunk(chunk);
 	chunk->size = 0;
 
-	ret = zhpe_dom_mr_reg(zdom, slab->mem, slab->size, true,
+	ret = zhpe_dom_mr_reg(zdom, slab->mem, slab->size,
 			      ZHPEQ_MR_PUT | ZHPEQ_MR_GET_REMOTE, &slab->zmr);
 	if (ret < 0) {
 		ZHPE_LOG_ERROR("zhpe_mr_reg() error %d\n", ret);

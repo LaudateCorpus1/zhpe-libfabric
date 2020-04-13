@@ -59,6 +59,9 @@ void zhpe_send_status(struct zhpe_conn *conn, uint16_t cmp_idxn, int32_t status)
 	/* cmp_idxn is in network byte order. */
 	assert(ntohs(cmp_idxn));
 
+	zhpe_stats_stamp_dbg(__func__, __LINE__,
+			     0, ntohs(cmp_idxn), status, conn->tx_seq);
+
 	assert((int16_t)status == status);
 	msg_status.statusn = htons(status);
 
@@ -153,12 +156,7 @@ static void tx_conn_retry(struct zhpe_tx_entry *tx_entry, uint16_t index)
 	txqe = zhpe_buf_alloc(&zctx->tx_queue_pool);
 	txqe->tx_entry = tx_entry;
 	txqe->wqe = *wqe;
-	if (!(conn->flags & ZHPE_CONN_FLAG_BACKOFF))
-		conn->tx_dequeue_last = get_cycles_approx();
-	zhpe_conn_flags_set(conn, ZHPE_CONN_FLAG_BACKOFF);
-	if (msg->hdr.retry == conn->tx_backoff_idx &&
-	    conn->tx_backoff_idx < ZHPE_EP_MAX_BACKOFF)
-		conn->tx_backoff_idx++;
+	zhpe_conn_flowctl(conn, msg->hdr.retry);
 	tx_entry->cstat.flags |= ZHPE_CS_FLAG_QUEUED;
 	zctx->tx_queued++;
 	/* Let's keep the queue ordered with a simple insertion. */
@@ -200,6 +198,9 @@ static int tx_cstat_update_cqe(struct zhpe_tx_entry *tx_entry,
 	/* ZZZ: Think on this. */
 	if (cstat->flags & ZHPE_CS_FLAG_REMOTE_STATUS) {
 		/* The remote status will not be sent, free ctx_ptrs slot. */
+		zhpe_stats_stamp_dbg(__func__, __LINE__,
+				     (uintptr_t)tx_entry, tx_entry->cmp_idx,
+				     0, 0);
 		if (OFI_LIKELY(tx_entry->cmp_idx))
 			zhpe_tx_entry_slot_free(tx_entry, tx_entry->cmp_idx);
 		cstat->flags &= ~ZHPE_CS_FLAG_REMOTE_STATUS;
@@ -274,11 +275,14 @@ static void tx_handle_msg_cmn(struct zhpe_tx_entry *tx_entry,
 			zhpe_dom_mr_put(tx_entry->ptrs[i]);
 	}
 
+	zhpe_stats_stamp_dbg(__func__, __LINE__,
+			     (uintptr_t)tx_entry, tx_entry->cmp_idx, 0, 0);
 	if (free) {
 		tx_entry_ctx = container_of(tx_entry, struct zhpe_tx_entry_ctx,
 					    tx_entry);
 		tx_entry_report_complete(tx_entry, flags,
 					 tx_entry_ctx->op_context);
+		assert(!tx_entry->cmp_idx);
 		zhpe_buf_free(&zctx->tx_ctx_pool, tx_entry_ctx);
 	} else
 		tx_entry_report_complete(tx_entry, flags, tx_entry);
@@ -322,6 +326,10 @@ static void tx_handle_rx_get_buf(struct zhpe_tx_entry *tx_entry,
 
 	rx_entry = container_of(tx_entry, struct zhpe_rx_entry,	tx_entry);
 
+	zhpe_stats_stamp_dbg(__func__, __LINE__,
+			     (uintptr_t)rx_entry, ntohs(rx_entry->src_cmp_idxn),
+			     0, 0);
+
 	switch (rx_entry->rx_state) {
 
 	case ZHPE_RX_STATE_DISCARD:
@@ -364,6 +372,10 @@ static void tx_handle_rx_get_rnd(struct zhpe_tx_entry *tx_entry,
 	    return;
 
 	rx_entry = container_of(tx_entry, struct zhpe_rx_entry, tx_entry);
+
+	zhpe_stats_stamp_dbg(__func__, __LINE__,
+			     (uintptr_t)rx_entry, ntohs(rx_entry->src_cmp_idxn),
+			     0, 0);
 
 	if (OFI_LIKELY(!tx_entry->cstat.status)) {
 		if (!(tx_entry->cstat.flags & ZHPE_CS_FLAG_RMA_DONE)) {
@@ -687,6 +699,9 @@ static void rx_send_start_buf(struct zhpe_rx_entry *rx_entry)
 	rx_entry->tx_entry.tx_handler = ZHPE_TX_HANDLE_RX_GET_BUF;
 	zhpe_cstat_init(&rx_entry->tx_entry.cstat, 0, ZHPE_CS_FLAG_RMA);
 	zhpe_iov_rma(&rx_entry->tx_entry, ZHPE_SEG_MAX_BYTES, ZHPE_SEG_MAX_OPS);
+	zhpe_stats_stamp_dbg(__func__, __LINE__,
+			     (uintptr_t)rx_entry, ntohs(rx_entry->src_cmp_idxn),
+			     0, 0);
 }
 
 static void rx_send_start_rnd(struct zhpe_rx_entry *rx_entry)
@@ -698,6 +713,9 @@ static void rx_send_start_rnd(struct zhpe_rx_entry *rx_entry)
 	rx_entry->tx_entry.tx_handler = ZHPE_TX_HANDLE_RX_GET_RND;
 	zhpe_cstat_init(&rx_entry->tx_entry.cstat, 0, ZHPE_CS_FLAG_RMA);
 	zhpe_iov_rma(&rx_entry->tx_entry, ZHPE_SEG_MAX_BYTES, ZHPE_SEG_MAX_OPS);
+	zhpe_stats_stamp_dbg(__func__, __LINE__,
+			     (uintptr_t)rx_entry, ntohs(rx_entry->src_cmp_idxn),
+			     0, 0);
 }
 
 void zhpe_rx_start_recv(struct zhpe_rx_entry *rx_matched,
@@ -853,10 +871,13 @@ static void rx_handle_msg_status(struct zhpe_conn *conn, struct zhpe_msg *msg)
 	size_t			cmp_idx = ntohs(msg->hdr.cmp_idxn);
 	struct zhpe_tx_entry	*tx_entry;
 
-	assert(cmp_idx != 0);
+	assert(cmp_idx);
 
 	/* Get tx_entry and free ctx_ptrs slot. */
 	tx_entry = zctx->ctx_ptrs[cmp_idx];
+	zhpe_stats_stamp_dbg(__func__, __LINE__,
+			     (uintptr_t)tx_entry, tx_entry->cmp_idx, 0,
+			     ntohl(msg->hdr.seqn));
 	zhpe_tx_entry_slot_free(tx_entry, cmp_idx);
 
 	zhpe_cstat_update_status(&tx_entry->cstat,
@@ -1000,10 +1021,10 @@ static void rx_handle_msg_atomic_result(struct zhpe_conn *conn,
 {
 	struct zhpe_ctx		*zctx = conn->zctx;
 	struct zhpe_msg_atomic_result *ares = (void *)msg->payload;
-	size_t			cmp_idx = ntohs(msg->hdr.cmp_idxn);
+	uint			cmp_idx = ntohs(msg->hdr.cmp_idxn);
 	struct zhpe_tx_entry	*tx_entry;
 
-	assert(cmp_idx != 0);
+	assert(cmp_idx);
 
 	/* Get tx_entry and free ctx_ptrs slot. */
 	tx_entry = zctx->ctx_ptrs[cmp_idx];
@@ -1065,6 +1086,10 @@ static void rx_wire_init(struct zhpe_rx_entry *rx_wire, struct zhpe_conn *conn,
 			 bool matched)
 {
 	union zhpe_msg_payload	*pay = (void *)msg->payload;
+
+	zhpe_stats_stamp_dbg(__func__, __LINE__,
+			     (uintptr_t)rx_wire, ntohs(msg->hdr.cmp_idxn), 0,
+			     ntohl(msg->hdr.seqn));
 
 	rx_wire->tx_entry.conn = conn;
 	rx_wire->match_info.tag = tag;
@@ -1366,17 +1391,27 @@ static int ctx_progress_tx(struct zhpe_ctx *zctx)
 {
 	uint32_t		i;
 	struct zhpe_conn	*conn;
+	struct dlist_entry	*first;
 	struct dlist_entry	*next;
 
 	ctx_progress_ztq(zctx, zctx->ztq_hi);
 	for (i = 0; i < zhpeq_attr.z.num_slices; i++)
 		ctx_progress_ztq(zctx, zctx->ztq_lo[i]);
 	if (OFI_UNLIKELY(!dlist_empty(&zctx->tx_dequeue_list))) {
-		dlist_foreach_container_safe(&zctx->tx_dequeue_list,
-					     struct zhpe_conn, conn,
+		first = zctx->tx_dequeue_list.next;
+ 		dlist_foreach_container_safe(&zctx->tx_dequeue_list,
+ 					     struct zhpe_conn, conn,
 					     tx_dequeue_dentry, next)
 			conn->tx_dequeue(conn);
-	}
+		/*
+		 * To try to avoid corner cases, if the first conn is
+		 * still at the head of the list, move it to back.
+		 */
+		if (zctx->tx_dequeue_list.next == first) {
+			dlist_remove(first);
+			dlist_insert_tail(first, &zctx->tx_dequeue_list);
+		}
+ 	}
 
 	return (zctx->tx_queued != 0);
 }

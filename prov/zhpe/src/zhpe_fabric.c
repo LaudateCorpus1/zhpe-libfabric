@@ -433,8 +433,8 @@ int zhpe_getinfo(uint32_t api_version, const char *node, const char *service,
 	 * This routine returns either zero or -FI_ENODATA. Other errors
 	 * will be logged, but not returned to the caller.
 	 *
-	 * NOTE: zhpeq_init() below will only update zhpeq_attr the first time
-	 * it is called.
+	 * NOTE: zhpeq_init() has internal locking and will guarantee
+	 * that zhpeq_attr is updated only once.
 	 */
 	rc = zhpeq_init(ZHPEQ_API_VERSION, &zhpeq_attr);
 	if (rc < 0) {
@@ -565,6 +565,9 @@ ZHPE_INI
 	fi_param_define(&zhpe_prov, "ep_max_eager_sz", FI_PARAM_SIZE_T,
 			"Maximum size of eager message");
 
+	fi_param_define(&zhpe_prov, "flowctl_table", FI_PARAM_STRING,
+			"Pathname of flow control table file");
+
 	fi_param_define(&zhpe_prov, "mr_cache_enable", FI_PARAM_BOOL,
 			"Enable/disable registration cache");
 
@@ -575,7 +578,10 @@ ZHPE_INI
 			 &zhpe_ep_rx_poll_timeout);
 	fi_param_get_size_t(&zhpe_prov, "ep_max_eager_sz",
 			    &zhpe_ep_max_eager_sz);
+	fi_param_get_str(&zhpe_prov, "flowctl_table", &zhpe_conn_flowctl_table);
 	fi_param_get_bool(&zhpe_prov, "mr_cache_enable", &zhpe_mr_cache_enable);
+
+	zhpe_conn_init_flowctl(zhpe_conn_flowctl_table);
 
 	return &zhpe_prov;
 }

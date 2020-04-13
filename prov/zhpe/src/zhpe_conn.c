@@ -38,6 +38,72 @@
 /* Assumptions. */
 static_assert(FI_READ * 2 == FI_WRITE, "FI_WRITE");
 
+struct conn_flowctl_v0 {
+	uint32_t		version;
+	uint32_t		time_unit;	/* nsec */
+	uint32_t		first_step;	/* index for first step */
+	uint32_t		decay;		/* ~RTT in time_units */
+	uint32_t		delay_entries;
+	uint32_t		delay[];
+};
+
+static struct conn_flowctl_v0 conn_flowctl_default = {
+	.version		= 0,
+	.time_unit		= 100,
+	.decay			= 30,
+	.first_step		= 5,
+	.delay_entries		= 14,
+	.delay			= { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 40, 80 },
+};
+
+static struct conn_flowctl_v0	*conn_flowctl;
+
+int zhpe_conn_init_flowctl(const char *table)
+{
+	uint32_t		i;
+
+	/* Table parsing comes later. */
+	assert(!table);
+
+	conn_flowctl = &conn_flowctl_default;
+
+	/* Change units to clock cycles. */
+	conn_flowctl->decay = nsec_to_cycles(conn_flowctl->time_unit *
+					     conn_flowctl->decay);
+	for (i = 0; i < conn_flowctl->delay_entries; i++)
+		conn_flowctl->delay[i] =
+			nsec_to_cycles(conn_flowctl->time_unit *
+				       conn_flowctl->delay[i]);
+	conn_flowctl->delay_entries--;
+
+	return 0;
+}
+
+void zhpe_conn_flowctl(struct zhpe_conn *conn, uint8_t retry_idx)
+{
+	uint64_t		now = get_cycles_approx();
+
+	conn->tx_flowctl_decay = now;
+	conn->tx_flowctl_dequeue = now;
+	if (OFI_UNLIKELY(!(conn->flags & ZHPE_CONN_FLAG_FLOWCTL))) {
+		conn->tx_flowctl_delay_idx = conn_flowctl->first_step;
+		conn->tx_flowctl_retry_idx++;
+		if (OFI_UNLIKELY(!conn->tx_flowctl_retry_idx))
+			conn->tx_flowctl_retry_idx++;
+		zhpe_conn_flags_set(conn, ZHPE_CONN_FLAG_FLOWCTL);
+
+		return;
+	}
+	if (OFI_LIKELY(!retry_idx))
+		return;
+
+	if (retry_idx == conn->tx_flowctl_retry_idx &&
+	    conn->tx_flowctl_delay_idx < conn_flowctl->delay_entries) {
+		conn->tx_flowctl_delay_idx++;
+		conn->tx_flowctl_retry_idx++;
+	}
+}
+
 static void conn_dequeue_rma(struct zhpe_conn *conn,
 			     struct zhpe_tx_queue_entry *txqe)
 {
@@ -54,8 +120,9 @@ static void conn_dequeue_rma(struct zhpe_conn *conn,
 	zhpe_buf_free(&conn->zctx->tx_queue_pool, txqe);
 }
 
-static void conn_dequeue_wqe(struct zhpe_conn *conn,
-			     struct zhpe_tx_queue_entry *txqe)
+static bool conn_dequeue_wqe(struct zhpe_conn *conn,
+			     struct zhpe_tx_queue_entry *txqe,
+			     uint8_t retry_idx)
 {
 	struct zhpe_ctx		*zctx = conn->zctx;
 	struct zhpe_tx_entry	*tx_entry = txqe->tx_entry;
@@ -66,37 +133,55 @@ static void conn_dequeue_wqe(struct zhpe_conn *conn,
 	reservation = zhpeq_tq_reserve(zctx->ztq_hi);
 	if (OFI_UNLIKELY(reservation < 0)) {
 		assert(reservation == -EAGAIN);
-		return;
+		return false;
 	}
 
-	if (OFI_LIKELY(txqe->wqe.hdr.opcode == ZHPE_HW_OPCODE_ENQA)) {
+	wqe = zhpeq_tq_get_wqe(zctx->ztq_hi, reservation);
+	memcpy(wqe, &txqe->wqe, sizeof(*wqe));
+
+	if (OFI_LIKELY(wqe->hdr.opcode == ZHPE_HW_OPCODE_ENQA)) {
 		if (OFI_UNLIKELY(!zhpe_tx_entry_slot_alloc(tx_entry))) {
 			zhpeq_tq_unreserve(zctx->ztq_hi, reservation);
-			return;
+			return false;
 		}
-		msg = (void *)&txqe->wqe.enqa.payload;
+		msg = (void *)&wqe->enqa.payload;
 		msg->hdr.cmp_idxn = htons(tx_entry->cmp_idx);
+		msg->hdr.retry = retry_idx;
 	}
 
 	conn->tx_queued++;
 	/* "Consumes" the zctx->tx_queued that was added when queued. */
-
 	tx_entry->cstat.flags &= ~ZHPE_CS_FLAG_QUEUED;
-	wqe = zhpeq_tq_get_wqe(zctx->ztq_hi, reservation);
 	zhpeq_tq_set_context(zctx->ztq_hi, reservation, tx_entry);
-	memcpy(wqe, &txqe->wqe, sizeof(*wqe));
 	zhpeq_tq_insert(zctx->ztq_hi, reservation);
 	zhpeq_tq_commit(zctx->ztq_hi);
 	zctx->pe_ctx_ops->signal(zctx);
 	dlist_remove(&txqe->dentry);
 	zhpe_buf_free(&zctx->tx_queue_pool, txqe);
+
+	return true;
 }
 
 static void conn_dequeue_wqe_throttled(struct zhpe_conn *conn,
 				      struct zhpe_tx_queue_entry *txqe)
 {
-	/* For now, no throttling. */
-	conn_dequeue_wqe(conn, txqe);
+	uint64_t		now = get_cycles_approx();
+	int64_t			dequeue = now - conn->tx_flowctl_dequeue;
+	int64_t			decay = now - conn->tx_flowctl_decay;
+
+	if (OFI_LIKELY(dequeue >=
+		       conn_flowctl->delay[conn->tx_flowctl_delay_idx])) {
+		if (OFI_LIKELY(conn_dequeue_wqe(conn, txqe,
+						conn->tx_flowctl_retry_idx)))
+			conn->tx_flowctl_dequeue = now;
+	}
+	if (OFI_UNLIKELY(decay >= conn_flowctl->decay)) {
+		conn->tx_flowctl_decay = now;
+		assert_always(conn->tx_flowctl_delay_idx > 0);
+		conn->tx_flowctl_delay_idx--;
+		if (OFI_UNLIKELY(!conn->tx_flowctl_delay_idx))
+			conn->flags &= ZHPE_CONN_FLAG_FLOWCTL;
+	}
 }
 
 static void conn_dequeue(struct zhpe_conn *conn)
@@ -121,11 +206,11 @@ static void conn_dequeue(struct zhpe_conn *conn)
 		return;
 	}
 
-	/* Assume backoff is the reason we're here. */
-	if (OFI_LIKELY(conn->flags & ZHPE_CONN_FLAG_BACKOFF))
+	/* Assume flow control isn't the reason we're here. */
+	if (OFI_UNLIKELY(conn->flags & ZHPE_CONN_FLAG_FLOWCTL))
 		conn_dequeue_wqe_throttled(conn, txqe);
 	else
-		conn_dequeue_wqe(conn, txqe);
+		conn_dequeue_wqe(conn, txqe, 0);
 }
 
 void zhpe_conn_dequeue_fence(struct zhpe_conn *conn)
@@ -159,11 +244,11 @@ void zhpe_conn_dequeue_fence(struct zhpe_conn *conn)
 		return;
 	}
 
-	/* Assume backoff isn't the reason we're here. */
-	if (OFI_UNLIKELY(conn->flags & ZHPE_CONN_FLAG_BACKOFF))
+	/* Assume flow control isn't the reason we're here. */
+	if (OFI_UNLIKELY(conn->flags & ZHPE_CONN_FLAG_FLOWCTL))
 		conn_dequeue_wqe_throttled(conn, txqe);
 	else
-		conn_dequeue_wqe(conn, txqe);
+		conn_dequeue_wqe(conn, txqe, 0);
 }
 
 static void conn_dequeue_connect(struct zhpe_conn *conn)
@@ -198,11 +283,11 @@ static void conn_dequeue_connect(struct zhpe_conn *conn)
 		return;
 	}
 
-	/* Assume backoff isn't the reason we're here. */
-	if (OFI_UNLIKELY(conn->flags & ZHPE_CONN_FLAG_BACKOFF))
+	/* Assume flow control isn't the reason we're here. */
+	if (OFI_UNLIKELY(conn->flags & ZHPE_CONN_FLAG_FLOWCTL))
 		conn_dequeue_wqe_throttled(conn, txqe);
 	else
-		conn_dequeue_wqe(conn, txqe);
+		conn_dequeue_wqe(conn, txqe, 0);
 }
 
 struct zhpe_conn *zhpe_conn_alloc(struct zhpe_ctx *zctx)

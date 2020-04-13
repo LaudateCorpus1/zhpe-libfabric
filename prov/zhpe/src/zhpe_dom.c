@@ -387,14 +387,17 @@ void zhpe_dom_key_export(struct zhpe_conn *conn, uint64_t key)
 }
 
 int zhpe_dom_mr_reg(struct zhpe_dom *zdom, const void *buf, size_t len,
-		    uint32_t qaccess, bool link, struct zhpe_mr **zmr_out)
+		    uint32_t qaccess, struct zhpe_mr **zmr_out)
 {
 	int			ret = -FI_ENOMEM;
 	struct zhpe_mr		*zmr;
 
+	zdom_lock(zdom);
 	zmr = zhpe_buf_alloc(&zdom->zmr_pool);
-	if (OFI_UNLIKELY(!zmr))
+	if (OFI_UNLIKELY(!zmr)) {
+		zdom_unlock(zdom);
 		goto done;
+	}
 
 	zmr->mr_fid.fid.fclass = FI_CLASS_MR;
 	zmr->mr_fid.fid.context = NULL;
@@ -404,9 +407,10 @@ int zhpe_dom_mr_reg(struct zhpe_dom *zdom, const void *buf, size_t len,
 	zmr->zdom = zdom;
 	zmr->qkdata = NULL;
 	dlist_init(&zmr->kexp_list);
-	dlist_init(&zmr->dentry);
+	dlist_insert_tail(&zmr->dentry, &zdom->zmr_list);
 	zmr->qaccess = qaccess;
 	ofi_atomic_initialize32(&zmr->ref, 1);
+	zdom_unlock(zdom);
 
 	ret = zdom->qkdata_mr_reg(zdom, buf, len, qaccess, &zmr->qkdata);
 	ZHPE_LOG_DBG("dom %p buf %p len 0x%lx qa 0x%x ret %d\n",
@@ -416,12 +420,6 @@ int zhpe_dom_mr_reg(struct zhpe_dom *zdom, const void *buf, size_t len,
 			       " error %d:%s\n", buf, VPTR(buf, len - 1),
 			       qaccess, ret, fi_strerror(-ret));
 		goto done;
-	}
-	/* Optimize caching case. */
-	if (OFI_LIKELY(link)) {
-		zdom_lock(zdom);
-		dlist_insert_tail(&zmr->dentry, &zdom->zmr_list);
-		zdom_unlock(zdom);
 	}
 
  done:
@@ -457,7 +455,7 @@ static int zhpe_regattr(struct fid *fid, const struct fi_mr_attr *attr,
 
 	ret = zhpe_dom_mr_reg(zdom, attr->mr_iov[0].iov_base,
 			      attr->mr_iov[0].iov_len,
-			      access2qaccess(attr->access), false, &zmr);
+			      access2qaccess(attr->access), &zmr);
 	if (ret < 0)
 		goto done;
 	zdom_lock(zdom);
@@ -648,7 +646,7 @@ int zhpe_domain(struct fid_fabric *fid_fabric, struct fi_info *info,
 
 	zdom->reg_page = xmalloc_aligned(page_size, page_size);
 	ret = zhpe_dom_mr_reg(zdom, zdom->reg_page, page_size,
-			      access2qaccess(ZHPE_MR_ACCESS_ALL), true,
+			      access2qaccess(ZHPE_MR_ACCESS_ALL),
 			      &zdom->reg_zmr);
 	if (ret < 0)
 		goto done;

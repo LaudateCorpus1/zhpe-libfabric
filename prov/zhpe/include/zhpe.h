@@ -107,6 +107,7 @@ void gdb_hook(void);
 #endif
 
 extern int			zhpe_av_def_sz;
+extern char			*zhpe_conn_flowctl_table;
 extern int			zhpe_cq_def_sz;
 extern int			zhpe_eq_def_sz;
 extern int			zhpe_ep_rx_poll_timeout;
@@ -194,7 +195,6 @@ static inline void *zhpe_mremap(void *old_address, size_t old_size,
 #define ZHPE_EP_DEF_BUFFERED	(1024U * 1024)
 #define ZHPE_EP_DEF_RX_SZ	(16383U)
 #define ZHPE_EP_DEF_TX_SZ	(1023U)
-#define ZHPE_EP_MAX_BACKOFF	(10U)
 #define ZHPE_EP_MAX_CTX		(1U << ZHPE_AV_MAX_CTX_BITS)
 #define ZHPE_EP_MAX_INLINE_MSG	(64U)
 #define ZHPE_EP_MAX_IOV		(2U)
@@ -394,7 +394,7 @@ struct zhpe_tx_entry_ctx {
 struct zhpe_msg;
 
 enum {
-	ZHPE_CONN_FLAG_BACKOFF	= 0x01,
+	ZHPE_CONN_FLAG_FLOWCTL	= 0x01,
 	ZHPE_CONN_FLAG_CLEANUP	= 0x02,
 	ZHPE_CONN_FLAG_CONNECT	= 0x04,
 	ZHPE_CONN_FLAG_CONNECT1	= 0x08,
@@ -433,11 +433,12 @@ struct zhpe_conn {
 	int32_t			tx_queued;
 	struct dlist_entry	tx_queue;
 	struct dlist_entry	tx_dequeue_dentry;
-	uint64_t		tx_dequeue_last;
 	void			(*tx_dequeue)(struct zhpe_conn *conn);
-	uint64_t		tx_backoff_timestamp;
+	uint64_t		tx_flowctl_decay;
+	uint64_t		tx_flowctl_dequeue;
 	int32_t			tx_fences;
-	uint8_t			tx_backoff_idx;
+	uint8_t			tx_flowctl_delay_idx;
+	uint8_t			tx_flowctl_retry_idx;
 
 	struct zhpe_conn_tree_key tkey;
 	uint64_t		rem_rma_flags;
@@ -1013,10 +1014,11 @@ static inline void zhpe_tx_entry_slot_free(struct zhpe_tx_entry *tx_entry,
 
 	/* Caller must check or "know". */
 	assert(cmp_idx);
+	assert(tx_entry->cmp_idx == cmp_idx);
 
-	zctx = tx_entry->conn->zctx;
 	zctx->ctx_ptrs[cmp_idx] = TO_PTR(zctx->ctx_ptrs_free);
 	zctx->ctx_ptrs_free = cmp_idx;
+	tx_entry->cmp_idx = 0;
 }
 
 enum {
@@ -1482,7 +1484,7 @@ void zhpe_msg_connect(struct zhpe_ctx *zctx, uint8_t op,
 		      uint32_t dgcid, uint32_t rspctxid);
 
 int zhpe_dom_mr_reg(struct zhpe_dom *zdom, const void *buf, size_t len,
-		    uint32_t qaccess, bool link, struct zhpe_mr **zmr_out);
+		    uint32_t qaccess, struct zhpe_mr **zmr_out);
 void zhpe_dom_mr_free(struct zhpe_mr *zmr);
 void zhpe_dom_cleanup_ctx(struct zhpe_ctx *zctx);
 void zhpe_dom_cleanup_conn(struct zhpe_conn *conn);
@@ -1580,6 +1582,8 @@ void zhpe_conn_connect_status_rx(struct zhpe_conn *conn, struct zhpe_msg *msg);
 struct zhpe_conn *zhpe_conn_av_lookup(struct zhpe_ctx *zctx, fi_addr_t fiaddr);
 int zhpe_conn_init(struct zhpe_ctx *zctx);
 void zhpe_conn_fini(struct zhpe_ctx *zctx);
+int zhpe_conn_init_flowctl(const char *table);
+void zhpe_conn_flowctl(struct zhpe_conn *conn, uint8_t retry_idx);
 void zhpe_conn_cleanup(struct zhpe_ctx *zctx);
 void zhpe_conn_dequeue_fence(struct zhpe_conn *conn);
 int zhpe_conn_eflags_error(uint8_t eflags);
