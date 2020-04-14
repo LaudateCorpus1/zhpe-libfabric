@@ -407,9 +407,9 @@ int zhpe_dom_mr_reg(struct zhpe_dom *zdom, const void *buf, size_t len,
 	zmr->zdom = zdom;
 	zmr->qkdata = NULL;
 	dlist_init(&zmr->kexp_list);
-	dlist_insert_tail(&zmr->dentry, &zdom->zmr_list);
 	zmr->qaccess = qaccess;
 	ofi_atomic_initialize32(&zmr->ref, 1);
+	dlist_insert_tail(&zmr->dentry, &zdom->zmr_list);
 	zdom_unlock(zdom);
 
 	ret = zdom->qkdata_mr_reg(zdom, buf, len, qaccess, &zmr->qkdata);
@@ -460,7 +460,6 @@ static int zhpe_regattr(struct fid *fid, const struct fi_mr_attr *attr,
 		goto done;
 	zdom_lock(zdom);
 	ret = ofi_mr_map_insert(zdom2map(zdom), attr, &key, zmr);
-	dlist_insert_tail(&zmr->dentry, &zdom->zmr_list);
 	zdom_unlock(zdom);
 	if (ret < 0)
 		goto done;
