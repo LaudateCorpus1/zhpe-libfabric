@@ -352,31 +352,14 @@ static int get_addr(uint32_t *addr_format, uint64_t flags,
 		    void **addr, size_t *addrlen)
 {
 	int			ret = -FI_EINVAL;
-	uint64_t		queue;
-	char			*ep;
 	struct sockaddr_zhpe	*sz;
 
-	/* ZZZ: Until we have address lookup. */
-	if (node && strcmp(node, "localhost"))
-		goto done;
-	if (service) {
-		errno = 0;
-		queue = strtoull(service, &ep, 0);
-		if (errno) {
-			ret = -errno;
-			goto done;
-		}
-		if (*ep || queue >= UINT32_MAX)
-			goto done;
-	} else
-		queue = 0;
-
-	sz = calloc(1, sizeof(*sz));
+	sz = malloc(sizeof(*sz));
 	if (!sz) {
 		ret = -FI_ENOMEM;
 		goto done;
 	}
-	ret = zhpeq_get_src_zaddr(sz, queue, !(flags & FI_SOURCE));
+	ret = zhpeq_get_zaddr(node, service, !!(flags & FI_SOURCE), sz);
 	if (ret < 0) {
 		free(sz);
 		goto done;
@@ -407,7 +390,7 @@ static int get_src_addr(uint32_t addr_format,
 		ret = -FI_ENOMEM;
 		goto done;
 	}
-	ret = zhpeq_get_src_zaddr(sz, 0, false);
+	ret = zhpeq_get_zaddr(NULL, NULL, true, sz);
 	if (ret < 0) {
 		free(sz);
 		goto done;

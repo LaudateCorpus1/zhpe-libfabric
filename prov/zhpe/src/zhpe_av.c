@@ -294,7 +294,7 @@ static int zhpe_av_nodesym_getaddr(struct util_av *av, const char *node,
 			FI_INFO(av->prov, FI_LOG_AV, "resolving %s:%s for AV "
 				"insert\n", node, service);
 
-			ret = zhpeq_get_zaddr(node, service, sz);
+			ret = zhpeq_get_zaddr(node, service, false, sz);
 			if (ret < 0)
 				goto done;
 			sz++;
