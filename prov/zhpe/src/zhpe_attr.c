@@ -34,10 +34,10 @@
 
 #include <zhpe.h>
 
-#define ZHPE_AV_DEF_SZ		(1U << 8)
+#define ZHPE_AV_DEF_SZ		(1U << 12)
 
 #define ZHPE_CQ_DATA_SZ		(sizeof(uint64_t))
-#define ZHPE_CQ_DEF_SZ		(1U << 8)
+#define ZHPE_CQ_DEF_SZ		(ZHPE_EP_DEF_TX_SZ)
 
 #define ZHPE_DOM_CAP		(FI_LOCAL_COMM | FI_REMOTE_COMM)
 #define ZHPE_DOM_MODE		(0UL)

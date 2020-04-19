@@ -85,12 +85,17 @@ void zhpe_conn_flowctl(struct zhpe_conn *conn, uint8_t retry_idx)
 
 	conn->tx_flowctl_decay = now;
 	conn->tx_flowctl_dequeue = now;
+	conn->tx_flowctl_retry_cnt++;
 	if (OFI_UNLIKELY(!(conn->flags & ZHPE_CONN_FLAG_FLOWCTL))) {
 		conn->tx_flowctl_delay_idx = conn_flowctl->first_step;
 		conn->tx_flowctl_retry_idx++;
 		if (OFI_UNLIKELY(!conn->tx_flowctl_retry_idx))
 			conn->tx_flowctl_retry_idx++;
 		zhpe_conn_flags_set(conn, ZHPE_CONN_FLAG_FLOWCTL);
+		zhpe_stats_stamp_dbg(__func__, __LINE__,
+				     (uintptr_t)conn,
+				     conn->tx_flowctl_delay_idx,
+				     conn->tx_flowctl_retry_idx, conn->flags);
 
 		return;
 	}
@@ -101,6 +106,10 @@ void zhpe_conn_flowctl(struct zhpe_conn *conn, uint8_t retry_idx)
 	    conn->tx_flowctl_delay_idx < conn_flowctl->delay_entries) {
 		conn->tx_flowctl_delay_idx++;
 		conn->tx_flowctl_retry_idx++;
+		zhpe_stats_stamp_dbg(__func__, __LINE__,
+				     (uintptr_t)conn,
+				     conn->tx_flowctl_delay_idx,
+				     conn->tx_flowctl_retry_idx, conn->flags);
 	}
 }
 
@@ -145,7 +154,8 @@ static bool conn_dequeue_wqe(struct zhpe_conn *conn,
 			return false;
 		}
 		msg = (void *)&wqe->enqa.payload;
-		msg->hdr.cmp_idxn = htons(tx_entry->cmp_idx);
+		if (OFI_UNLIKELY(tx_entry->cmp_idx))
+			msg->hdr.cmp_idxn = htons(tx_entry->cmp_idx);
 		msg->hdr.retry = retry_idx;
 	}
 
@@ -154,6 +164,9 @@ static bool conn_dequeue_wqe(struct zhpe_conn *conn,
 	tx_entry->cstat.flags &= ~ZHPE_CS_FLAG_QUEUED;
 	zhpeq_tq_set_context(zctx->ztq_hi, reservation, tx_entry);
 	zhpeq_tq_insert(zctx->ztq_hi, reservation);
+	zhpe_stats_stamp_dbg(__func__, __LINE__,
+			     (uintptr_t)tx_entry, tx_entry->cmp_idx,
+			     reservation, conn->tx_seq - 1);
 	zhpeq_tq_commit(zctx->ztq_hi);
 	zctx->pe_ctx_ops->signal(zctx);
 	dlist_remove(&txqe->dentry);
@@ -180,7 +193,11 @@ static void conn_dequeue_wqe_throttled(struct zhpe_conn *conn,
 		assert_always(conn->tx_flowctl_delay_idx > 0);
 		conn->tx_flowctl_delay_idx--;
 		if (OFI_UNLIKELY(!conn->tx_flowctl_delay_idx))
-			conn->flags &= ZHPE_CONN_FLAG_FLOWCTL;
+			conn->flags &= ~ZHPE_CONN_FLAG_FLOWCTL;
+		zhpe_stats_stamp_dbg(__func__, __LINE__,
+				     (uintptr_t)conn,
+				     conn->tx_flowctl_delay_idx,
+				     conn->tx_flowctl_retry_idx, conn->flags);
 	}
 }
 
@@ -573,13 +590,14 @@ void zhpe_conn_connect1_rx(struct zhpe_ctx *zctx, struct zhpe_msg *msg,
 		/* Some ugly stale edges? */
 		if (!(conn->flags & ZHPE_CONN_FLAG_CONNECT))
 			return;
-		/* Some kind of race: lower address wins. */
+		/* Some kind of race: lower address or self wins. */
 		rc = arithcmp(rem_gcid, cctx->lcl_gcid);
 		if (!rc)
 		    rc = arithcmp(tkey.rem_rspctxid0,
 				  cctx->zep->zctx[0]->lcl_rspctxid);
-		/* Quit if higher or self. */
-		if (rc >= 0)
+		/* Quit if higher. */
+		assert_always(rc);
+		if (rc > 0)
 			return;
 	}
 	assert_always(!conn->rem_rspctxid);
@@ -775,6 +793,9 @@ struct zhpe_conn *zhpe_conn_av_lookup(struct zhpe_ctx *zctx, fi_addr_t fiaddr)
 	struct sockaddr_zhpe	sz_copy;
 	struct zhpe_conn_tree_key tkey;
 	bool			new;
+	struct zhpe_dom		*zdom;
+	char			blob[ZHPE_MAX_MSG_PAYLOAD];
+	size_t			blob_len;
 	int			rc MAYBE_UNUSED;
 
 	conn = ofi_idm_lookup(&zctx->conn_av_idm, av_idx);
@@ -803,7 +824,30 @@ struct zhpe_conn *zhpe_conn_av_lookup(struct zhpe_ctx *zctx, fi_addr_t fiaddr)
 
 	if ((tkey.rem_rspctxid0 & ZHPE_SZQ_FLAGS_MASK) == ZHPE_SZQ_FLAGS_FAM)
 		conn_fam_setup(conn, &sz_copy);
-	else {
+	else if (tkey.rem_rspctxid0 == zctx->zep->zctx[0]->lcl_rspctxid) {
+		/* Me, myself, and I. */
+		conn->tx_seq = conn->rx_zseq.seq;
+		conn->rem_conn_idxn =
+			htons(zhpe_ibuf_index(&zctx->conn_pool, conn));
+		conn->rem_rspctxid = zctx->lcl_rspctxid;
+		conn->rem_rma_flags = conn_wire_rma_flags(zctx);
+		zdom = zctx2zdom(zctx);
+		rc = zhpeq_domain_insert_addr(zdom->zqdom, &sz_copy,
+					      &conn->addr_cookie);
+		assert_always(rc >= 0);
+		blob_len = sizeof(blob);
+		rc = zhpeq_qkdata_export(zdom->reg_zmr->qkdata,
+					 zdom->reg_zmr->qkdata->z.access,
+					 blob, &blob_len);
+		assert_always(rc >= 0);
+		rc = zhpeq_qkdata_import(zdom->zqdom, conn->addr_cookie,
+					 blob, blob_len, &conn->qkdata);
+		assert_always(!rc);
+		rc = zhpeq_zmmu_reg(conn->qkdata);
+		assert_always(rc >= 0);
+		conn->rx_reqzmmu =
+			conn->qkdata->z.zaddr - conn->qkdata->z.vaddr;
+	} else {
 		zhpe_conn_flags_set(conn, ZHPE_CONN_FLAG_CONNECT);
 		conn_connect1_tx(conn, sz_copy.sz_uuid);
 	}
@@ -876,6 +920,11 @@ void zhpe_conn_cleanup(struct zhpe_ctx *zctx)
 		if (!conn)
 			continue;
 		assert_always(conn->zctx);
+		if (conn->tx_flowctl_retry_cnt || conn->rx_zseq.rx_oos_cnt)
+			fprintf(stderr, "%s:tx_flowctl_retry_cnt %" PRIu64
+				" rx_oos_cnt %" PRIu64 "\n",
+				__func__, conn->tx_flowctl_retry_cnt,
+				conn->rx_zseq.rx_oos_cnt);
 		zhpeq_qkdata_free(conn->qkdata);
 		conn->qkdata = NULL;
 		zhpeq_domain_remove_addr(zdom->zqdom, conn->addr_cookie);

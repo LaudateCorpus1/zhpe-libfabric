@@ -223,6 +223,7 @@ static int zhpe_ctx_qalloc(struct zhpe_ctx *zctx)
 		ZHPE_LOG_ERROR("zhpe_tq_alloc() error %d\n", ret);
 		goto done;
 	}
+	zctx->tx_size = zctx->ztq_hi->tqinfo.cmdq.ent * 2;
 	/* Low priority for RMA. */
 	for (i = 0; i < ZHPE_MAX_SLICES; i++) {
 		/* ZZZ: Traffic class? */
@@ -232,11 +233,16 @@ static int zhpe_ctx_qalloc(struct zhpe_ctx *zctx)
 		if (ret < 0) {
 			if (ret == -ENOENT)
 				continue;
-			ZHPE_LOG_ERROR("zhpe_tq_alloc() error %d\n", ret);
+			ZHPE_LOG_ERROR("zhpeq_tq_alloc() error %d\n", ret);
 			goto done;
 		}
 		if (++(zctx->tx_ztq_slices) >= zhpeq_attr.z.num_slices)
 			break;
+	}
+	if (!zctx->tx_ztq_slices) {
+		ret = -ENOENT;
+		ZHPE_LOG_ERROR("zhpeq_tq_alloc() error %d\n", ret);
+		goto done;
 	}
 	if (info->src_addr && info->src_addrlen) {
 		qspecific = ((struct sockaddr_zhpe *)info->src_addr)->sz_queue;

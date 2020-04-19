@@ -156,6 +156,9 @@ static void tx_conn_retry(struct zhpe_tx_entry *tx_entry, uint16_t index)
 	txqe = zhpe_buf_alloc(&zctx->tx_queue_pool);
 	txqe->tx_entry = tx_entry;
 	txqe->wqe = *wqe;
+	zhpe_stats_stamp_dbg(__func__, __LINE__,
+			     (uintptr_t)tx_entry, tx_entry->cmp_idx,
+			     msg->hdr.retry, 0);
 	zhpe_conn_flowctl(conn, msg->hdr.retry);
 	tx_entry->cstat.flags |= ZHPE_CS_FLAG_QUEUED;
 	zctx->tx_queued++;

@@ -431,9 +431,11 @@ struct zhpe_conn {
 	struct zhpe_ctx		*zctx;
 	uint32_t		tx_seq;
 	int32_t			tx_queued;
+	int32_t			tx_size;
 	struct dlist_entry	tx_queue;
 	struct dlist_entry	tx_dequeue_dentry;
 	void			(*tx_dequeue)(struct zhpe_conn *conn);
+	uint64_t		tx_flowctl_retry_cnt;
 	uint64_t		tx_flowctl_decay;
 	uint64_t		tx_flowctl_dequeue;
 	int32_t			tx_fences;

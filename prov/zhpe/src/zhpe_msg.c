@@ -546,6 +546,10 @@ static int send_inline(struct zhpe_ctx *zctx, void *op_context, uint64_t tag,
 		return -FI_EOPBADSTATE;
 
 	zctx_lock(zctx);
+	if (OFI_UNLIKELY(zctx->tx_queued >= zctx->tx_size)) {
+		zctx_unlock(zctx);
+		return -EAGAIN;
+	}
 	zhpe_stats_start(zhpe_stats_subid(SEND, 10));
 	conn = zhpe_conn_av_lookup(zctx, dst_addr);
 	zhpe_stats_stop(zhpe_stats_subid(SEND, 10));
@@ -731,6 +735,11 @@ static int send_iov(struct zhpe_ctx *zctx, void *op_context, uint64_t tag,
 		return rc;
 
 	zctx_lock(zctx);
+	if (OFI_UNLIKELY(zctx->tx_queued >= zctx->tx_size)) {
+		send_zmr_put(ptrs, rc);
+		zctx_unlock(zctx);
+		return -EAGAIN;
+	}
 	zhpe_stats_start(zhpe_stats_subid(SEND, 10));
 	conn = zhpe_conn_av_lookup(zctx, dst_addr);
 	zhpe_stats_stop(zhpe_stats_subid(SEND, 10));
