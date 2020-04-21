@@ -824,7 +824,8 @@ struct zhpe_conn *zhpe_conn_av_lookup(struct zhpe_ctx *zctx, fi_addr_t fiaddr)
 
 	if ((tkey.rem_rspctxid0 & ZHPE_SZQ_FLAGS_MASK) == ZHPE_SZQ_FLAGS_FAM)
 		conn_fam_setup(conn, &sz_copy);
-	else if (tkey.rem_rspctxid0 == zctx->zep->zctx[0]->lcl_rspctxid) {
+	else if (tkey.rem_gcid == zctx->zep->zctx[0]->lcl_gcid &&
+		 tkey.rem_rspctxid0 == zctx->zep->zctx[0]->lcl_rspctxid) {
 		/* Me, myself, and I. */
 		conn->tx_seq = conn->rx_zseq.seq;
 		conn->rem_conn_idxn =

@@ -29,7 +29,7 @@
  * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
  * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
  * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.5B
+ * SOFTWARE.
  */
 
 #include <zhpe.h>
@@ -879,8 +879,7 @@ static void rx_handle_msg_status(struct zhpe_conn *conn, struct zhpe_msg *msg)
 	/* Get tx_entry and free ctx_ptrs slot. */
 	tx_entry = zctx->ctx_ptrs[cmp_idx];
 	zhpe_stats_stamp_dbg(__func__, __LINE__,
-			     (uintptr_t)tx_entry, tx_entry->cmp_idx, 0,
-			     ntohl(msg->hdr.seqn));
+			     (uintptr_t)tx_entry, tx_entry->cmp_idx, 0, 0);
 	zhpe_tx_entry_slot_free(tx_entry, cmp_idx);
 
 	zhpe_cstat_update_status(&tx_entry->cstat,
@@ -1091,8 +1090,8 @@ static void rx_wire_init(struct zhpe_rx_entry *rx_wire, struct zhpe_conn *conn,
 	union zhpe_msg_payload	*pay = (void *)msg->payload;
 
 	zhpe_stats_stamp_dbg(__func__, __LINE__,
-			     (uintptr_t)rx_wire, ntohs(msg->hdr.cmp_idxn), 0,
-			     ntohl(msg->hdr.seqn));
+			     (uintptr_t)rx_wire, ntohs(msg->hdr.cmp_idxn),
+			     0, 0);
 
 	rx_wire->tx_entry.conn = conn;
 	rx_wire->match_info.tag = tag;
@@ -1182,6 +1181,10 @@ static void rx_handle_msg_send(struct zhpe_conn *conn, struct zhpe_msg *msg)
 
 static void rx_handle_msg(struct zhpe_conn *conn, struct zhpe_msg *msg)
 {
+	zhpe_stats_stamp_dbg(__func__, __LINE__,
+			     (uintptr_t)conn, (uintptr_t)msg, msg->hdr.op,
+			     ntohl(msg->hdr.seqn));
+
 	switch (msg->hdr.op) {
 
 	case ZHPE_OP_CONNECT2:
@@ -1331,6 +1334,10 @@ void zhpe_rx_msg_handler_unconnected(struct zhpe_conn *conn,
 {
 	struct zhpe_ctx		*zctx = conn->zctx;
 	struct zhpe_msg		*msg = (void *)&rqe->payload;
+
+	zhpe_stats_stamp_dbg(__func__, __LINE__,
+			     (uintptr_t)conn, (uintptr_t)msg, msg->hdr.op,
+			     ntohl(msg->hdr.seqn));
 
 	/* ZZZ: Add version checking. */
 	switch (msg->hdr.op) {

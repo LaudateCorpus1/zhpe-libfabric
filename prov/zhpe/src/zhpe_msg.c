@@ -456,7 +456,7 @@ void zhpe_tx_reserve(struct zhpeq_tq *ztq, struct zhpe_tx_entry *tx_entry,
 static void send_inline_msg1(struct zhpe_conn *conn,
 			     union zhpe_hw_wq_entry *wqe,
 			     const void *buf, size_t len, uint8_t op,
-			     uint8_t op_zflags,  uint64_t tag, uint64_t cq_data,
+			     uint8_t op_zflags, uint64_t tag, uint64_t cq_data,
 			     uint16_t cmp_idx)
 {
 	struct zhpe_msg		*msg = (void *)&wqe->enqa.payload;
@@ -587,9 +587,12 @@ static int send_inline(struct zhpe_ctx *zctx, void *op_context, uint64_t tag,
 		send_inline_msg1(conn, wqe[0], buf, len, op, op_zflags, tag,
 				 cq_data, tx_entry->cmp_idx);
 		zhpeq_tq_insert(zctx->ztq_hi, reservation[0]);
+		zhpe_stats_stamp_dbg(__func__, __LINE__, (uintptr_t)conn,
+				     ntohs(conn->rem_conn_idxn), op,
+				     conn->tx_seq - 1);
 		zhpe_stats_stamp_dbg(__func__, __LINE__,
 				     (uintptr_t)tx_entry, tx_entry->cmp_idx,
-				     reservation[0], conn->tx_seq - 1);
+				     reservation[0], 0);
 	} else {
 		tx_entry->cstat.completions++;
 		zhpe_tx_reserve(zctx->ztq_hi, tx_entry, 2, wqe, reservation);
@@ -602,9 +605,12 @@ static int send_inline(struct zhpe_ctx *zctx, void *op_context, uint64_t tag,
 		send_inline_msg2(conn, wqe[1], buf, len);
 		zhpeq_tq_insert(zctx->ztq_hi, reservation[0]);
 		zhpeq_tq_insert(zctx->ztq_hi, reservation[1]);
+		zhpe_stats_stamp_dbg(__func__, __LINE__, (uintptr_t)conn,
+				     ntohs(conn->rem_conn_idxn), op,
+				     conn->tx_seq - 2);
 		zhpe_stats_stamp_dbg(__func__, __LINE__,
 				     (uintptr_t)tx_entry, tx_entry->cmp_idx,
-				     reservation[0], conn->tx_seq - 1);
+				     reservation[0], reservation[1]);
 	}
 	zhpeq_tq_commit(zctx->ztq_hi);
 	zctx->pe_ctx_ops->signal(zctx);
@@ -776,9 +782,12 @@ static int send_iov(struct zhpe_ctx *zctx, void *op_context, uint64_t tag,
 				  uiov_cnt, tx_entry->cmp_idx);
 		send_iov_iov(wqe[0], i, &uiov[0]);
 		zhpeq_tq_insert(zctx->ztq_hi, reservation[0]);
+		zhpe_stats_stamp_dbg(__func__, __LINE__, (uintptr_t)conn,
+				     ntohs(conn->rem_conn_idxn), op,
+				     conn->tx_seq - 1);
 		zhpe_stats_stamp_dbg(__func__, __LINE__,
 				     (uintptr_t)tx_entry, tx_entry->cmp_idx,
-				     reservation[0], conn->tx_seq - 1);
+				     reservation[0], 0);
 		goto done_unlock;
 	}
 
@@ -796,9 +805,12 @@ static int send_iov(struct zhpe_ctx *zctx, void *op_context, uint64_t tag,
 		send_iov_iov(wqe[1], 0, &uiov[1]);
 		zhpeq_tq_insert(zctx->ztq_hi, reservation[0]);
 		zhpeq_tq_insert(zctx->ztq_hi, reservation[1]);
+		zhpe_stats_stamp_dbg(__func__, __LINE__, (uintptr_t)conn,
+				     ntohs(conn->rem_conn_idxn), op,
+				     conn->tx_seq - 2);
 		zhpe_stats_stamp_dbg(__func__, __LINE__,
 				     (uintptr_t)tx_entry, tx_entry->cmp_idx,
-				     reservation[0], conn->tx_seq - 2);
+				     reservation[0], reservation[1]);
 	} else {
 		/* Fits in one message. */
 		zhpe_tx_reserve(zctx->ztq_hi, tx_entry, 1, wqe, reservation);
@@ -808,9 +820,12 @@ static int send_iov(struct zhpe_ctx *zctx, void *op_context, uint64_t tag,
 		i = send_iov_iov(wqe[0], i, &uiov[0]);
 		send_iov_iov(wqe[0], i, &uiov[1]);
 		zhpeq_tq_insert(zctx->ztq_hi, reservation[0]);
+		zhpe_stats_stamp_dbg(__func__, __LINE__, (uintptr_t)conn,
+				     ntohs(conn->rem_conn_idxn), op,
+				     conn->tx_seq - 1);
 		zhpe_stats_stamp_dbg(__func__, __LINE__,
 				     (uintptr_t)tx_entry, tx_entry->cmp_idx,
-				     reservation[0], conn->tx_seq - 1);
+				     reservation[0], 0);
 	}
 
  done_unlock:
@@ -1617,6 +1632,11 @@ void zhpe_msg_prov_no_eflags(struct zhpe_conn *conn, uint8_t op,
 			    conn->rem_rspctxid, wqe[0]);
 	zhpeq_tq_insert(zctx->ztq_hi, reservation[0]);
 	zhpeq_tq_commit(zctx->ztq_hi);
+	zhpe_stats_stamp_dbg(__func__, __LINE__, (uintptr_t)conn,
+			     ntohs(conn->rem_conn_idxn), op, tx_seq);
+	zhpe_stats_stamp_dbg(__func__, __LINE__,
+			     (uintptr_t)&conn->tx_entry_prov, 0,
+			     reservation[0], 0);
 	/* Need to signal only from user contexts. */
 }
 
@@ -1644,6 +1664,11 @@ void zhpe_msg_connect(struct zhpe_ctx *zctx, uint8_t op,
 			    dgcid, rspctxid, wqe[0]);
 	zhpeq_tq_insert(zctx->ztq_hi, reservation[0]);
 	zhpeq_tq_commit(zctx->ztq_hi);
+	zhpe_stats_stamp_dbg(__func__, __LINE__, (uintptr_t)conn,
+			     ntohs(conn->rem_conn_idxn), op, tx_seq);
+	zhpe_stats_stamp_dbg(__func__, __LINE__,
+			     (uintptr_t)&conn->tx_entry_prov, 0,
+			     reservation[0], 0);
 	zctx->pe_ctx_ops->signal(zctx);
 }
 
