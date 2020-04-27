@@ -107,6 +107,8 @@ static int zhpe_mr_close(struct fid *fid)
 	int			val;
 	int			rc MAYBE_UNUSED;
 
+	zhpe_stats_stamp_dbg(__func__, __LINE__,
+			     (uintptr_t)zmr, 0, 0, key);
 	/*
 	 * We have to send the KEY_REVOKE messages and wait for the KEY_RELEASE
 	 * response to occur before we can free the actual registration.
@@ -366,6 +368,9 @@ void zhpe_dom_key_export(struct zhpe_conn *conn, uint64_t key)
 		kexp->zmr = attr->context;
 		assert_always((uintptr_t)attr->mr_iov[0].iov_base ==
 			      kexp->zmr->qkdata->z.vaddr);
+		zhpe_stats_stamp_dbg(__func__, __LINE__,
+				     (uintptr_t)kexp->zmr, kexp->zmr->closed,
+				     0, key);
 		if (OFI_LIKELY(!kexp->zmr->closed)) {
 			rc = ofi_rbmap_insert(&zdom->kexp_tree, &kexp->tkey,
 					      kexp, NULL);
@@ -383,6 +388,7 @@ void zhpe_dom_key_export(struct zhpe_conn *conn, uint64_t key)
 
 	/* No key. */
 	free(kexp);
+	zhpe_stats_stamp_dbg(__func__, __LINE__, 0, 0, 0, key);
 	zhpe_send_key_response(conn, key, NULL, 0);
 }
 
@@ -407,9 +413,10 @@ int zhpe_dom_mr_reg(struct zhpe_dom *zdom, const void *buf, size_t len,
 	zmr->zdom = zdom;
 	zmr->qkdata = NULL;
 	dlist_init(&zmr->kexp_list);
+	dlist_insert_tail(&zmr->dentry, &zdom->zmr_list);
 	zmr->qaccess = qaccess;
 	ofi_atomic_initialize32(&zmr->ref, 1);
-	dlist_insert_tail(&zmr->dentry, &zdom->zmr_list);
+	zmr->closed = false;
 	zdom_unlock(zdom);
 
 	ret = zdom->qkdata_mr_reg(zdom, buf, len, qaccess, &zmr->qkdata);
@@ -463,6 +470,8 @@ static int zhpe_regattr(struct fid *fid, const struct fi_mr_attr *attr,
 	zdom_unlock(zdom);
 	if (ret < 0)
 		goto done;
+	zhpe_stats_stamp_dbg(__func__, __LINE__,
+			     (uintptr_t)zmr, 0, 0, key);
 	zmr->mr_fid.fid.context = attr->context;
 	zmr->mr_fid.key = key;
 

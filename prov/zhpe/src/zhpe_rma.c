@@ -87,6 +87,9 @@ void zhpe_rma_rkey_import(struct zhpe_conn *conn, uint64_t key,
 	assert_always(rbnode != NULL);
 	rkey = rbnode->data;
 	if (OFI_LIKELY(blob_len)) {
+		zhpe_stats_stamp_dbg(__func__, __LINE__,
+				     (uintptr_t)rbnode, tkey.rem_gcid,
+				     tkey.rem_rspctxid, tkey.key);
 		rc = zhpeq_qkdata_import(zctx2zdom(zctx)->zqdom,
 					 conn->addr_cookie, blob, blob_len,
 					 &rkey->qkdata);
@@ -97,6 +100,9 @@ void zhpe_rma_rkey_import(struct zhpe_conn *conn, uint64_t key,
 			rkey->offset = rkey->qkdata->z.vaddr;
 		status = 0;
 	} else {
+		zhpe_stats_stamp_dbg(__func__, __LINE__,
+				     (uintptr_t)rbnode, tkey.rem_gcid,
+				     tkey.rem_rspctxid, tkey.key);
 		ofi_rbmap_delete(&zctx->rkey_tree, rbnode);
 		status = -FI_ENOKEY;
 	}
@@ -127,6 +133,9 @@ void zhpe_rma_rkey_revoke(struct zhpe_conn *conn, uint64_t key)
 
 	/* Sequencing and locking on the sender means the entry must exist. */
 	rbnode = ofi_rbmap_find(&zctx->rkey_tree, &tkey);
+	zhpe_stats_stamp_dbg(__func__, __LINE__,
+			     (uintptr_t)rbnode, tkey.rem_gcid,
+			     tkey.rem_rspctxid, tkey.key);
 	assert_always(rbnode);
 	rkey = rbnode->data;
 	ofi_rbmap_delete(&zctx->rkey_tree, rbnode);
@@ -151,6 +160,9 @@ zhpe_rma_rkey_lookup(struct zhpe_conn *conn, uint64_t key,
 	int			rc;
 
 	rbnode = ofi_rbmap_find(&zctx->rkey_tree, &tkey);
+	zhpe_stats_stamp_dbg(__func__, __LINE__,
+			     (uintptr_t)rbnode, tkey.rem_gcid,
+			     tkey.rem_rspctxid, tkey.key);
 	if (OFI_UNLIKELY(!rbnode)) {
 		rkey = xmalloc(sizeof(*rkey));
 		rkey->tkey = tkey;
