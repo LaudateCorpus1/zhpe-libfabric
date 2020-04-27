@@ -921,11 +921,6 @@ void zhpe_conn_cleanup(struct zhpe_ctx *zctx)
 		if (!conn)
 			continue;
 		assert_always(conn->zctx);
-		if (conn->tx_flowctl_retry_cnt || conn->rx_zseq.rx_oos_cnt)
-			fprintf(stderr, "%s:tx_flowctl_retry_cnt %" PRIu64
-				" rx_oos_cnt %" PRIu64 "\n",
-				__func__, conn->tx_flowctl_retry_cnt,
-				conn->rx_zseq.rx_oos_cnt);
 		zhpeq_qkdata_free(conn->qkdata);
 		conn->qkdata = NULL;
 		zhpeq_domain_remove_addr(zdom->zqdom, conn->addr_cookie);
