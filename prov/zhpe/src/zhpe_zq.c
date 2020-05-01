@@ -450,6 +450,7 @@ void zhpe_iov_rma(struct zhpe_tx_entry *tx_entry,
 			txqe->tx_entry = tx_entry;
 			/* Insert in front of any fenced I/Os. */
 			dlist_insert_head(&txqe->dentry, &conn->tx_queue);
+			zhpe_conn_flags_set(conn, ZHPE_CONN_FLAG_CLEANUP);
 		}
 	}
 }

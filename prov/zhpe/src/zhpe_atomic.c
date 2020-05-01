@@ -348,6 +348,7 @@ static void atomic_rkey_wait_handler(void *handler_arg, int status)
 			tx_entry->cstat.flags |= ZHPE_CS_FLAG_QUEUED;
 			/* Insert in front of any fenced I/Os. */
 			dlist_insert_head(&txqe->dentry, &conn->tx_queue);
+			zhpe_conn_flags_set(conn, ZHPE_CONN_FLAG_CLEANUP);
 		}
 		return;
 	}
