@@ -212,7 +212,7 @@ int zhpe_slab_init(struct zhpe_slab *slab, size_t size,
 	size = (size + ~CHUNK_SIZE_MASK) & CHUNK_SIZE_MASK;
 	slab->size = size;
 	dlist_init(&slab->free_list);
-	slab->mem = _malloc_aligned(page_size, size);
+	slab->mem = _malloc_aligned(zhpeu_init_time->pagesz, size);
 	if (!slab->mem)
 		goto done;
 	ret = 0;

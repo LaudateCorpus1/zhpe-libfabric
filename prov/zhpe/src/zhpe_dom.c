@@ -652,8 +652,9 @@ int zhpe_domain(struct fid_fabric *fid_fabric, struct fi_info *info,
 	if (ret < 0)
 		goto done;
 
-	zdom->reg_page = xmalloc_aligned(page_size, page_size);
-	ret = zhpe_dom_mr_reg(zdom, zdom->reg_page, page_size,
+	zdom->reg_page = xmalloc_aligned(zhpeu_init_time->pagesz,
+					 zhpeu_init_time->pagesz);
+	ret = zhpe_dom_mr_reg(zdom, zdom->reg_page, zhpeu_init_time->pagesz,
 			      access2qaccess(ZHPE_MR_ACCESS_ALL),
 			      &zdom->reg_zmr);
 	if (ret < 0)
