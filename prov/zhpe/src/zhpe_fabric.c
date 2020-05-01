@@ -161,6 +161,7 @@ static int mmap_rkey_lookup(struct fid_ep *fid_ep, fi_addr_t fi_addr,
 		zhpe_rma_rkey_put(rkey);
 
  done:
+	zctx_unlock(zctx);
 	*rkey_out = rkey;
 
 	return ret;
