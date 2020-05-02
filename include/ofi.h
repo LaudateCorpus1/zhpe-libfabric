@@ -67,6 +67,10 @@ extern "C" {
 
 /* For in-tree providers */
 #define OFI_VERSION_LATEST	FI_VERSION(FI_MAJOR_VERSION, FI_MINOR_VERSION)
+/* The lower minor digit is reserved for custom libfabric builds */
+#define OFI_VERSION_DEF_PROV \
+	FI_VERSION(FI_MAJOR_VERSION * 100 + FI_MINOR_VERSION, \
+		   FI_REVISION_VERSION * 10)
 
 #define OFI_GETINFO_INTERNAL	(1ULL << 58)
 #define OFI_CORE_PROV_ONLY	(1ULL << 59)
@@ -80,6 +84,15 @@ extern "C" {
 				 FI_ORDER_ATOMIC_WAR)
 #define OFI_ORDER_WAW_SET	(FI_ORDER_WAW | FI_ORDER_RMA_WAW | \
 				 FI_ORDER_ATOMIC_WAW)
+
+#define OFI_IGNORED_TX_CAPS /* older Rx caps not applicable to Tx */ \
+	(FI_REMOTE_READ | FI_REMOTE_WRITE | FI_RECV | FI_DIRECTED_RECV | \
+	 FI_VARIABLE_MSG | FI_MULTI_RECV | FI_SOURCE | FI_RMA_EVENT | \
+	 FI_SOURCE_ERR)
+#define OFI_IGNORED_RX_CAPS /* Older Tx caps not applicable to Rx */ \
+	(FI_READ | FI_WRITE | FI_SEND | FI_FENCE | FI_MULTICAST | \
+	 FI_NAMED_RX_CTX)
+
 
 #define sizeof_field(type, field) sizeof(((type *)0)->field)
 
@@ -267,6 +280,8 @@ uint64_t ofi_tag_format(uint64_t max_tag);
 uint8_t ofi_msb(uint64_t num);
 uint8_t ofi_lsb(uint64_t num);
 
+extern size_t ofi_universe_size;
+
 int ofi_send_allowed(uint64_t caps);
 int ofi_recv_allowed(uint64_t caps);
 int ofi_rma_initiate_allowed(uint64_t caps);
@@ -330,6 +345,25 @@ static inline uint64_t ofi_idx2key(struct ofi_key_idx *key_idx, uint64_t idx)
 static inline uint64_t ofi_key2idx(struct ofi_key_idx *key_idx, uint64_t key)
 {
 	return key & ((1ULL << key_idx->idx_bits) - 1);
+}
+
+static inline uint32_t ofi_xorshift_random(uint32_t val)
+{
+	/*
+	 * Xorshift Random Number Generators are from 224.
+	 * R. P. Brent, Some long-period random number
+	 * generators using shifts and xors, ANZIAM
+	 * Journal 48 (CTAC2006), C188-C202, 2007.
+	 * Presented at the 13th Biennial Computational
+	 * Techniques and Applications
+	 * Conference (CTAC06), Townsville, 2-5 July 2006.
+	 * arXiv:1004.3115v1
+	 */
+	val ^= val << 13;
+	val ^= val >> 17;
+	val ^= val << 5;
+
+	return val;
 }
 
 

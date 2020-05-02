@@ -72,6 +72,8 @@ enum {
 	smr_src_inline,	/* command data */
 	smr_src_inject,	/* inject buffers */
 	smr_src_iov,	/* reference iovec via CMA */
+	smr_src_mmap,	/* mmap-based fallback protocol */
+	smr_src_sar,	/* segmentation fallback protocol */
 };
 
 #define SMR_REMOTE_CQ_DATA	(1 << 0)
@@ -79,6 +81,13 @@ enum {
 #define SMR_TX_COMPLETION	(1 << 2)
 #define SMR_RX_COMPLETION	(1 << 3)
 #define SMR_MULTI_RECV		(1 << 4)
+
+/* CMA capability */
+enum {
+	SMR_CMA_CAP_NA,
+	SMR_CMA_CAP_ON,
+	SMR_CMA_CAP_OFF,
+};
 
 /* 
  * Unique smr_op_hdr for smr message protocol:
@@ -108,18 +117,21 @@ struct smr_msg_hdr {
 	};
 };
 
-#define SMR_MSG_DATA_LEN	(128 - sizeof(struct smr_msg_hdr))
+#define SMR_MSG_DATA_LEN	(SMR_CMD_SIZE - sizeof(struct smr_msg_hdr))
 #define SMR_COMP_DATA_LEN	(SMR_MSG_DATA_LEN / 2)
 union smr_cmd_data {
 	uint8_t			msg[SMR_MSG_DATA_LEN];
 	struct {
-		uint8_t		iov_count;
-		struct iovec	iov[(SMR_MSG_DATA_LEN - 8) /
+		size_t		iov_count;
+		struct iovec	iov[(SMR_MSG_DATA_LEN - sizeof(size_t)) /
 				    sizeof(struct iovec)];
 	};
 	struct {
 		uint8_t		buf[SMR_COMP_DATA_LEN];
 		uint8_t		comp[SMR_COMP_DATA_LEN];
+	};
+	struct {
+		uint64_t	sar;
 	};
 };
 
@@ -148,21 +160,28 @@ struct smr_cmd {
 
 #define SMR_INJECT_SIZE		4096
 #define SMR_COMP_INJECT_SIZE	(SMR_INJECT_SIZE / 2)
+#define SMR_SAR_SIZE		16384
 
 struct smr_addr {
 	char		name[NAME_MAX];
 	fi_addr_t	addr;
 };
 
-
-struct smr_ep_name {
-	char name[NAME_MAX];
-	struct dlist_entry entry;
+struct smr_peer_data {
+	struct smr_addr		addr;
+	uint64_t		sar_status;
 };
 
 extern struct dlist_entry ep_name_list;
+extern pthread_mutex_t ep_list_lock;
 
 struct smr_region;
+
+struct smr_ep_name {
+	char name[NAME_MAX];
+	struct smr_region *region;
+	struct dlist_entry entry;
+};
 
 struct smr_peer {
 	struct smr_addr		peer;
@@ -181,6 +200,8 @@ struct smr_region {
 	uint8_t		resv;
 	uint16_t	flags;
 	int		pid;
+	uint8_t		cma_cap;
+	void		*base_addr;
 	fastlock_t	lock; /* lock for shm access
 				 Must hold smr->lock before tx/rx cq locks
 				 in order to progress or post recv */
@@ -193,12 +214,14 @@ struct smr_region {
 				    Might not always be paired consistently with
 				    cmd alloc/free depending on protocol
 				    (Ex. unexpected messages, RMA requests) */
+	size_t		sar_cnt;
 
 	/* offsets from start of smr_region */
 	size_t		cmd_queue_offset;
 	size_t		resp_queue_offset;
 	size_t		inject_pool_offset;
-	size_t		peer_addr_offset;
+	size_t		sar_pool_offset;
+	size_t		peer_data_offset;
 	size_t		name_offset;
 };
 
@@ -217,9 +240,24 @@ struct smr_inject_buf {
 	};
 };
 
+enum {
+	SMR_SAR_FREE = 0, /* buffer can be used */
+	SMR_SAR_READY, /* buffer has data in it */
+};
+
+struct smr_sar_buf {
+	uint64_t	status;
+	uint8_t		buf[SMR_SAR_SIZE];
+};
+
+struct smr_sar_msg {
+	struct smr_sar_buf	sar[2];
+};
+
 OFI_DECLARE_CIRQUE(struct smr_cmd, smr_cmd_queue);
 OFI_DECLARE_CIRQUE(struct smr_resp, smr_resp_queue);
 DECLARE_SMR_FREESTACK(struct smr_inject_buf, smr_inject_pool);
+DECLARE_SMR_FREESTACK(struct smr_sar_msg, smr_sar_pool);
 
 static inline struct smr_region *smr_peer_region(struct smr_region *smr, int i)
 {
@@ -237,9 +275,13 @@ static inline struct smr_inject_pool *smr_inject_pool(struct smr_region *smr)
 {
 	return (struct smr_inject_pool *) ((char *) smr + smr->inject_pool_offset);
 }
-static inline struct smr_addr *smr_peer_addr(struct smr_region *smr)
+static inline struct smr_peer_data *smr_peer_data(struct smr_region *smr)
 {
-	return (struct smr_addr *) ((char *) smr + smr->peer_addr_offset); 
+	return (struct smr_peer_data *) ((char *) smr + smr->peer_data_offset); 
+}
+static inline struct smr_sar_pool *smr_sar_pool(struct smr_region *smr)
+{
+	return (struct smr_sar_pool *) ((char *) smr + smr->sar_pool_offset); 
 }
 static inline const char *smr_name(struct smr_region *smr)
 {
@@ -257,6 +299,11 @@ struct smr_attr {
 	size_t		tx_count;
 };
 
+size_t smr_calculate_size_offsets(size_t tx_count, size_t rx_count,
+				  size_t *cmd_offset, size_t *resp_offset,
+				  size_t *inject_offset, size_t *sar_offset,
+				  size_t *peer_offset, size_t *name_offset);
+void	smr_cma_check(struct smr_region *region, struct smr_region *peer_region);
 void	smr_cleanup(void);
 int	smr_map_create(const struct fi_provider *prov, int peer_count,
 		       struct smr_map **map);

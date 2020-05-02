@@ -121,10 +121,6 @@ These OFI runtime parameters apply only to the RDM endpoint.
   buffer for iov's larger than max_memcpy_size. Defaults to true. When
   disabled, only uses a bounce buffer
 
-*FI_EFA_MR_CACHE_MERGE_REGIONS*
-: Enables merging overlapping and adjacent memory registration regions.
-  Defaults to true.
-
 *FI_EFA_MR_MAX_CACHED_COUNT*
 : Sets the maximum number of memory registrations that can be cached at
   any time.
@@ -167,6 +163,9 @@ These OFI runtime parameters apply only to the RDM endpoint.
 *FI_EFA_SHM_MAX_MEDIUM_SIZE*
 : Defines the switch point between small/medium message and large message. The message
   larger than this switch point will be transferred with large message protocol.
+
+*FI_EFA_INTER_MAX_MEDIUM_MESSAGE_SIZE*
+: The maximum size for inter EFA messages to be sent by using medium message protocol. Messages which can fit in one packet will be sent as eager message. Messages whose sizes are smaller than this value will be sent using medium message protocol. Other messages will be sent using CTS based long message protocol.
 
 # SEE ALSO
 

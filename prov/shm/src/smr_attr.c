@@ -36,7 +36,8 @@
 #define SMR_RX_CAPS (FI_SOURCE | FI_RMA_EVENT | OFI_RX_MSG_CAPS | FI_TAGGED | \
 		     OFI_RX_RMA_CAPS | FI_ATOMICS | FI_DIRECTED_RECV | \
 		     FI_MULTI_RECV)
-#define SMR_TX_OP_FLAGS (FI_COMPLETION | FI_INJECT_COMPLETE | FI_TRANSMIT_COMPLETE)
+#define SMR_TX_OP_FLAGS (FI_COMPLETION | FI_INJECT_COMPLETE | \
+			 FI_TRANSMIT_COMPLETE | FI_DELIVERY_COMPLETE)
 #define SMR_RX_OP_FLAGS (FI_COMPLETION | FI_MULTI_RECV)
 
 struct fi_tx_attr smr_tx_attr = {
@@ -94,7 +95,7 @@ struct fi_domain_attr smr_domain_attr = {
 
 struct fi_fabric_attr smr_fabric_attr = {
 	.name = "shm",
-	.prov_version = FI_VERSION(SMR_MAJOR_VERSION, SMR_MINOR_VERSION)
+	.prov_version = OFI_VERSION_DEF_PROV
 };
 
 struct fi_info smr_info = {

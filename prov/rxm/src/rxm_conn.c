@@ -69,8 +69,9 @@ static inline ssize_t rxm_eq_readerr(struct rxm_ep *rxm_ep,
 
 	ret = fi_eq_readerr(rxm_ep->msg_eq, &entry->err_entry, 0);
 	if (ret != sizeof(entry->err_entry)) {
-		FI_WARN(&rxm_prov, FI_LOG_EP_CTRL,
-			"unable to fi_eq_readerr: %zd\n", ret);
+		if (ret != -FI_EAGAIN)
+			FI_WARN(&rxm_prov, FI_LOG_EP_CTRL,
+				"unable to fi_eq_readerr: %zd\n", ret);
 		return ret < 0 ? ret : -FI_EINVAL;
 	}
 
@@ -267,6 +268,27 @@ static int rxm_conn_res_alloc(struct rxm_ep *rxm_ep, struct rxm_conn *rxm_conn)
 static void rxm_conn_close(struct rxm_cmap_handle *handle)
 {
 	struct rxm_conn *rxm_conn = container_of(handle, struct rxm_conn, handle);
+	struct rxm_conn *rxm_conn_tmp;
+	struct rxm_deferred_tx_entry *def_tx_entry;
+	struct dlist_entry *conn_entry_tmp;
+
+	dlist_foreach_container_safe(&handle->cmap->ep->deferred_tx_conn_queue,
+				     struct rxm_conn, rxm_conn_tmp,
+				     deferred_conn_entry, conn_entry_tmp)
+	{
+		if (rxm_conn_tmp->handle.key != handle->key)
+			continue;
+
+		while (!dlist_empty(&rxm_conn_tmp->deferred_tx_queue)) {
+			def_tx_entry =
+				container_of(rxm_conn_tmp->deferred_tx_queue.next,
+					     struct rxm_deferred_tx_entry, entry);
+			FI_DBG(&rxm_prov, FI_LOG_EP_CTRL,
+			       "cancelled deferred message\n");
+			rxm_ep_dequeue_deferred_tx_queue(def_tx_entry);
+			free(def_tx_entry);
+		}
+	}
 
 	FI_DBG(&rxm_prov, FI_LOG_EP_CTRL, "closing msg ep\n");
 	if (!rxm_conn->msg_ep)
@@ -786,20 +808,107 @@ err1:
 	return ret;
 }
 
+static ssize_t rxm_send_credits(struct fid_ep *ep, size_t credits)
+{
+	struct rxm_conn *rxm_conn =
+		container_of(ep->fid.context, struct rxm_conn, handle);
+	struct rxm_ep *rxm_ep = rxm_conn->handle.cmap->ep;
+	struct rxm_deferred_tx_entry *def_tx_entry;
+	struct rxm_tx_base_buf *tx_buf;
+	struct iovec iov;
+	struct fi_msg msg;
+	ssize_t ret;
+
+	tx_buf = rxm_tx_buf_alloc(rxm_ep, RXM_BUF_POOL_TX_CREDIT);
+	if (!tx_buf) {
+		FI_WARN(&rxm_prov, FI_LOG_EP_DATA,
+			"Ran out of buffers from TX credit buffer pool.\n");
+		return -FI_ENOMEM;
+	}
+
+	rxm_ep_format_tx_buf_pkt(rxm_conn, 0, rxm_ctrl_credit, 0, 0, FI_SEND,
+				 &tx_buf->pkt);
+	tx_buf->pkt.ctrl_hdr.type = rxm_ctrl_credit;
+	tx_buf->pkt.ctrl_hdr.msg_id = ofi_buf_index(tx_buf);
+	tx_buf->pkt.ctrl_hdr.ctrl_data = credits;
+
+	if (rxm_conn->handle.state != RXM_CMAP_CONNECTED)
+		goto defer;
+
+	iov.iov_base = &tx_buf->pkt;
+	iov.iov_len = sizeof(struct rxm_pkt);
+	msg.msg_iov = &iov;
+	msg.iov_count = 1;
+	msg.context = tx_buf;
+	msg.desc = &tx_buf->hdr.desc;
+
+	ret = fi_sendmsg(ep, &msg, FI_PRIORITY);
+	if (!ret)
+		return FI_SUCCESS;
+
+defer:
+	def_tx_entry = rxm_ep_alloc_deferred_tx_entry(
+		rxm_ep, rxm_conn, RXM_DEFERRED_TX_CREDIT_SEND);
+	if (!def_tx_entry) {
+		FI_WARN(&rxm_prov, FI_LOG_CQ,
+			"unable to allocate TX entry for deferred CREDIT mxg\n");
+		ofi_buf_free(tx_buf);
+		return -FI_ENOMEM;
+	}
+
+	def_tx_entry->credit_msg.tx_buf = tx_buf;
+	rxm_ep_enqueue_deferred_tx_queue(def_tx_entry);
+	return FI_SUCCESS;
+}
+
+static void rxm_no_set_threshold(struct fid_domain *domain_fid, size_t threshold)
+{ }
+
+static void rxm_no_add_credits(struct fid_ep *ep_fid, size_t credits)
+{ }
+
+static void rxm_no_credit_handler(struct fid_domain *domain_fid,
+		ssize_t (*credit_handler)(struct fid_ep *ep, size_t credits))
+{ }
+
+struct ofi_ops_flow_ctrl rxm_no_ops_flow_ctrl = {
+	.size = sizeof(struct ofi_ops_flow_ctrl),
+	.set_threshold = rxm_no_set_threshold,
+	.add_credits = rxm_no_add_credits,
+	.set_send_handler = rxm_no_credit_handler,
+};
+
 static int rxm_msg_ep_open(struct rxm_ep *rxm_ep, struct fi_info *msg_info,
 			   struct rxm_conn *rxm_conn, void *context)
 {
 	struct rxm_domain *rxm_domain;
 	struct fid_ep *msg_ep;
+	struct ofi_ops_flow_ctrl *flow_ctrl_ops;
 	int ret;
 
 	rxm_domain = container_of(rxm_ep->util_ep.domain, struct rxm_domain,
 			util_domain);
+
 	ret = fi_endpoint(rxm_domain->msg_domain, msg_info, &msg_ep, context);
 	if (ret) {
 		FI_WARN(&rxm_prov, FI_LOG_EP_CTRL,
 			"unable to create msg_ep: %d\n", ret);
 		return ret;
+	}
+
+	ret = fi_open_ops(&rxm_domain->msg_domain->fid, OFI_OPS_FLOW_CTRL, 0,
+			  (void **) &flow_ctrl_ops, &msg_ep->fid);
+	if (!ret && flow_ctrl_ops) {
+		rxm_ep->flow_ctrl_ops = flow_ctrl_ops;
+		rxm_ep->flow_ctrl_ops->set_threshold(
+			rxm_domain->msg_domain,
+			rxm_ep->msg_info->rx_attr->size / 2);
+		rxm_ep->flow_ctrl_ops->set_send_handler(rxm_domain->msg_domain,
+							rxm_send_credits);
+	} else if (ret == -FI_ENOSYS) {
+		rxm_ep->flow_ctrl_ops = &rxm_no_ops_flow_ctrl;
+	} else {
+		goto err;
 	}
 
 	ret = fi_ep_bind(msg_ep, &rxm_ep->msg_eq->fid, 0);
@@ -833,13 +942,13 @@ static int rxm_msg_ep_open(struct rxm_ep *rxm_ep, struct fi_info *msg_info,
 		goto err;
 	}
 
+	rxm_conn->msg_ep = msg_ep;
+
 	if (!rxm_ep->srx_ctx) {
 		ret = rxm_msg_ep_prepost_recv(rxm_ep, msg_ep);
 		if (ret)
 			goto err;
 	}
-
-	rxm_conn->msg_ep = msg_ep;
 	return 0;
 err:
 	fi_close(&msg_ep->fid);
@@ -980,7 +1089,6 @@ err:
 static size_t rxm_conn_get_rx_size(struct rxm_ep *rxm_ep,
 				   struct fi_info *msg_info)
 {
-	/* TODO add env variable to tune the value for shared context case */
 	if (msg_info->ep_attr->rx_ctx_cnt == FI_SHARED_CONTEXT)
 		return MAX(MIN(16, msg_info->rx_attr->size),
 			   (msg_info->rx_attr->size /
@@ -1348,10 +1456,7 @@ static void *rxm_conn_atomic_progress(void *arg)
 
 	FI_INFO(&rxm_prov, FI_LOG_EP_CTRL, "Starting auto-progress thread\n");
 	while (ep->do_progress) {
-		/* TODO: Remove this lock, it can't protect anything */
-		ofi_ep_lock_acquire(&ep->util_ep);
 		ret = fi_trywait(fabric->msg_fabric, fids, 2);
-		ofi_ep_lock_release(&ep->util_ep);
 
 		if (!ret) {
 			fds[0].revents = 0;

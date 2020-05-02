@@ -47,6 +47,7 @@ env:
         # do not know how to fix
         #- MAKE_FLAGS="AM_CFLAGS=-Werror"
         - MAKE_FLAGS=
+        - ASAN_OPTIONS=detect_leaks=0
 
 # Brew update GNU Autotools so that autogen can succeed
 before_install:
@@ -98,17 +99,25 @@ install:
     - ./configure $LIBFABRIC_CONFIGURE_ARGS --enable-debug
     - make -j2 $MAKE_FLAGS
     # Test regular build
-    - ./configure $LIBFABRIC_CONFIGURE_ARGS
+    - CFLAGS="-fsanitize=address" ./configure $LIBFABRIC_CONFIGURE_ARGS
     - make -j2 $MAKE_FLAGS
     - make install
     - make test
     - make distcheck
-    - if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then make rpm; fi
+    # We don't want to use LIBFABRIC_CONFIGURE_ARGS here as the standard
+    # prefix should be tested when building the RPM.
+    - if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then
+        make dist;
+        config_options="--enable-efa=$RDMA_CORE_PATH
+                        --enable-verbs=$RDMA_CORE_PATH --enable-usnic";
+        LDFLAGS=-Wl,--build-id rpmbuild -ta
+          --define "configopts $config_options" libfabric-*.tar.bz2;
+      fi
 
 script:
     - cd fabtests
     - ./autogen.sh
-    - ./configure --prefix=$PREFIX --with-libfabric=$PREFIX
+    - CFLAGS="-fsanitize=address" ./configure --prefix=$PREFIX --with-libfabric=$PREFIX
     # Do not use MAKE_FLAGS here because we use AM_CFLAGS in the
     # normal fabtests' Makefile.am (i.e., overriding it on the command
     # line removes information that we need to build fabtests itself).

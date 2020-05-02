@@ -499,8 +499,8 @@ The following option levels and option names and parameters are defined.
   to discard or claim a buffered receive or when to claim a buffered receive
   on getting a buffered receive completion. The value is typically used by a
   provider when sending a rendezvous protocol request where it would send
-  atleast FI_OPT_BUFFERED_MIN bytes of application data along with it. A smaller
-  sized renedezvous protocol message usually results in better latency for the
+  at least FI_OPT_BUFFERED_MIN bytes of application data along with it. A smaller
+  sized rendezvous protocol message usually results in better latency for the
   overall transfer of a large message.
 
 - *FI_OPT_CM_DATA_SIZE - size_t*
@@ -1171,7 +1171,7 @@ capability bits from the fi_info structure will be used.
 The following capabilities apply to the receive attributes: FI_MSG,
 FI_RMA, FI_TAGGED, FI_ATOMIC, FI_REMOTE_READ, FI_REMOTE_WRITE, FI_RECV,
 FI_HMEM, FI_TRIGGER, FI_RMA_PMEM, FI_DIRECTED_RECV, FI_VARIABLE_MSG,
-FI_MULTI_RECV, FI_SOURCE, FI_RMA_EVENT, and FI_SOURCE_ERROR.
+FI_MULTI_RECV, FI_SOURCE, FI_RMA_EVENT, and FI_SOURCE_ERR.
 
 Many applications will be able to ignore this field and rely solely
 on the fi_info::caps field.  Use of this field provides fine grained

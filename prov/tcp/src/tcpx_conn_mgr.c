@@ -141,15 +141,15 @@ static int tcpx_ep_enable_xfers(struct tcpx_ep *ep)
 	fastlock_release(&ep->lock);
 
 	if (ep->util_ep.rx_cq) {
-		ret = ofi_wait_fd_add(ep->util_ep.rx_cq->wait,
-				      ep->sock, OFI_EPOLL_IN, tcpx_try_func,
+		ret = ofi_wait_add_fd(ep->util_ep.rx_cq->wait,
+				      ep->sock, POLLIN, tcpx_try_func,
 				      (void *) &ep->util_ep,
 				      &ep->util_ep.ep_fid.fid);
 	}
 
 	if (ep->util_ep.tx_cq) {
-		ret = ofi_wait_fd_add(ep->util_ep.tx_cq->wait,
-				      ep->sock, OFI_EPOLL_IN, tcpx_try_func,
+		ret = ofi_wait_add_fd(ep->util_ep.tx_cq->wait,
+				      ep->sock, POLLIN, tcpx_try_func,
 				      (void *) &ep->util_ep,
 				      &ep->util_ep.ep_fid.fid);
 	}
@@ -215,7 +215,7 @@ static void client_recv_connresp(struct util_wait *wait,
 	assert(cm_ctx->fid->fclass == FI_CLASS_EP);
 	ep = container_of(cm_ctx->fid, struct tcpx_ep, util_ep.ep_fid.fid);
 
-	ret = ofi_wait_fd_del(wait, ep->sock);
+	ret = ofi_wait_del_fd(wait, ep->sock);
 	if (ret) {
 		FI_WARN(&tcpx_prov, FI_LOG_EP_CTRL,
 			"Could not remove fd from wait\n");
@@ -272,7 +272,7 @@ static void server_send_cm_accept(struct util_wait *wait,
 	if (ret < 0)
 		FI_WARN(&tcpx_prov, FI_LOG_EP_CTRL, "Error writing to EQ\n");
 
-	ret = ofi_wait_fd_del(wait, ep->sock);
+	ret = ofi_wait_del_fd(wait, ep->sock);
 	if (ret) {
 		FI_WARN(&tcpx_prov, FI_LOG_EP_CTRL,
 			"Could not remove fd from wait\n");
@@ -342,7 +342,7 @@ static void server_recv_connreq(struct util_wait *wait,
 		FI_WARN(&tcpx_prov, FI_LOG_EP_CTRL, "Error writing to EQ\n");
 		goto err3;
 	}
-	ret = ofi_wait_fd_del(wait, handle->sock);
+	ret = ofi_wait_del_fd(wait, handle->sock);
 	if (ret)
 		FI_WARN(&tcpx_prov, FI_LOG_EP_CTRL,
 			"fd deletion from ofi_wait failed\n");
@@ -354,7 +354,7 @@ err3:
 err2:
 	free(cm_entry);
 err1:
-	ofi_wait_fd_del(wait, handle->sock);
+	ofi_wait_del_fd(wait, handle->sock);
 	ofi_close_socket(handle->sock);
 	free(cm_ctx);
 	free(handle);
@@ -385,17 +385,16 @@ static void client_send_connreq(struct util_wait *wait,
 	if (ret)
 		goto err;
 
-	ret = ofi_wait_fd_del(wait, ep->sock);
+	ret = ofi_wait_del_fd(wait, ep->sock);
 	if (ret)
 		goto err;
 
 	cm_ctx->type = CLIENT_RECV_CONNRESP;
-	ret = ofi_wait_fd_add(wait, ep->sock, OFI_EPOLL_IN,
+	ret = ofi_wait_add_fd(wait, ep->sock, POLLIN,
 			      tcpx_eq_wait_try_func, NULL, cm_ctx);
 	if (ret)
 		goto err;
 
-	wait->signal(wait);
 	return;
 err:
 	memset(&err_entry, 0, sizeof err_entry);
@@ -445,12 +444,12 @@ static void server_sock_accept(struct util_wait *wait,
 	rx_req_cm_ctx->fid = &handle->handle;
 	rx_req_cm_ctx->type = SERVER_RECV_CONNREQ;
 
-	ret = ofi_wait_fd_add(wait, sock, OFI_EPOLL_IN,
+	ret = ofi_wait_add_fd(wait, sock, POLLIN,
 			      tcpx_eq_wait_try_func,
 			      NULL, (void *) rx_req_cm_ctx);
 	if (ret)
 		goto err3;
-	wait->signal(wait);
+
 	return;
 err3:
 	free(rx_req_cm_ctx);
@@ -494,7 +493,7 @@ void tcpx_conn_mgr_run(struct util_eq *eq)
 {
 	struct util_wait_fd *wait_fd;
 	struct tcpx_eq *tcpx_eq;
-	void *wait_contexts[MAX_EPOLL_EVENTS];
+	void *wait_contexts[MAX_POLL_EVENTS];
 	int num_fds = 0, i;
 
 	assert(eq->wait != NULL);
@@ -504,8 +503,11 @@ void tcpx_conn_mgr_run(struct util_eq *eq)
 
 	tcpx_eq = container_of(eq, struct tcpx_eq, util_eq);
 	fastlock_acquire(&tcpx_eq->close_lock);
-	num_fds = ofi_epoll_wait(wait_fd->epoll_fd, wait_contexts,
-				 MAX_EPOLL_EVENTS, 0);
+	num_fds = (wait_fd->util_wait.wait_obj == FI_WAIT_FD) ?
+		  ofi_epoll_wait(wait_fd->epoll_fd, wait_contexts,
+				 MAX_POLL_EVENTS, 0) :
+		  ofi_pollfds_wait(wait_fd->pollfds, wait_contexts,
+				   MAX_POLL_EVENTS, 0);
 	if (num_fds < 0) {
 		fastlock_release(&tcpx_eq->close_lock);
 		return;
@@ -516,7 +518,8 @@ void tcpx_conn_mgr_run(struct util_eq *eq)
 		if (&wait_fd->util_wait.wait_fid.fid == wait_contexts[i])
 			continue;
 
-		process_cm_ctx(eq->wait, (struct tcpx_cm_context *) wait_contexts[i]);
+		process_cm_ctx(eq->wait, (struct tcpx_cm_context *)
+			       wait_contexts[i]);
 	}
 	fastlock_release(&tcpx_eq->close_lock);
 }

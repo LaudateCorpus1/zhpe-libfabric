@@ -691,11 +691,37 @@ vrb_eq_xrc_rej_event(struct vrb_eq *eq, struct rdma_cm_event *cma_event)
 
 /* Caller must hold eq:lock */
 static inline int
+vrb_eq_xrc_connect_retry(struct vrb_xrc_ep *ep,
+			 struct rdma_cm_event *cma_event, int *acked)
+{
+	if (ep->base_ep.info->src_addr)
+		ofi_straddr_dbg(&vrb_prov, FI_LOG_EP_CTRL,
+				"Connect retry src ",
+				ep->base_ep.info->src_addr);
+	if (ep->base_ep.info->dest_addr)
+		ofi_straddr_dbg(&vrb_prov, FI_LOG_EP_CTRL,
+				"Connect retry dest ",
+				ep->base_ep.info->dest_addr);
+
+	*acked = 1;
+	rdma_ack_cm_event(cma_event);
+	rdma_destroy_id(ep->base_ep.id);
+	ep->base_ep.id = NULL;
+	vrb_eq_clear_xrc_conn_tag(ep);
+	ep->conn_setup->retry_count++;
+	return vrb_connect_xrc(ep, NULL, ep->conn_setup->pending_recip,
+			       ep->conn_setup->pending_param,
+			       ep->conn_setup->pending_paramlen);
+}
+
+/* Caller must hold eq:lock */
+static inline int
 vrb_eq_xrc_cm_err_event(struct vrb_eq *eq,
-                           struct rdma_cm_event *cma_event)
+                           struct rdma_cm_event *cma_event, int *acked)
 {
 	struct vrb_xrc_ep *ep;
 	fid_t fid = cma_event->id->context;
+	int ret;
 
 	ep = container_of(fid, struct vrb_xrc_ep, base_ep.util_ep.ep_fid);
 	if (ep->magic != VERBS_XRC_EP_MAGIC) {
@@ -710,6 +736,18 @@ vrb_eq_xrc_cm_err_event(struct vrb_eq *eq,
 	     ep->tgt_id != cma_event->id)) {
 		VERBS_WARN(FI_LOG_EP_CTRL, "CM error not valid for EP\n");
 		return -FI_EAGAIN;
+	}
+
+	if (ep->base_ep.id == cma_event->id) {
+		vrb_put_shared_ini_conn(ep);
+
+		/* Active side connect errors are retried */
+		if (ep->conn_setup && (ep->conn_setup->retry_count <
+				       VRB_MAX_XRC_CONNECT_RETRIES)) {
+			ret = vrb_eq_xrc_connect_retry(ep, cma_event, acked);
+			if (!ret)
+				return -FI_EAGAIN;
+		}
 	}
 
 	VERBS_WARN(FI_LOG_EP_CTRL, "CM error event %s, status %d\n",
@@ -848,7 +886,12 @@ vrb_eq_cm_process_event(struct vrb_eq *eq,
 			ret = vrb_eq_xrc_connreq_event(eq, entry, len, event,
 							  cma_event, &acked,
 							  &priv_data, &priv_datalen);
-			if (ret == -FI_EAGAIN || *event == FI_CONNECTED)
+			if (ret == -FI_EAGAIN) {
+				fi_freeinfo(entry->info);
+				entry->info = NULL;
+				goto ack;
+			}
+			if (*event == FI_CONNECTED)
 				goto ack;
 		}
 		break;
@@ -895,14 +938,20 @@ vrb_eq_cm_process_event(struct vrb_eq *eq,
 		ep = container_of(fid, struct vrb_ep, util_ep.ep_fid);
 		assert(ep->info);
 		if (vrb_is_xrc(ep->info)) {
-			/* SIDR Reject is reported as UNREACHABLE */
+			/* SIDR Reject is reported as UNREACHABLE unless
+			 * status is negative */
 			if (cma_event->id->ps == RDMA_PS_UDP &&
-			    cma_event->event == RDMA_CM_EVENT_UNREACHABLE)
+			    (cma_event->event == RDMA_CM_EVENT_UNREACHABLE &&
+			     cma_event->status >= 0))
 				goto xrc_shared_reject;
 
-			ret = vrb_eq_xrc_cm_err_event(eq, cma_event);
+			ret = vrb_eq_xrc_cm_err_event(eq, cma_event, &acked);
 			if (ret == -FI_EAGAIN)
 				goto ack;
+
+			*event = FI_SHUTDOWN;
+			entry->info = NULL;
+			break;
 		}
 		eq->err.err = ETIMEDOUT;
 		eq->err.prov_errno = -cma_event->status;
@@ -1179,18 +1228,37 @@ static struct fi_ops_eq vrb_eq_ops = {
 
 static int vrb_eq_control(fid_t fid, int command, void *arg)
 {
+	struct fi_wait_pollfd *pollfd;
 	struct vrb_eq *eq;
 	int ret;
 
 	eq = container_of(fid, struct vrb_eq, eq_fid.fid);
 	switch (command) {
 	case FI_GETWAIT:
-#ifdef HAVE_EPOLL
-		*(int *) arg = eq->epollfd;
-		ret = 0;
+#ifndef HAVE_EPOLL
+		/* We expect verbs to only run on systems with epoll */
+		return -FI_ENOSYS;
 #else
-		ret = -FI_ENOSYS;
+		if (eq->wait_obj == FI_WAIT_FD) {
+			*(int *) arg = eq->epollfd;
+			return 0;
+		}
+
+		pollfd = arg;
+		if (pollfd->nfds >= 1) {
+			pollfd->fd[0].fd = eq->epollfd;
+			pollfd->fd[0].events = POLLIN;
+			ret = 0;
+		} else {
+			ret = -FI_ETOOSMALL;
+		}
+		pollfd->change_index = 1;
+		pollfd->nfds = 1;
 #endif
+		break;
+	case FI_GETWAITOBJ:
+		*(enum fi_wait_obj *) arg = eq->wait_obj;
+		ret = 0;
 		break;
 	default:
 		ret = -FI_ENOSYS;
@@ -1286,26 +1354,29 @@ int vrb_eq_open(struct fid_fabric *fabric, struct fi_eq_attr *attr,
 	case FI_WAIT_NONE:
 	case FI_WAIT_UNSPEC:
 	case FI_WAIT_FD:
-		_eq->channel = rdma_create_event_channel();
-		if (!_eq->channel) {
-			ret = -errno;
-			goto err3;
-		}
-
-		ret = fi_fd_nonblock(_eq->channel->fd);
-		if (ret)
-			goto err4;
-
-		if (ofi_epoll_add(_eq->epollfd, _eq->channel->fd, OFI_EPOLL_IN,
-				  NULL)) {
-			ret = -errno;
-			goto err4;
-		}
-
+		_eq->wait_obj = FI_WAIT_FD;
+		break;
+	case FI_WAIT_POLLFD:
+		_eq->wait_obj = FI_WAIT_POLLFD;
 		break;
 	default:
 		ret = -FI_ENOSYS;
 		goto err1;
+	}
+
+	_eq->channel = rdma_create_event_channel();
+	if (!_eq->channel) {
+		ret = -errno;
+		goto err3;
+	}
+
+	ret = fi_fd_nonblock(_eq->channel->fd);
+	if (ret)
+		goto err4;
+
+	if (ofi_epoll_add(_eq->epollfd, _eq->channel->fd, OFI_EPOLL_IN, NULL)) {
+		ret = -errno;
+		goto err4;
 	}
 
 	_eq->flags = attr->flags;

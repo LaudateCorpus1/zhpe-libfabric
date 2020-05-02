@@ -471,10 +471,10 @@ struct fi_mr_attr {
 	void               *context;
 	size_t             auth_key_size;
 	uint8_t            *auth_key;
-	enum fi_hmem_iface  iface;
+	enum fi_hmem_iface iface;
 	union {
-		uint64_t	reserved;
-		int		cuda;
+		uint64_t         reserved;
+		int              cuda;
 	} device;
 };
 ```
@@ -656,7 +656,7 @@ Fabric errno values are defined in
 Many hardware NICs accessed by libfabric require that data buffers be
 registered with the hardware while the hardware accesses it.  This ensures
 that the virtual to physical address mappings for those buffers do not change
-while the transfer is ocurring.  The performance impact of registering
+while the transfer is occurring.  The performance impact of registering
 memory regions can be significant.  As a result, some providers make use
 of a registration cache, particularly when working with applications that
 are unable to manage their own network buffers.  A registration cache avoids
@@ -682,15 +682,6 @@ configure registration caches.
   the number of regions that are registered, regardless of their size, which
   are not actively being used as part of a data transfer.  Setting this to
   zero will disable registration caching.
-
-*FI_MR_CACHE_MERGE_REGIONS*
-: If this variable is set to true, yes, or 1, then memory regions that are
-  adjacent or overlapping will be merged into a single larger region.  Merging
-  regions reduces the total cache size and the number of regions managed by
-  the cache.  However, merging regions can have a negative impact on
-  performance if a large number of adjacent regions are sent as separate data
-  transfers (such as sending elements of an array to peer(s)), and the larger
-  region is access infrequently.  By default merging regions is disabled.
 
 *FI_MR_CACHE_MONITOR*
 : The cache monitor is responsible for detecting changes made between the

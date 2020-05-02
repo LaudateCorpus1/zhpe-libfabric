@@ -57,10 +57,6 @@
 #ifndef _RXM_H_
 #define _RXM_H_
 
-#endif
-
-#define RXM_MAJOR_VERSION 1
-#define RXM_MINOR_VERSION 0
 
 #define RXM_CM_DATA_VERSION	1
 #define RXM_OP_VERSION		3
@@ -130,9 +126,10 @@ extern struct fi_ops_atomic rxm_ops_atomic;
 
 extern size_t rxm_msg_tx_size;
 extern size_t rxm_msg_rx_size;
-extern size_t rxm_def_univ_size;
 extern size_t rxm_cm_progress_interval;
+extern size_t rxm_cq_eq_fairness;
 extern int force_auto_progress;
+extern enum fi_wait_obj def_wait_obj;
 
 struct rxm_ep;
 
@@ -335,6 +332,7 @@ struct rxm_atomic_resp_hdr {
 	FUNC(RXM_RMA),			\
 	FUNC(RXM_RX),			\
 	FUNC(RXM_SAR_TX),		\
+	FUNC(RXM_CREDIT_TX),		\
 	FUNC(RXM_RNDV_TX),		\
 	FUNC(RXM_RNDV_ACK_WAIT),	\
 	FUNC(RXM_RNDV_READ),		\
@@ -357,6 +355,7 @@ enum {
 	rxm_ctrl_rndv_ack,
 	rxm_ctrl_atomic,
 	rxm_ctrl_atomic_resp,
+	rxm_ctrl_credit
 };
 
 struct rxm_pkt {
@@ -416,6 +415,7 @@ enum rxm_buf_pool_type {
 	RXM_BUF_POOL_TX_ACK,
 	RXM_BUF_POOL_TX_RNDV,
 	RXM_BUF_POOL_TX_ATOMIC,
+	RXM_BUF_POOL_TX_CREDIT,
 	RXM_BUF_POOL_TX_SAR,
 	RXM_BUF_POOL_TX_END	= RXM_BUF_POOL_TX_SAR,
 	RXM_BUF_POOL_RMA,
@@ -533,6 +533,7 @@ enum rxm_deferred_tx_entry_type {
 	RXM_DEFERRED_TX_RNDV_READ,
 	RXM_DEFERRED_TX_SAR_SEG,
 	RXM_DEFERRED_TX_ATOMIC_RESP,
+	RXM_DEFERRED_TX_CREDIT_SEND,
 };
 
 struct rxm_deferred_tx_entry {
@@ -572,6 +573,9 @@ struct rxm_deferred_tx_entry {
 			struct rxm_tx_atomic_buf *tx_buf;
 			ssize_t len;
 		} atomic_resp;
+		struct {
+			struct rxm_tx_base_buf *tx_buf;
+		} credit_msg;
 	};
 };
 
@@ -659,6 +663,7 @@ struct rxm_ep {
 	struct fid_ep 		*srx_ctx;
 	size_t 			comp_per_progress;
 	ofi_atomic32_t		atomic_tx_credits;
+	int			cq_eq_fairness;
 
 	bool			msg_mr_local;
 	bool			rdm_mr_local;
@@ -679,7 +684,8 @@ struct rxm_ep {
 	struct rxm_recv_queue	recv_queue;
 	struct rxm_recv_queue	trecv_queue;
 
-	struct rxm_handle_txrx_ops *txrx_ops;
+	struct rxm_handle_txrx_ops	*txrx_ops;
+	struct ofi_ops_flow_ctrl	*flow_ctrl_ops;
 };
 
 struct rxm_conn {
@@ -704,6 +710,7 @@ struct rxm_conn {
 
 extern struct fi_provider rxm_prov;
 extern struct fi_info rxm_info;
+extern struct fi_info rxm_info_coll;
 extern struct fi_fabric_attr rxm_fabric_attr;
 extern struct fi_domain_attr rxm_domain_attr;
 extern struct fi_tx_attr rxm_tx_attr;
@@ -712,9 +719,9 @@ extern struct fi_rx_attr rxm_rx_attr;
 int rxm_fabric(struct fi_fabric_attr *attr, struct fid_fabric **fabric,
 			void *context);
 int rxm_info_to_core(uint32_t version, const struct fi_info *rxm_info,
-		     struct fi_info *core_info);
+		     const struct fi_info *base_info, struct fi_info *core_info);
 int rxm_info_to_rxm(uint32_t version, const struct fi_info *core_info,
-		    struct fi_info *info);
+		     const struct fi_info *base_info, struct fi_info *info);
 int rxm_domain_open(struct fid_fabric *fabric, struct fi_info *info,
 			     struct fid_domain **dom, void *context);
 int rxm_cq_open(struct fid_domain *domain, struct fi_cq_attr *attr,
@@ -878,7 +885,7 @@ rxm_ep_format_tx_buf_pkt(struct rxm_conn *rxm_conn, size_t len, uint8_t op,
 }
 
 
-static inline struct rxm_buf *
+static inline void *
 rxm_tx_buf_alloc(struct rxm_ep *rxm_ep, enum rxm_buf_pool_type type)
 {
 	assert((type == RXM_BUF_POOL_TX) ||
@@ -886,6 +893,7 @@ rxm_tx_buf_alloc(struct rxm_ep *rxm_ep, enum rxm_buf_pool_type type)
 	       (type == RXM_BUF_POOL_TX_ACK) ||
 	       (type == RXM_BUF_POOL_TX_RNDV) ||
 	       (type == RXM_BUF_POOL_TX_ATOMIC) ||
+	       (type == RXM_BUF_POOL_TX_CREDIT) ||
 	       (type == RXM_BUF_POOL_TX_SAR));
 	return ofi_buf_alloc(rxm_ep->buf_pools[type].pool);
 }
@@ -920,19 +928,6 @@ rxm_rx_buf_free(struct rxm_rx_buf *rx_buf)
 	}
 }
 
-static inline struct rxm_rma_buf *rxm_rma_buf_alloc(struct rxm_ep *rxm_ep)
-{
-	return (struct rxm_rma_buf *)
-		ofi_buf_alloc(rxm_ep->buf_pools[RXM_BUF_POOL_RMA].pool);
-}
-
-static inline
-struct rxm_tx_atomic_buf *rxm_tx_atomic_buf_alloc(struct rxm_ep *rxm_ep)
-{
-	return (struct rxm_tx_atomic_buf *)
-		rxm_tx_buf_alloc(rxm_ep, RXM_BUF_POOL_TX_ATOMIC);
-}
-
 static inline void
 rxm_recv_entry_release(struct rxm_recv_queue *queue, struct rxm_recv_entry *entry)
 {
@@ -954,3 +949,5 @@ static inline int rxm_cq_write_recv_comp(struct rxm_rx_buf *rx_buf,
 				    flags, len, buf, rx_buf->pkt.hdr.data,
 				    rx_buf->pkt.hdr.tag);
 }
+
+#endif

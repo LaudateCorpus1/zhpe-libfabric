@@ -125,6 +125,7 @@ static ssize_t efa_post_recv_validate(struct efa_ep *ep, const struct fi_msg *ms
 
 static ssize_t efa_post_recv(struct efa_ep *ep, const struct fi_msg *msg, uint64_t flags)
 {
+	struct efa_mr *efa_mr;
 	struct efa_qp *qp = ep->qp;
 	struct ibv_recv_wr *bad_wr;
 	struct efa_recv_wr *ewr;
@@ -156,7 +157,9 @@ static ssize_t efa_post_recv(struct efa_ep *ep, const struct fi_msg *msg, uint64
 
 		/* Set RX buffer desc from SGE */
 		wr->sg_list[i].length = msg->msg_iov[i].iov_len;
-		wr->sg_list[i].lkey = (uint32_t)(uintptr_t)msg->desc[i];
+		assert(msg->desc[i]);
+		efa_mr = (struct efa_mr *)msg->desc[i];
+		wr->sg_list[i].lkey = efa_mr->ibv_mr->lkey;
 		wr->sg_list[i].addr = addr;
 	}
 
@@ -248,6 +251,7 @@ static ssize_t efa_post_send_validate(struct efa_ep *ep, const struct fi_msg *ms
 static void efa_post_send_sgl(struct efa_ep *ep, const struct fi_msg *msg,
 			      struct efa_send_wr *ewr)
 {
+	struct efa_mr *efa_mr;
 	struct ibv_send_wr *wr = &ewr->wr;
 	struct ibv_sge *sge;
 	size_t sgl_idx = 0;
@@ -275,7 +279,9 @@ static void efa_post_send_sgl(struct efa_ep *ep, const struct fi_msg *msg,
 
 		/* Set TX buffer desc from SGE */
 		sge->length = length;
-		sge->lkey = (msg->desc ? ((uint32_t)(uintptr_t)msg->desc[i]) : 0);
+		assert (msg->desc && msg->desc[i]);
+		efa_mr = (struct efa_mr *)msg->desc[i];
+		sge->lkey = efa_mr->ibv_mr->lkey;
 		sge->addr = addr;
 		sgl_idx++;
 	}
@@ -316,7 +322,7 @@ static ssize_t efa_post_send(struct efa_ep *ep, const struct fi_msg *msg, uint64
 	wr->wr_id = (uintptr_t)msg->context;
 	wr->wr.ud.ah = conn->ah.ibv_ah;
 	wr->wr.ud.remote_qpn = conn->ep_addr.qpn;
-	wr->wr.ud.remote_qkey = EFA_QKEY;
+	wr->wr.ud.remote_qkey = conn->ep_addr.qkey;
 
 	ep->xmit_more_wr_tail->next = wr;
 	ep->xmit_more_wr_tail = wr;

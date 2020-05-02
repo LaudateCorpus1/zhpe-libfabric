@@ -34,6 +34,7 @@
 #include "efa.h"
 #include "rxr.h"
 #include "rxr_cntr.h"
+#include "efa_cuda.h"
 
 /* This file implements 4 actions that can be applied to a packet:
  *          posting,
@@ -53,7 +54,6 @@ ssize_t rxr_pkt_post_data(struct rxr_ep *rxr_ep,
 	ssize_t ret;
 
 	pkt_entry = rxr_pkt_entry_alloc(rxr_ep, rxr_ep->tx_pkt_efa_pool);
-
 	if (OFI_UNLIKELY(!pkt_entry))
 		return -FI_ENOMEM;
 
@@ -63,7 +63,7 @@ ssize_t rxr_pkt_post_data(struct rxr_ep *rxr_ep,
 	data_pkt = (struct rxr_data_pkt *)pkt_entry->pkt;
 
 	data_pkt->hdr.type = RXR_DATA_PKT;
-	data_pkt->hdr.version = RXR_PROTOCOL_VERSION;
+	data_pkt->hdr.version = RXR_BASE_PROTOCOL_VERSION;
 	data_pkt->hdr.flags = 0;
 
 	data_pkt->hdr.rx_id = tx_entry->rx_id;
@@ -73,8 +73,15 @@ ssize_t rxr_pkt_post_data(struct rxr_ep *rxr_ep,
 	 */
 	data_pkt->hdr.seg_offset = tx_entry->bytes_sent;
 
-	if (efa_mr_cache_enable)
-		ret = rxr_pkt_send_data_mr_cache(rxr_ep, tx_entry, pkt_entry);
+	/*
+	 * TODO: Check to see if underlying device can support CUDA
+	 * registrations and fallback to rxr_ep_send_data_pkt_entry() if it does
+	 * not. This should be done at init time with a CUDA reg-and-fail flag.
+	 * For now, always send CUDA buffers through
+	 * rxr_pkt_send_data_desc().
+	 */
+	if (efa_mr_cache_enable || rxr_ep_is_cuda_mr(tx_entry->desc[0]))
+		ret = rxr_pkt_send_data_desc(rxr_ep, tx_entry, pkt_entry);
 	else
 		ret = rxr_pkt_send_data(rxr_ep, tx_entry, pkt_entry);
 
@@ -86,6 +93,8 @@ ssize_t rxr_pkt_post_data(struct rxr_ep *rxr_ep,
 	data_pkt = rxr_get_data_pkt(pkt_entry->pkt);
 	tx_entry->bytes_sent += data_pkt->hdr.seg_size;
 	tx_entry->window -= data_pkt->hdr.seg_size;
+	assert(data_pkt->hdr.seg_size > 0);
+	assert(tx_entry->window >= 0);
 	return ret;
 }
 
@@ -99,9 +108,6 @@ int rxr_pkt_init_ctrl(struct rxr_ep *rxr_ep, int entry_type, void *x_entry,
 	int ret = 0;
 
 	switch (ctrl_type) {
-	case RXR_RTS_PKT:
-		ret = rxr_pkt_init_rts(rxr_ep, (struct rxr_tx_entry *)x_entry, pkt_entry);
-		break;
 	case RXR_READRSP_PKT:
 		ret = rxr_pkt_init_readrsp(rxr_ep, (struct rxr_tx_entry *)x_entry, pkt_entry);
 		break;
@@ -110,6 +116,57 @@ int rxr_pkt_init_ctrl(struct rxr_ep *rxr_ep, int entry_type, void *x_entry,
 		break;
 	case RXR_EOR_PKT:
 		ret = rxr_pkt_init_eor(rxr_ep, (struct rxr_rx_entry *)x_entry, pkt_entry);
+		break;
+	case RXR_ATOMRSP_PKT:
+		ret = rxr_pkt_init_atomrsp(rxr_ep, (struct rxr_rx_entry *)x_entry, pkt_entry);
+		break;
+	case RXR_EAGER_MSGRTM_PKT:
+		ret = rxr_pkt_init_eager_msgrtm(rxr_ep, (struct rxr_tx_entry *)x_entry, pkt_entry);
+		break;
+	case RXR_EAGER_TAGRTM_PKT:
+		ret = rxr_pkt_init_eager_tagrtm(rxr_ep, (struct rxr_tx_entry *)x_entry, pkt_entry);
+		break;
+	case RXR_MEDIUM_MSGRTM_PKT:
+		ret = rxr_pkt_init_medium_msgrtm(rxr_ep, (struct rxr_tx_entry *)x_entry, pkt_entry);
+		break;
+	case RXR_MEDIUM_TAGRTM_PKT:
+		ret = rxr_pkt_init_medium_tagrtm(rxr_ep, (struct rxr_tx_entry *)x_entry, pkt_entry);
+		break;
+	case RXR_LONG_MSGRTM_PKT:
+		ret = rxr_pkt_init_long_msgrtm(rxr_ep, (struct rxr_tx_entry *)x_entry, pkt_entry);
+		break;
+	case RXR_LONG_TAGRTM_PKT:
+		ret = rxr_pkt_init_long_tagrtm(rxr_ep, (struct rxr_tx_entry *)x_entry, pkt_entry);
+		break;
+	case RXR_READ_MSGRTM_PKT:
+		ret = rxr_pkt_init_read_msgrtm(rxr_ep, (struct rxr_tx_entry *)x_entry, pkt_entry);
+		break;
+	case RXR_READ_TAGRTM_PKT:
+		ret = rxr_pkt_init_read_tagrtm(rxr_ep, (struct rxr_tx_entry *)x_entry, pkt_entry);
+		break;
+	case RXR_EAGER_RTW_PKT:
+		ret = rxr_pkt_init_eager_rtw(rxr_ep, (struct rxr_tx_entry *)x_entry, pkt_entry);
+		break;
+	case RXR_LONG_RTW_PKT:
+		ret = rxr_pkt_init_long_rtw(rxr_ep, (struct rxr_tx_entry *)x_entry, pkt_entry);
+		break;
+	case RXR_READ_RTW_PKT:
+		ret = rxr_pkt_init_read_rtw(rxr_ep, (struct rxr_tx_entry *)x_entry, pkt_entry);
+		break;
+	case RXR_SHORT_RTR_PKT:
+		ret = rxr_pkt_init_short_rtr(rxr_ep, (struct rxr_tx_entry *)x_entry, pkt_entry);
+		break;
+	case RXR_LONG_RTR_PKT:
+		ret = rxr_pkt_init_long_rtr(rxr_ep, (struct rxr_tx_entry *)x_entry, pkt_entry);
+		break;
+	case RXR_WRITE_RTA_PKT:
+		ret = rxr_pkt_init_write_rta(rxr_ep, (struct rxr_tx_entry *)x_entry, pkt_entry);
+		break;
+	case RXR_FETCH_RTA_PKT:
+		ret = rxr_pkt_init_fetch_rta(rxr_ep, (struct rxr_tx_entry *)x_entry, pkt_entry);
+		break;
+	case RXR_COMPARE_RTA_PKT:
+		ret = rxr_pkt_init_compare_rta(rxr_ep, (struct rxr_tx_entry *)x_entry, pkt_entry);
 		break;
 	default:
 		ret = -FI_EINVAL;
@@ -129,9 +186,6 @@ void rxr_pkt_handle_ctrl_sent(struct rxr_ep *rxr_ep, struct rxr_pkt_entry *pkt_e
 	int ctrl_type = rxr_get_base_hdr(pkt_entry->pkt)->type;
 
 	switch (ctrl_type) {
-	case RXR_RTS_PKT:
-		rxr_pkt_handle_rts_sent(rxr_ep, pkt_entry);
-		break;
 	case RXR_READRSP_PKT:
 		rxr_pkt_handle_readrsp_sent(rxr_ep, pkt_entry);
 		break;
@@ -141,14 +195,51 @@ void rxr_pkt_handle_ctrl_sent(struct rxr_ep *rxr_ep, struct rxr_pkt_entry *pkt_e
 	case RXR_EOR_PKT:
 		rxr_pkt_handle_eor_sent(rxr_ep, pkt_entry);
 		break;
+	case RXR_ATOMRSP_PKT:
+		rxr_pkt_handle_atomrsp_sent(rxr_ep, pkt_entry);
+		break;
+	case RXR_EAGER_MSGRTM_PKT:
+	case RXR_EAGER_TAGRTM_PKT:
+		rxr_pkt_handle_eager_rtm_sent(rxr_ep, pkt_entry);
+		break;
+	case RXR_MEDIUM_MSGRTM_PKT:
+	case RXR_MEDIUM_TAGRTM_PKT:
+		rxr_pkt_handle_medium_rtm_sent(rxr_ep, pkt_entry);
+		break;
+	case RXR_LONG_MSGRTM_PKT:
+	case RXR_LONG_TAGRTM_PKT:
+		rxr_pkt_handle_long_rtm_sent(rxr_ep, pkt_entry);
+		break;
+	case RXR_READ_MSGRTM_PKT:
+	case RXR_READ_TAGRTM_PKT:
+		rxr_pkt_handle_read_rtm_sent(rxr_ep, pkt_entry);
+		break;
+	case RXR_EAGER_RTW_PKT:
+		rxr_pkt_handle_eager_rtw_sent(rxr_ep, pkt_entry);
+		break;
+	case RXR_LONG_RTW_PKT:
+		rxr_pkt_handle_long_rtw_sent(rxr_ep, pkt_entry);
+		break;
+	case RXR_READ_RTW_PKT:
+		rxr_pkt_handle_read_rtw_sent(rxr_ep, pkt_entry);
+		break;
+	case RXR_SHORT_RTR_PKT:
+	case RXR_LONG_RTR_PKT:
+		rxr_pkt_handle_rtr_sent(rxr_ep, pkt_entry);
+		break;
+	case RXR_WRITE_RTA_PKT:
+	case RXR_FETCH_RTA_PKT:
+	case RXR_COMPARE_RTA_PKT:
+		rxr_pkt_handle_rta_sent(rxr_ep, pkt_entry);
+		break;
 	default:
 		assert(0 && "Unknown packet type to handle sent");
 		break;
 	}
 }
 
-ssize_t rxr_pkt_post_ctrl(struct rxr_ep *rxr_ep, int entry_type, void *x_entry,
-			  int ctrl_type, bool inject)
+ssize_t rxr_pkt_post_ctrl_once(struct rxr_ep *rxr_ep, int entry_type, void *x_entry,
+			       int ctrl_type, bool inject)
 {
 	struct rxr_pkt_entry *pkt_entry;
 	struct rxr_tx_entry *tx_entry;
@@ -186,6 +277,10 @@ ssize_t rxr_pkt_post_ctrl(struct rxr_ep *rxr_ep, int entry_type, void *x_entry,
 	 */
 	if (inject)
 		err = rxr_pkt_entry_inject(rxr_ep, pkt_entry, addr);
+	else if (pkt_entry->iov_count > 0)
+		err = rxr_pkt_entry_sendv(rxr_ep, pkt_entry, addr,
+					  pkt_entry->iov, pkt_entry->desc,
+					  pkt_entry->iov_count, 0);
 	else
 		err = rxr_pkt_entry_send(rxr_ep, pkt_entry, addr);
 
@@ -194,12 +289,35 @@ ssize_t rxr_pkt_post_ctrl(struct rxr_ep *rxr_ep, int entry_type, void *x_entry,
 		return err;
 	}
 
+	peer->flags |= RXR_PEER_REQ_SENT;
 	rxr_pkt_handle_ctrl_sent(rxr_ep, pkt_entry);
-
 	if (inject)
 		rxr_pkt_entry_release_tx(rxr_ep, pkt_entry);
 
 	return 0;
+}
+
+ssize_t rxr_pkt_post_ctrl(struct rxr_ep *ep, int entry_type, void *x_entry,
+			  int ctrl_type, bool inject)
+{
+	ssize_t err;
+	struct rxr_tx_entry *tx_entry;
+
+	if (ctrl_type == RXR_MEDIUM_TAGRTM_PKT || ctrl_type == RXR_MEDIUM_MSGRTM_PKT) {
+		assert(entry_type == RXR_TX_ENTRY);
+		assert(!inject);
+
+		tx_entry = (struct rxr_tx_entry *)x_entry;
+		while (tx_entry->bytes_sent < tx_entry->total_len) {
+			err = rxr_pkt_post_ctrl_once(ep, RXR_TX_ENTRY, x_entry, ctrl_type, 0);
+			if (OFI_UNLIKELY(err))
+				return err;
+		}
+
+		return 0;
+	}
+
+	return rxr_pkt_post_ctrl_once(ep, entry_type, x_entry, ctrl_type, inject);
 }
 
 ssize_t rxr_pkt_post_ctrl_or_queue(struct rxr_ep *ep, int entry_type, void *x_entry, int ctrl_type, bool inject)
@@ -242,14 +360,9 @@ void rxr_pkt_handle_send_completion(struct rxr_ep *ep, struct fi_cq_data_entry *
 	struct rxr_peer *peer;
 
 	pkt_entry = (struct rxr_pkt_entry *)comp->op_context;
-	assert(rxr_get_base_hdr(pkt_entry->pkt)->version ==
-	       RXR_PROTOCOL_VERSION);
 
 	switch (rxr_get_base_hdr(pkt_entry->pkt)->type) {
-	case RXR_RTS_PKT:
-		rxr_pkt_handle_rts_send_completion(ep, pkt_entry);
-		break;
-	case RXR_CONNACK_PKT:
+	case RXR_HANDSHAKE_PKT:
 		break;
 	case RXR_CTS_PKT:
 		break;
@@ -259,9 +372,53 @@ void rxr_pkt_handle_send_completion(struct rxr_ep *ep, struct fi_cq_data_entry *
 	case RXR_READRSP_PKT:
 		rxr_pkt_handle_readrsp_send_completion(ep, pkt_entry);
 		break;
+	case RXR_EOR_PKT:
+		rxr_pkt_handle_eor_send_completion(ep, pkt_entry);
+		break;
 	case RXR_RMA_CONTEXT_PKT:
-		rxr_pkt_handle_rma_context_send_completion(ep, pkt_entry);
+		rxr_pkt_handle_rma_completion(ep, pkt_entry);
 		return;
+	case RXR_ATOMRSP_PKT:
+		rxr_pkt_handle_atomrsp_send_completion(ep, pkt_entry);
+		break;
+	case RXR_EAGER_MSGRTM_PKT:
+	case RXR_EAGER_TAGRTM_PKT:
+		rxr_pkt_handle_eager_rtm_send_completion(ep, pkt_entry);
+		break;
+	case RXR_MEDIUM_MSGRTM_PKT:
+	case RXR_MEDIUM_TAGRTM_PKT:
+		rxr_pkt_handle_long_rtm_send_completion(ep, pkt_entry);
+		break;
+	case RXR_LONG_MSGRTM_PKT:
+	case RXR_LONG_TAGRTM_PKT:
+		rxr_pkt_handle_long_rtm_send_completion(ep, pkt_entry);
+		break;
+	case RXR_READ_MSGRTM_PKT:
+	case RXR_READ_TAGRTM_PKT:
+		rxr_pkt_handle_read_rtm_send_completion(ep, pkt_entry);
+		break;
+	case RXR_EAGER_RTW_PKT:
+		rxr_pkt_handle_eager_rtw_send_completion(ep, pkt_entry);
+		break;
+	case RXR_LONG_RTW_PKT:
+		rxr_pkt_handle_long_rtw_send_completion(ep, pkt_entry);
+		break;
+	case RXR_READ_RTW_PKT:
+		rxr_pkt_handle_read_rtw_send_completion(ep, pkt_entry);
+		break;
+	case RXR_SHORT_RTR_PKT:
+	case RXR_LONG_RTR_PKT:
+		rxr_pkt_handle_rtr_send_completion(ep, pkt_entry);
+		break;
+	case RXR_WRITE_RTA_PKT:
+		rxr_pkt_handle_write_rta_send_completion(ep, pkt_entry);
+		break;
+	case RXR_FETCH_RTA_PKT:
+		/* no action to be taken here */
+		break;
+	case RXR_COMPARE_RTA_PKT:
+		/* no action to be taken here */
+		break;
 	default:
 		FI_WARN(&rxr_prov, FI_LOG_CQ,
 			"invalid control pkt type %d\n",
@@ -270,55 +427,49 @@ void rxr_pkt_handle_send_completion(struct rxr_ep *ep, struct fi_cq_data_entry *
 		rxr_cq_handle_cq_error(ep, -FI_EIO);
 		return;
 	}
-	rxr_pkt_entry_release_tx(ep, pkt_entry);
+
 	peer = rxr_ep_get_peer(ep, pkt_entry->addr);
 	if (!peer->is_local)
 		rxr_ep_dec_tx_pending(ep, peer, 0);
+	rxr_pkt_entry_release_tx(ep, pkt_entry);
 }
 
 /*
  *  Functions used to handle packet receive completion
  */
 static
-fi_addr_t rxr_pkt_insert_addr_from_rts(struct rxr_ep *ep, struct rxr_pkt_entry *pkt_entry)
+fi_addr_t rxr_pkt_insert_addr(struct rxr_ep *ep, struct rxr_pkt_entry *pkt_entry)
 {
 	int i, ret;
-	void *raw_address;
+	void *raw_addr;
 	fi_addr_t rdm_addr;
-	struct rxr_rts_hdr *rts_hdr;
 	struct efa_ep *efa_ep;
+	struct rxr_base_hdr *base_hdr;
 
-	assert(rxr_get_base_hdr(pkt_entry->pkt)->type == RXR_RTS_PKT);
-
-	efa_ep = container_of(ep->rdm_ep, struct efa_ep, util_ep.ep_fid);
-	rts_hdr = rxr_get_rts_hdr(pkt_entry->pkt);
-	assert(rts_hdr->flags & RXR_REMOTE_SRC_ADDR);
-	assert(rts_hdr->addrlen > 0);
-	if (rxr_get_base_hdr(pkt_entry->pkt)->version !=
-	    RXR_PROTOCOL_VERSION) {
-		char buffer[ep->core_addrlen * 3];
+	base_hdr = rxr_get_base_hdr(pkt_entry->pkt);
+	if (base_hdr->version < RXR_BASE_PROTOCOL_VERSION) {
+		char host_gid[ep->core_addrlen * 3];
 		int length = 0;
 
 		for (i = 0; i < ep->core_addrlen; i++)
-			length += sprintf(&buffer[length], "%02x ",
+			length += sprintf(&host_gid[length], "%02x ",
 					  ep->core_addr[i]);
 		FI_WARN(&rxr_prov, FI_LOG_CQ,
-			"Host %s:Invalid protocol version %d. Expected protocol version %d.\n",
-			buffer,
-			rxr_get_base_hdr(pkt_entry->pkt)->version,
-			RXR_PROTOCOL_VERSION);
+			"Host %s received a packet with invalid protocol version %d.\n"
+			"This host can only support protocol version %d and above.\n",
+			host_gid, base_hdr->version, RXR_BASE_PROTOCOL_VERSION);
 		efa_eq_write_error(&ep->util_ep, FI_EIO, -FI_EINVAL);
-		fprintf(stderr, "Invalid protocol version %d. Expected protocol version %d. %s:%d\n",
-			rxr_get_base_hdr(pkt_entry->pkt)->version,
-			RXR_PROTOCOL_VERSION, __FILE__, __LINE__);
+		fprintf(stderr, "Host %s received a packet with invalid protocol version %d.\n"
+			"This host can only support protocol version %d and above. %s:%d\n",
+			host_gid, base_hdr->version, RXR_BASE_PROTOCOL_VERSION, __FILE__, __LINE__);
 		abort();
 	}
 
-	raw_address = (rts_hdr->flags & RXR_REMOTE_CQ_DATA) ?
-		      rxr_get_ctrl_cq_pkt(rts_hdr)->data
-		      : rxr_get_ctrl_pkt(rts_hdr)->data;
+	assert(base_hdr->type >= RXR_REQ_PKT_BEGIN);
+	raw_addr = pkt_entry->raw_addr;
 
-	ret = efa_av_insert_addr(efa_ep->av, (struct efa_ep_addr *)raw_address,
+	efa_ep = container_of(ep->rdm_ep, struct efa_ep, util_ep.ep_fid);
+	ret = efa_av_insert_addr(efa_ep->av, (struct efa_ep_addr *)raw_addr,
 				 &rdm_addr, 0, NULL);
 	if (OFI_UNLIKELY(ret != 0)) {
 		efa_eq_write_error(&ep->util_ep, FI_EINVAL, ret);
@@ -333,9 +484,30 @@ void rxr_pkt_handle_recv_completion(struct rxr_ep *ep,
 				    fi_addr_t src_addr)
 {
 	struct rxr_peer *peer;
+	struct rxr_base_hdr *base_hdr;
 	struct rxr_pkt_entry *pkt_entry;
 
 	pkt_entry = (struct rxr_pkt_entry *)cq_entry->op_context;
+	pkt_entry->pkt_size = cq_entry->len;
+	assert(pkt_entry->pkt_size > 0);
+
+	base_hdr = rxr_get_base_hdr(pkt_entry->pkt);
+	if (base_hdr->type >= RXR_REQ_PKT_BEGIN) {
+		rxr_pkt_proc_req_common_hdr(pkt_entry);
+		assert(pkt_entry->hdr_size > 0);
+		/*
+		 * as long as the REQ packet contain raw address
+		 * we will need to call insert because it might be a new
+		 * EP with new Q-Key.
+		 */
+		if (OFI_UNLIKELY(pkt_entry->raw_addr != NULL))
+			pkt_entry->addr = rxr_pkt_insert_addr(ep, pkt_entry);
+		else
+			pkt_entry->addr = src_addr;
+	} else {
+		assert(src_addr != FI_ADDR_NOTAVAIL);
+		pkt_entry->addr = src_addr;
+	}
 
 #if ENABLE_DEBUG
 	dlist_remove(&pkt_entry->dbg_entry);
@@ -344,30 +516,33 @@ void rxr_pkt_handle_recv_completion(struct rxr_ep *ep,
 	rxr_ep_print_pkt("Received", ep, (struct rxr_base_hdr *)pkt_entry->pkt);
 #endif
 #endif
-	if (OFI_UNLIKELY(src_addr == FI_ADDR_NOTAVAIL))
-		pkt_entry->addr = rxr_pkt_insert_addr_from_rts(ep, pkt_entry);
-	else
-		pkt_entry->addr = src_addr;
-
-	assert(rxr_get_base_hdr(pkt_entry->pkt)->version ==
-	       RXR_PROTOCOL_VERSION);
-
 	peer = rxr_ep_get_peer(ep, pkt_entry->addr);
+	if (!(peer->flags & RXR_PEER_HANDSHAKE_SENT))
+		rxr_pkt_post_handshake(ep, peer, pkt_entry->addr);
 
 	if (rxr_env.enable_shm_transfer && peer->is_local)
 		ep->posted_bufs_shm--;
 	else
 		ep->posted_bufs_efa--;
 
-	switch (rxr_get_base_hdr(pkt_entry->pkt)->type) {
-	case RXR_RTS_PKT:
-		rxr_pkt_handle_rts_recv(ep, pkt_entry);
+	switch (base_hdr->type) {
+	case RXR_RETIRED_RTS_PKT:
+		FI_WARN(&rxr_prov, FI_LOG_CQ,
+			"Received a RTS packet, which has been retired since protocol version 4\n");
+		assert(0 && "deprecated RTS pakcet received");
+		rxr_cq_handle_cq_error(ep, -FI_EIO);
+		return;
+	case RXR_RETIRED_CONNACK_PKT:
+		FI_WARN(&rxr_prov, FI_LOG_CQ,
+			"Received a CONNACK packet, which has been retired since protocol version 4\n");
+		assert(0 && "deprecated CONNACK pakcet received");
+		rxr_cq_handle_cq_error(ep, -FI_EIO);
 		return;
 	case RXR_EOR_PKT:
 		rxr_pkt_handle_eor_recv(ep, pkt_entry);
 		return;
-	case RXR_CONNACK_PKT:
-		rxr_pkt_handle_connack_recv(ep, pkt_entry, src_addr);
+	case RXR_HANDSHAKE_PKT:
+		rxr_pkt_handle_handshake_recv(ep, pkt_entry);
 		return;
 	case RXR_CTS_PKT:
 		rxr_pkt_handle_cts_recv(ep, pkt_entry);
@@ -378,12 +553,49 @@ void rxr_pkt_handle_recv_completion(struct rxr_ep *ep,
 	case RXR_READRSP_PKT:
 		rxr_pkt_handle_readrsp_recv(ep, pkt_entry);
 		return;
+	case RXR_ATOMRSP_PKT:
+		rxr_pkt_handle_atomrsp_recv(ep, pkt_entry);
+		return;
+	case RXR_EAGER_MSGRTM_PKT:
+	case RXR_EAGER_TAGRTM_PKT:
+	case RXR_MEDIUM_MSGRTM_PKT:
+	case RXR_MEDIUM_TAGRTM_PKT:
+	case RXR_LONG_MSGRTM_PKT:
+	case RXR_LONG_TAGRTM_PKT:
+	case RXR_READ_MSGRTM_PKT:
+	case RXR_READ_TAGRTM_PKT:
+	case RXR_WRITE_RTA_PKT:
+	case RXR_FETCH_RTA_PKT:
+	case RXR_COMPARE_RTA_PKT:
+		rxr_pkt_handle_rtm_rta_recv(ep, pkt_entry);
+		return;
+	case RXR_EAGER_RTW_PKT:
+		rxr_pkt_handle_eager_rtw_recv(ep, pkt_entry);
+		return;
+	case RXR_LONG_RTW_PKT:
+		rxr_pkt_handle_long_rtw_recv(ep, pkt_entry);
+		return;
+	case RXR_READ_RTW_PKT:
+		rxr_pkt_handle_read_rtw_recv(ep, pkt_entry);
+		return;
+	case RXR_SHORT_RTR_PKT:
+	case RXR_LONG_RTR_PKT:
+		rxr_pkt_handle_rtr_recv(ep, pkt_entry);
+		return;
 	default:
-		FI_WARN(&rxr_prov, FI_LOG_CQ,
-			"invalid control pkt type %d\n",
-			rxr_get_base_hdr(pkt_entry->pkt)->type);
-		assert(0 && "invalid control pkt type");
-		rxr_cq_handle_cq_error(ep, -FI_EIO);
+		if (base_hdr->type >= RXR_EXTRA_REQ_PKT_END) {
+			FI_WARN(&rxr_prov, FI_LOG_CQ,
+				"Peer %d is requesting feature %d, which this EP does not support.\n"
+				"The EP informed the peer about this issue via a handshake packet.\n"
+				"This packet is therefore ignored\n", (int)pkt_entry->addr, base_hdr->type);
+		} else {
+			FI_WARN(&rxr_prov, FI_LOG_CQ,
+				"invalid control pkt type %d\n",
+				rxr_get_base_hdr(pkt_entry->pkt)->type);
+			assert(0 && "invalid control pkt type");
+			rxr_cq_handle_cq_error(ep, -FI_EIO);
+		}
+
 		return;
 	}
 }
@@ -397,68 +609,17 @@ void rxr_pkt_handle_recv_completion(struct rxr_ep *ep,
 #define RXR_PKT_DUMP_DATA_LEN 64
 
 static
-void rxr_pkt_print_rts(struct rxr_ep *ep,
-		       char *prefix, struct rxr_rts_hdr *rts_hdr)
-{
-	char str[RXR_PKT_DUMP_DATA_LEN * 4];
-	size_t str_len = RXR_PKT_DUMP_DATA_LEN * 4, l;
-	uint8_t *src;
-	uint8_t *data;
-	int i;
-
-	str[str_len - 1] = '\0';
-
-	FI_DBG(&rxr_prov, FI_LOG_EP_DATA,
-	       "%s RxR RTS packet - version: %"	PRIu8
-	       " flags: %"	PRIu16
-	       " tx_id: %"	PRIu32
-	       " msg_id: %"	PRIu32
-	       " tag: %lx data_len: %"	PRIu64 "\n",
-	       prefix, rts_hdr->version, rts_hdr->flags, rts_hdr->tx_id,
-	       rts_hdr->msg_id, rts_hdr->tag, rts_hdr->data_len);
-
-	if ((rts_hdr->flags & RXR_REMOTE_CQ_DATA) &&
-	    (rts_hdr->flags & RXR_REMOTE_SRC_ADDR)) {
-		src = (uint8_t *)((struct rxr_ctrl_cq_pkt *)rts_hdr)->data;
-		data = src + rts_hdr->addrlen;
-	} else if (!(rts_hdr->flags & RXR_REMOTE_CQ_DATA) &&
-		   (rts_hdr->flags & RXR_REMOTE_SRC_ADDR)) {
-		src = (uint8_t *)((struct rxr_ctrl_pkt *)rts_hdr)->data;
-		data = src + rts_hdr->addrlen;
-	} else if ((rts_hdr->flags & RXR_REMOTE_CQ_DATA) &&
-		   !(rts_hdr->flags & RXR_REMOTE_SRC_ADDR)) {
-		data = (uint8_t *)((struct rxr_ctrl_cq_pkt *)rts_hdr)->data;
-	} else {
-		data = (uint8_t *)((struct rxr_ctrl_pkt *)rts_hdr)->data;
-	}
-
-	if (rts_hdr->flags & RXR_REMOTE_CQ_DATA)
-		FI_DBG(&rxr_prov, FI_LOG_EP_DATA,
-		       "\tcq_data: %08lx\n",
-		       ((struct rxr_ctrl_cq_hdr *)rts_hdr)->cq_data);
-
-	if (rts_hdr->flags & RXR_REMOTE_SRC_ADDR) {
-		l = snprintf(str, str_len, "\tsrc_addr: ");
-		for (i = 0; i < rts_hdr->addrlen; i++)
-			l += snprintf(str + l, str_len - l, "%02x ", src[i]);
-		FI_DBG(&rxr_prov, FI_LOG_EP_DATA, "%s\n", str);
-	}
-
-	l = snprintf(str, str_len, ("\tdata:    "));
-	for (i = 0; i < MIN(rxr_get_rts_data_size(ep, rts_hdr),
-			    RXR_PKT_DUMP_DATA_LEN); i++)
-		l += snprintf(str + l, str_len - l, "%02x ", data[i]);
-	FI_DBG(&rxr_prov, FI_LOG_EP_DATA, "%s\n", str);
-}
-
-static
-void rxr_pkt_print_connack(char *prefix,
-			   struct rxr_connack_hdr *connack_hdr)
+void rxr_pkt_print_handshake(char *prefix,
+			     struct rxr_handshake_hdr *handshake_hdr)
 {
 	FI_DBG(&rxr_prov, FI_LOG_EP_DATA,
-	       "%s RxR CONNACK packet - version: %" PRIu8
-	       " flags: %x\n", prefix, connack_hdr->version,
-	       connack_hdr->flags);
+	       "%s RxR HANDSHAKE packet - version: %" PRIu8
+	       " flags: %x\n", prefix, handshake_hdr->version,
+	       handshake_hdr->flags);
+
+	FI_DBG(&rxr_prov, FI_LOG_EP_DATA,
+	       "%s RxR HANDSHAKE packet, maxproto: %d\n",
+	       prefix, handshake_hdr->maxproto);
 }
 
 static
@@ -502,11 +663,8 @@ void rxr_pkt_print_data(char *prefix, struct rxr_data_pkt *data_pkt)
 void rxr_pkt_print(char *prefix, struct rxr_ep *ep, struct rxr_base_hdr *hdr)
 {
 	switch (hdr->type) {
-	case RXR_RTS_PKT:
-		rxr_pkt_print_rts(ep, prefix, (struct rxr_rts_hdr *)hdr);
-		break;
-	case RXR_CONNACK_PKT:
-		rxr_pkt_print_connack(prefix, (struct rxr_connack_hdr *)hdr);
+	case RXR_HANDSHAKE_PKT:
+		rxr_pkt_print_handshake(prefix, (struct rxr_handshake_hdr *)hdr);
 		break;
 	case RXR_CTS_PKT:
 		rxr_pkt_print_cts(prefix, (struct rxr_cts_hdr *)hdr);

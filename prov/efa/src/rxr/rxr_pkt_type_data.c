@@ -34,6 +34,7 @@
 #include "rxr.h"
 #include "rxr_msg.h"
 #include "rxr_pkt_cmd.h"
+#include "efa_cuda.h"
 
 /*
  * This function contains data packet related functions
@@ -48,7 +49,7 @@ ssize_t rxr_pkt_send_data(struct rxr_ep *ep,
 			  struct rxr_tx_entry *tx_entry,
 			  struct rxr_pkt_entry *pkt_entry)
 {
-	uint64_t payload_size;
+	uint64_t payload_size, copied_size;
 	struct rxr_data_pkt *data_pkt;
 
 	pkt_entry->x_entry = (void *)tx_entry;
@@ -61,14 +62,10 @@ ssize_t rxr_pkt_send_data(struct rxr_ep *ep,
 	data_pkt = (struct rxr_data_pkt *)pkt_entry->pkt;
 	data_pkt->hdr.seg_size = payload_size;
 
-	pkt_entry->pkt_size = ofi_copy_from_iov(data_pkt->data,
-						payload_size,
-						tx_entry->iov,
-						tx_entry->iov_count,
-						tx_entry->bytes_sent);
-	assert(pkt_entry->pkt_size == payload_size);
+	copied_size = rxr_copy_from_tx(data_pkt->data, payload_size, tx_entry, tx_entry->bytes_sent);
+	assert(copied_size == payload_size);
 
-	pkt_entry->pkt_size += RXR_DATA_HDR_SIZE;
+	pkt_entry->pkt_size = copied_size + sizeof(struct rxr_data_hdr);
 	pkt_entry->addr = tx_entry->addr;
 
 	return rxr_pkt_entry_send_with_flags(ep, pkt_entry, pkt_entry->addr,
@@ -118,9 +115,9 @@ static size_t rxr_copy_from_iov(void *buf, uint64_t remaining_len,
 	return done;
 }
 
-ssize_t rxr_pkt_send_data_mr_cache(struct rxr_ep *ep,
-				   struct rxr_tx_entry *tx_entry,
-				   struct rxr_pkt_entry *pkt_entry)
+ssize_t rxr_pkt_send_data_desc(struct rxr_ep *ep,
+			       struct rxr_tx_entry *tx_entry,
+			       struct rxr_pkt_entry *pkt_entry)
 {
 	struct rxr_data_pkt *data_pkt;
 	/* The user's iov */
@@ -146,7 +143,7 @@ ssize_t rxr_pkt_send_data_mr_cache(struct rxr_ep *ep,
 	data_pkt = (struct rxr_data_pkt *)pkt_entry->pkt;
 	/* Assign packet header in constructed iov */
 	iov[i].iov_base = rxr_pkt_start(pkt_entry);
-	iov[i].iov_len = RXR_DATA_HDR_SIZE;
+	iov[i].iov_len = sizeof(struct rxr_data_hdr);
 	desc[i] = rxr_ep_mr_local(ep) ? fi_mr_desc(pkt_entry->mr) : NULL;
 	i++;
 
@@ -158,18 +155,12 @@ ssize_t rxr_pkt_send_data_mr_cache(struct rxr_ep *ep,
 	 */
 	while (tx_entry->iov_index < tx_entry->iov_count &&
 	       remaining_len > 0 && i < ep->core_iov_limit) {
-		if (!rxr_ep_mr_local(ep) ||
-		    /* from the inline registration post-RTS */
-		    tx_entry->mr[tx_entry->iov_index] ||
-		    /* from application-provided descriptor */
-		    tx_entry->desc[tx_entry->iov_index]) {
+		if (!rxr_ep_mr_local(ep) || tx_entry->desc[tx_entry->iov_index]) {
 			iov[i].iov_base =
 				(char *)tx_iov[tx_entry->iov_index].iov_base +
 				tx_entry->iov_offset;
 			if (rxr_ep_mr_local(ep))
-				desc[i] = tx_entry->desc[tx_entry->iov_index] ?
-					  tx_entry->desc[tx_entry->iov_index] :
-					  fi_mr_desc(tx_entry->mr[tx_entry->iov_index]);
+				desc[i] = tx_entry->desc[tx_entry->iov_index];
 
 			len = tx_iov[tx_entry->iov_index].iov_len
 			      - tx_entry->iov_offset;
@@ -182,10 +173,13 @@ ssize_t rxr_pkt_send_data_mr_cache(struct rxr_ep *ep,
 			}
 			iov[i].iov_len = len;
 		} else {
-			/*
+			/* It should be noted for cuda buffer, caller will always
+			 * provide desc, and will not enter this branch.
+			 *
 			 * Copies any consecutive small iov's, returning size
 			 * written while updating iov index and offset
 			 */
+
 			len = rxr_copy_from_iov((char *)data_pkt->data +
 						 pkt_used,
 						 remaining_len,
@@ -202,6 +196,7 @@ ssize_t rxr_pkt_send_data_mr_cache(struct rxr_ep *ep,
 	}
 	data_pkt->hdr.seg_size = (uint16_t)payload_size;
 	pkt_entry->pkt_size = payload_size + RXR_DATA_HDR_SIZE;
+	pkt_entry->x_entry = tx_entry;
 	pkt_entry->addr = tx_entry->addr;
 
 	FI_DBG(&rxr_prov, FI_LOG_EP_DATA,
@@ -221,6 +216,7 @@ void rxr_pkt_handle_data_send_completion(struct rxr_ep *ep,
 	tx_entry = (struct rxr_tx_entry *)pkt_entry->x_entry;
 	tx_entry->bytes_acked +=
 		rxr_get_data_pkt(pkt_entry->pkt)->hdr.seg_size;
+
 	if (tx_entry->total_len == tx_entry->bytes_acked)
 		rxr_cq_handle_tx_completion(ep, tx_entry);
 }
@@ -246,8 +242,8 @@ int rxr_pkt_proc_data(struct rxr_ep *ep,
 	/* we are sinking message for CANCEL/DISCARD entry */
 	if (OFI_LIKELY(!(rx_entry->rxr_flags & RXR_RECV_CANCEL)) &&
 	    rx_entry->cq_entry.len > seg_offset) {
-		bytes_copied = ofi_copy_to_iov(rx_entry->iov, rx_entry->iov_count,
-					       seg_offset, data, seg_size);
+		bytes_copied = rxr_copy_to_rx(data, seg_size, rx_entry, seg_offset);
+
 		if (bytes_copied != MIN(seg_size, rx_entry->cq_entry.len - seg_offset)) {
 			FI_WARN(&rxr_prov, FI_LOG_CQ, "wrong size! bytes_copied: %ld\n",
 				bytes_copied);
@@ -267,7 +263,7 @@ int rxr_pkt_proc_data(struct rxr_ep *ep,
 
 	/* bytes_done is total bytes sent/received, which could be larger than
 	 * to bytes copied to recv buffer (for truncated messages).
-	 * rx_entry->total_len is from rts_hdr and is the size of send buffer,
+	 * rx_entry->total_len is from rtm header and is the size of send buffer,
 	 * thus we always have:
 	 *             rx_entry->total >= rx_entry->bytes_done
 	 */

@@ -61,6 +61,16 @@ static inline size_t ofi_total_ioc_cnt(const struct fi_ioc *ioc, size_t ioc_coun
 	return cnt;
 }
 
+static inline size_t ofi_total_rma_iov_len(const struct fi_rma_iov *rma_iov,
+					   size_t iov_count)
+{
+	size_t i, len = 0;
+
+	for (i = 0; i < iov_count; i++)
+		len += rma_iov[i].len;
+	return len;
+}
+
 static inline size_t ofi_total_rma_ioc_cnt(const struct fi_rma_ioc *rma_ioc,
 					   size_t ioc_count)
 {
@@ -170,6 +180,12 @@ ofi_iov_within(const struct iovec *iov1, const struct iovec *iov2)
 }
 
 void ofi_consume_iov(struct iovec *iovec, size_t *iovec_count, size_t offset);
+
+void ofi_consume_iov_desc(struct iovec *iovec, void **desc,
+			  size_t *iovec_count, size_t offset);
+
+void ofi_consume_rma_iov(struct fi_rma_iov *rma_iov, size_t *rma_iov_count,
+			 size_t length);
 
 int ofi_truncate_iov(struct iovec *iov, size_t *iov_count, size_t new_size);
 

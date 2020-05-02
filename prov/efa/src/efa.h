@@ -57,6 +57,7 @@
 #include <rdma/fi_errno.h>
 
 #include <infiniband/verbs.h>
+#include <infiniband/efadv.h>
 
 #include "ofi.h"
 #include "ofi_enosys.h"
@@ -66,7 +67,6 @@
 
 #include "rxr.h"
 #define EFA_PROV_NAME "efa"
-#define EFA_PROV_VERS FI_VERSION(3, 0)
 
 #define EFA_WARN(subsys, ...) FI_WARN(&efa_prov, subsys, __VA_ARGS__)
 #define EFA_TRACE(subsys, ...) FI_TRACE(&efa_prov, subsys, __VA_ARGS__)
@@ -88,7 +88,7 @@
 
 #define EFA_DEF_CQ_SIZE 1024
 #define EFA_MR_IOV_LIMIT 1
-#define EFA_MR_SUPPORTED_PERMISSIONS (FI_SEND | FI_RECV)
+#define EFA_MR_SUPPORTED_PERMISSIONS (FI_SEND | FI_RECV | FI_REMOTE_READ)
 
 /*
  * Multiplier to give some room in the device memory registration limits
@@ -103,12 +103,9 @@
  */
 #define EFA_SHM_MAX_AV_COUNT       (256)
 
-#define EFA_QKEY 0x11111111
-
 extern int efa_mr_cache_enable;
 extern size_t efa_mr_max_cached_count;
 extern size_t efa_mr_max_cached_size;
-extern int efa_mr_cache_merge_regions;
 
 extern struct fi_provider efa_prov;
 extern struct util_prov efa_util_prov;
@@ -120,6 +117,8 @@ struct efa_fabric {
 struct efa_ep_addr {
 	uint8_t			raw[16];
 	uint16_t		qpn;
+	uint16_t		pad;
+	uint32_t		qkey;
 	struct efa_ep_addr	*next;
 };
 
@@ -135,13 +134,24 @@ struct efa_conn {
 	struct efa_ep_addr	ep_addr;
 };
 
+/*
+ * Common fields for the beginning of the efa_domain and rxr_domain structures.
+ * This structure must be kept in sync with rxr_domain and efa_domain. This
+ * will be removed when the rxr and efa domain structures are combined.
+ */
+struct efa_domain_base {
+	struct util_domain	util_domain;
+	enum efa_domain_type	type;
+};
+
 struct efa_domain {
 	struct util_domain	util_domain;
+	enum efa_domain_type	type;
+	struct fid_domain	*shm_domain;
 	struct efa_context	*ctx;
 	struct ibv_pd		*ibv_pd;
 	struct fi_info		*info;
 	struct efa_fabric	*fab;
-	int			rdm;
 	struct ofi_mr_cache	cache;
 	struct efa_qp		**qp_table;
 	size_t			qp_table_sz_m1;
@@ -153,6 +163,9 @@ int efa_mr_cache_entry_reg(struct ofi_mr_cache *cache,
 			   struct ofi_mr_entry *entry);
 void efa_mr_cache_entry_dereg(struct ofi_mr_cache *cache,
 			      struct ofi_mr_entry *entry);
+
+int efa_mr_reg_shm(struct fid_domain *domain_fid, struct iovec *iov,
+		   uint64_t access, struct fid_mr **mr_fid);
 
 struct efa_wc {
 	struct ibv_wc		ibv_wc;
@@ -183,20 +196,39 @@ struct efa_context {
 	struct ibv_context	*ibv_ctx;
 	uint64_t		max_mr_size;
 	uint16_t		inline_buf_size;
+	uint16_t		max_wr_rdma_sge;
+	uint32_t		max_rdma_size;
+	uint32_t		device_caps;
 };
 
 struct efa_qp {
 	struct ibv_qp	*ibv_qp;
+	struct ibv_qp_ex *ibv_qp_ex;
 	struct efa_ep	*ep;
 	uint32_t	qp_num;
+	uint32_t	qkey;
 };
 
-struct efa_mem_desc {
+/*
+ * Descriptor returned for FI_HMEM peer memory registrations
+ */
+struct efa_mr_peer {
+	enum fi_hmem_iface      iface;
+	union {
+		uint64_t        reserved;
+		int             cuda;
+	} device;
+};
+
+struct efa_mr {
 	struct fid_mr		mr_fid;
-	struct ibv_mr		*mr;
+	struct ibv_mr		*ibv_mr;
 	struct efa_domain	*domain;
 	/* Used only in MR cache */
 	struct ofi_mr_entry	*entry;
+	/* Used only in rdm */
+	struct fid_mr		*shm_mr;
+	struct efa_mr_peer	peer;
 };
 
 struct efa_ep {
@@ -237,6 +269,7 @@ struct efa_av {
 	struct efa_ep           *ep;
 	size_t			used;
 	size_t			next;
+	size_t			shm_used;
 	enum fi_av_type		type;
 	efa_addr_to_conn_func	addr_to_conn;
 	struct efa_reverse_av	*reverse_av;
@@ -299,6 +332,7 @@ extern const struct efa_ep_domain efa_dgrm_domain;
 
 extern struct fi_ops_cm efa_ep_cm_ops;
 extern struct fi_ops_msg efa_ep_msg_ops;
+extern struct fi_ops_rma efa_ep_rma_ops;
 
 int efa_device_init(void);
 void efa_device_free(void);
@@ -332,5 +366,44 @@ struct fi_provider *init_lower_efa_prov();
 ssize_t efa_cq_readfrom(struct fid_cq *cq_fid, void *buf, size_t count, fi_addr_t *src_addr);
 
 ssize_t efa_cq_readerr(struct fid_cq *cq_fid, struct fi_cq_err_entry *entry, uint64_t flags);
+
+static inline
+bool efa_ep_support_rdma_read(struct fid_ep *ep_fid)
+{
+	struct efa_ep *efa_ep;
+
+	efa_ep = container_of(ep_fid, struct efa_ep, util_ep.ep_fid);
+	return efa_ep->domain->ctx->device_caps & EFADV_DEVICE_ATTR_CAPS_RDMA_READ;
+}
+
+static inline
+bool efa_peer_support_rdma_read(struct rxr_peer *peer)
+{
+	/* RDMA READ is an extra feature defined in version 4 (the base version).
+	 * Because it is an extra feature, an EP will assume the peer does not support
+	 * it before a handshake packet was received.
+	 */
+	return (peer->flags & RXR_PEER_HANDSHAKE_RECEIVED) &&
+	       (peer->features[0] & RXR_REQ_FEATURE_RDMA_READ);
+}
+
+static inline
+bool efa_both_support_rdma_read(struct rxr_ep *ep, struct rxr_peer *peer)
+{
+	if (!rxr_env.use_device_rdma)
+		return 0;
+
+	return efa_ep_support_rdma_read(ep->rdm_ep) &&
+	       (peer->is_self || efa_peer_support_rdma_read(peer));
+}
+
+static inline
+size_t efa_max_rdma_size(struct fid_ep *ep_fid)
+{
+	struct efa_ep *efa_ep;
+
+	efa_ep = container_of(ep_fid, struct efa_ep, util_ep.ep_fid);
+	return efa_ep->domain->ctx->max_rdma_size;
+}
 
 #endif /* EFA_H */

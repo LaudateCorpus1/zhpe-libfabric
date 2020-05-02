@@ -32,11 +32,35 @@
  */
 
 #include "config.h"
-
 #include "efa.h"
 
+#include <sys/time.h>
 #include <infiniband/efadv.h>
 #define EFA_CQ_PROGRESS_ENTRIES 500
+
+static int efa_generate_qkey()
+{
+	struct timeval tv;
+	struct timezone tz;
+	uint32_t val;
+	int err;
+
+	err = gettimeofday(&tv, &tz);
+	if (err) {
+		EFA_WARN(FI_LOG_EP_CTRL, "Cannot gettimeofday, err=%d.\n", err);
+		return 0;
+	}
+
+	/* tv_usec is in range [0,1,000,000), shift it by 12 to [0,4,096,000,000 */
+	val = (tv.tv_usec << 12) + tv.tv_sec;
+
+	val = ofi_xorshift_random(val);
+
+	/* 0x80000000 and up is privileged Q Key range. */
+	val &= 0x7fffffff;
+
+	return val;
+}
 
 static int efa_ep_destroy_qp(struct efa_qp *qp)
 {
@@ -67,7 +91,7 @@ static int efa_ep_modify_qp_state(struct efa_qp *qp, enum ibv_qp_state qp_state,
 		attr.port_num = 1;
 
 	if (attr_mask & IBV_QP_QKEY)
-		attr.qkey = EFA_QKEY;
+		attr.qkey = qp->qkey;
 
 	return -ibv_modify_qp(qp->ibv_qp, &attr, attr_mask);
 
@@ -91,29 +115,37 @@ static int efa_ep_modify_qp_rst2rts(struct efa_qp *qp)
 				      IBV_QP_STATE | IBV_QP_SQ_PSN);
 }
 
-static int efa_ep_create_qp(struct efa_ep *ep,
-			    struct ibv_pd *ibv_pd,
-			    struct ibv_qp_init_attr *init_attr)
+static int efa_ep_create_qp_ex(struct efa_ep *ep,
+			       struct ibv_pd *ibv_pd,
+			       struct ibv_qp_init_attr_ex *init_attr_ex)
 {
-	struct efa_domain *domain = ep->domain;
+	struct efa_domain *domain;
 	struct efa_qp *qp;
+	struct efadv_qp_init_attr efa_attr = {};
 	int err;
 
+	domain = ep->domain;
 	qp = calloc(1, sizeof(*qp));
 	if (!qp)
 		return -FI_ENOMEM;
 
-	if (init_attr->qp_type == IBV_QPT_UD)
-		qp->ibv_qp = ibv_create_qp(ibv_pd, init_attr);
-	else
-		qp->ibv_qp = efadv_create_driver_qp(ibv_pd, init_attr,
-						    EFADV_QP_DRIVER_TYPE_SRD);
+	if (init_attr_ex->qp_type == IBV_QPT_UD) {
+		qp->ibv_qp = ibv_create_qp_ex(ibv_pd->context, init_attr_ex);
+	} else {
+		assert(init_attr_ex->qp_type == IBV_QPT_DRIVER);
+		efa_attr.driver_qp_type = EFADV_QP_DRIVER_TYPE_SRD;
+		qp->ibv_qp = efadv_create_qp_ex(ibv_pd->context, init_attr_ex, &efa_attr,
+						sizeof(struct efadv_qp_init_attr));
+	}
+
 	if (!qp->ibv_qp) {
 		EFA_WARN(FI_LOG_EP_CTRL, "ibv_create_qp failed\n");
 		err = -EINVAL;
 		goto err_free_qp;
 	}
 
+	qp->ibv_qp_ex = ibv_qp_to_qp_ex(qp->ibv_qp);
+	qp->qkey = efa_generate_qkey();
 	err = efa_ep_modify_qp_rst2rts(qp);
 	if (err)
 		goto err_destroy_qp;
@@ -122,7 +154,7 @@ static int efa_ep_create_qp(struct efa_ep *ep,
 	ep->qp = qp;
 	qp->ep = ep;
 	domain->qp_table[ep->qp->qp_num & domain->qp_table_sz_m1] = ep->qp;
-	EFA_INFO(FI_LOG_EP_CTRL, "%s(): create QP %d\n", __func__, qp->qp_num);
+	EFA_INFO(FI_LOG_EP_CTRL, "%s(): create QP %d qkey: %d\n", __func__, qp->qp_num, qp->qkey);
 
 	return 0;
 
@@ -337,7 +369,7 @@ static int efa_ep_setflags(struct fid_ep *ep_fid, uint64_t flags)
 
 static int efa_ep_enable(struct fid_ep *ep_fid)
 {
-	struct ibv_qp_init_attr attr = { 0 };
+	struct ibv_qp_init_attr_ex attr_ex = { 0 };
 	const struct fi_info *efa_info;
 	struct ibv_pd *ibv_pd;
 	struct efa_ep *ep;
@@ -369,29 +401,42 @@ static int efa_ep_enable(struct fid_ep *ep_fid)
 	}
 
 	if (ep->scq) {
-		attr.cap.max_send_wr = ep->info->tx_attr->size;
-		attr.cap.max_send_sge = ep->info->tx_attr->iov_limit;
-		attr.send_cq = ep->scq->ibv_cq;
+		attr_ex.cap.max_send_wr = ep->info->tx_attr->size;
+		attr_ex.cap.max_send_sge = ep->info->tx_attr->iov_limit;
+		attr_ex.send_cq = ep->scq->ibv_cq;
 		ibv_pd = ep->scq->domain->ibv_pd;
 	} else {
-		attr.send_cq = ep->rcq->ibv_cq;
+		attr_ex.send_cq = ep->rcq->ibv_cq;
 		ibv_pd = ep->rcq->domain->ibv_pd;
 	}
 
 	if (ep->rcq) {
-		attr.cap.max_recv_wr = ep->info->rx_attr->size;
-		attr.cap.max_recv_sge = ep->info->rx_attr->iov_limit;
-		attr.recv_cq = ep->rcq->ibv_cq;
+		attr_ex.cap.max_recv_wr = ep->info->rx_attr->size;
+		attr_ex.cap.max_recv_sge = ep->info->rx_attr->iov_limit;
+		attr_ex.recv_cq = ep->rcq->ibv_cq;
 	} else {
-		attr.recv_cq = ep->scq->ibv_cq;
+		attr_ex.recv_cq = ep->scq->ibv_cq;
 	}
 
-	attr.cap.max_inline_data = ep->domain->ctx->inline_buf_size;
-	attr.qp_type = ep->domain->rdm ? IBV_QPT_DRIVER : IBV_QPT_UD;
-	attr.qp_context = ep;
-	attr.sq_sig_all = 1;
+	attr_ex.cap.max_inline_data = ep->domain->ctx->inline_buf_size;
 
-	return efa_ep_create_qp(ep, ibv_pd, &attr);
+	if (ep->domain->type == EFA_DOMAIN_RDM) {
+		attr_ex.qp_type = IBV_QPT_DRIVER;
+		attr_ex.comp_mask = IBV_QP_INIT_ATTR_PD | IBV_QP_INIT_ATTR_SEND_OPS_FLAGS;
+		attr_ex.send_ops_flags = IBV_QP_EX_WITH_SEND;
+		if (efa_ep_support_rdma_read(&ep->util_ep.ep_fid))
+			attr_ex.send_ops_flags |= IBV_QP_EX_WITH_RDMA_READ;
+		attr_ex.pd = ibv_pd;
+	} else {
+		attr_ex.qp_type = IBV_QPT_UD;
+		attr_ex.comp_mask = IBV_QP_INIT_ATTR_PD;
+		attr_ex.pd = ibv_pd;
+	}
+
+	attr_ex.qp_context = ep;
+	attr_ex.sq_sig_all = 1;
+
+	return efa_ep_create_qp_ex(ep, ibv_pd, &attr_ex);
 }
 
 static int efa_ep_control(struct fid *fid, int command, void *arg)
@@ -425,35 +470,43 @@ static struct fi_ops efa_ep_ops = {
 	.ops_open = fi_no_ops_open,
 };
 
-static void efa_ep_progress_internal(struct efa_cq *efa_cq, uint64_t flags)
+static void efa_ep_progress_internal(struct efa_ep *ep, struct efa_cq *efa_cq)
 {
-	struct util_cq *cq = &efa_cq->util_cq;
-	int i;
-	ssize_t ret;
+	struct util_cq *cq;
 	struct fi_cq_tagged_entry cq_entry[EFA_CQ_PROGRESS_ENTRIES];
 	struct fi_cq_tagged_entry *temp_cq_entry;
 	struct fi_cq_err_entry cq_err_entry;
 	fi_addr_t src_addr[EFA_CQ_PROGRESS_ENTRIES];
+	uint64_t flags;
+	int i;
+	ssize_t ret, err;
+
+	cq = &efa_cq->util_cq;
+	flags = ep->util_ep.caps;
 
 	VALGRIND_MAKE_MEM_DEFINED(&cq_entry, sizeof(cq_entry));
 
 	ret = efa_cq_readfrom(&cq->cq_fid, cq_entry, EFA_CQ_PROGRESS_ENTRIES,
 			      (flags & FI_SOURCE) ? src_addr : NULL);
 	if (ret == -FI_EAGAIN)
-		goto err_cq;
+		return;
 
 	if (OFI_UNLIKELY(ret < 0)) {
-		ret = (ret == FI_EAVAIL) ?
-			efa_cq_readerr(&cq->cq_fid, &cq_err_entry, flags) :
-			-FI_EAVAIL;
-		if (OFI_UNLIKELY(ret < 0)) {
-			if (OFI_UNLIKELY(ret != -FI_EAGAIN))
-				EFA_WARN(FI_LOG_CQ,
-					 "failed to read cq error: %ld\n", ret);
-			goto err_cq;
+		if (OFI_UNLIKELY(ret != -FI_EAVAIL)) {
+			EFA_WARN(FI_LOG_CQ, "no error available errno: %ld\n", ret);
+			efa_eq_write_error(&ep->util_ep, FI_EOTHER, ret);
+			return;
 		}
+
+		err = efa_cq_readerr(&cq->cq_fid, &cq_err_entry, flags);
+		if (OFI_UNLIKELY(err < 0)) {
+			EFA_WARN(FI_LOG_CQ, "unable to read error entry errno: %ld\n", err);
+			efa_eq_write_error(&ep->util_ep, FI_EOTHER, err);
+			return;
+		}
+
 		ofi_cq_write_error(cq, &cq_err_entry);
-		goto err_cq;
+		return;
 	}
 
 	temp_cq_entry = (struct fi_cq_tagged_entry *)cq_entry;
@@ -476,7 +529,6 @@ static void efa_ep_progress_internal(struct efa_cq *efa_cq, uint64_t flags)
 		temp_cq_entry = (struct fi_cq_tagged_entry *)
 				((uint8_t *)temp_cq_entry + efa_cq->entry_size);
 	}
-err_cq:
 	return;
 }
 
@@ -493,26 +545,13 @@ void efa_ep_progress(struct util_ep *ep)
 	fastlock_acquire(&ep->lock);
 
 	if (rcq)
-		efa_ep_progress_internal(rcq, ep->caps);
+		efa_ep_progress_internal(efa_ep, rcq);
 
 	if (scq && scq != rcq)
-		efa_ep_progress_internal(scq, ep->caps);
+		efa_ep_progress_internal(efa_ep, scq);
 
 	fastlock_release(&ep->lock);
 }
-
-static struct fi_ops_rma efa_ep_rma_ops = {
-	.size = sizeof(struct fi_ops_rma),
-	.read = fi_no_rma_read,
-	.readv = fi_no_rma_readv,
-	.readmsg = fi_no_rma_readmsg,
-	.write = fi_no_rma_write,
-	.writev = fi_no_rma_writev,
-	.writemsg = fi_no_rma_writemsg,
-	.inject = fi_no_rma_inject,
-	.writedata = fi_no_rma_writedata,
-	.injectdata = fi_no_rma_injectdata,
-};
 
 static struct fi_ops_atomic efa_ep_atomic_ops = {
 	.size = sizeof(struct fi_ops_atomic),

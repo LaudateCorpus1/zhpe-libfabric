@@ -37,14 +37,15 @@
 #include "smr_signal.h"
 
 extern struct sigaction *old_action;
-
 struct smr_env smr_env = {
-	.disable_cma	= 0,
+	.sar_threshold = SIZE_MAX,
 };
 
 static void smr_init_env(void)
 {
-	fi_param_get_bool(&smr_prov, "disable_cma", &smr_env.disable_cma);
+	fi_param_get_size_t(&smr_prov, "sar_threshold", &smr_env.sar_threshold);
+	fi_param_get_size_t(&smr_prov, "tx_size", &smr_info.tx_attr->size);
+	fi_param_get_size_t(&smr_prov, "rx_size", &smr_info.rx_attr->size);
 }
 
 static void smr_resolve_addr(const char *node, const char *service,
@@ -73,37 +74,45 @@ static void smr_resolve_addr(const char *node, const char *service,
 	(*addr)[*addrlen - 1]  = '\0';
 }
 
-static void smr_check_ptrace_scope(void)
+/*
+ * The smr_shm_space_check is to check if there's enough shm space we
+ * need under /dev/shm.
+ * Here we use #core instead of SMR_MAX_PEERS, as it is the most likely
+ * value and has less possibility of failing fi_getinfo calls that are
+ * currently passing, and breaking currently working app
+ */
+static int smr_shm_space_check(size_t tx_count, size_t rx_count)
 {
-	static bool init = 0;
-	FILE *file;
-	int scope, ret;
+	struct statvfs stat;
+	char shm_fs[] = "/dev/shm";
+	uint64_t available_size, shm_size_needed;
+	int num_of_core, err;
 
-	if (smr_env.disable_cma || init)
-		return;
-
-	scope = 0;
-	file = fopen("/proc/sys/kernel/yama/ptrace_scope", "r");
-	if (file) {
-		ret = fscanf(file, "%d", &scope);
-		if (ret != 1) {
+	num_of_core = ofi_sysconf(_SC_NPROCESSORS_ONLN);
+	if (num_of_core < 0) {
+		FI_WARN(&smr_prov, FI_LOG_CORE,
+			"Get number of processor failed (%s)\n",
+			strerror(errno));
+		return -errno;
+	}
+	shm_size_needed = num_of_core *
+			  smr_calculate_size_offsets(tx_count, rx_count,
+						     NULL, NULL, NULL,
+						     NULL, NULL, NULL);
+	err = statvfs(shm_fs, &stat);
+	if (err) {
+		FI_WARN(&smr_prov, FI_LOG_CORE,
+			"Get filesystem %s statistics failed (%s)\n",
+			shm_fs, strerror(errno));
+	} else {
+		available_size = stat.f_bsize * stat.f_bavail;
+		if (available_size < shm_size_needed) {
 			FI_WARN(&smr_prov, FI_LOG_CORE,
-				"Error getting value from ptrace_scope\n");
-			scope = 1;
-			goto out;
-		}
-		ret = fclose(file);
-		if (ret) {
-			FI_WARN(&smr_prov, FI_LOG_CORE,
-				"Error closing ptrace_scope file\n");
-			scope = 1;
-			goto out;
+				"Not enough available space in %s.\n", shm_fs);
+			return -FI_ENOSPC;
 		}
 	}
-
-out:
-	smr_env.disable_cma = scope;
-	init = 1;
+	return 0;
 }
 
 static int smr_getinfo(uint32_t version, const char *node, const char *service,
@@ -118,13 +127,18 @@ static int smr_getinfo(uint32_t version, const char *node, const char *service,
 	mr_mode = hints && hints->domain_attr ? hints->domain_attr->mr_mode :
 						FI_MR_VIRT_ADDR;
 	msg_order = hints && hints->tx_attr ? hints->tx_attr->msg_order : 0;
-	smr_check_ptrace_scope();
 	fast_rma = smr_fast_rma_enabled(mr_mode, msg_order);
 
 	ret = util_getinfo(&smr_util_prov, version, node, service, flags,
 			   hints, info);
 	if (ret)
 		return ret;
+
+	ret = smr_shm_space_check((*info)->tx_attr->size, (*info)->rx_attr->size);
+	if (ret) {
+		fi_freeinfo(*info);
+		return ret;
+	}
 
 	for (cur = *info; cur; cur = cur->next) {
 		if (!(flags & FI_SOURCE) && !cur->dest_addr)
@@ -146,8 +160,6 @@ static int smr_getinfo(uint32_t version, const char *node, const char *service,
 			cur->ep_attr->max_order_waw_size = 0;
 			cur->ep_attr->max_order_war_size = 0;
 		}
-		if (smr_env.disable_cma)
-			cur->ep_attr->max_msg_size = SMR_INJECT_SIZE;
 	}
 	return 0;
 }
@@ -160,7 +172,7 @@ static void smr_fini(void)
 
 struct fi_provider smr_prov = {
 	.name = "shm",
-	.version = FI_VERSION(SMR_MAJOR_VERSION, SMR_MINOR_VERSION),
+	.version = OFI_VERSION_DEF_PROV,
 	.fi_version = OFI_VERSION_LATEST,
 	.getinfo = smr_getinfo,
 	.fabric = smr_fabric,
@@ -175,9 +187,17 @@ struct util_prov smr_util_prov = {
 
 SHM_INI
 {
-	fi_param_define(&smr_prov, "disable_cma", FI_PARAM_BOOL,
-			"Disable use of CMA (Cross Memory Attach) for \
-			copying data directly between processes (default: no)");
+	fi_param_define(&smr_prov, "sar_threshold", FI_PARAM_SIZE_T,
+			"Max size to use for alternate SAR protocol if CMA \
+			 is not available before switching to mmap protocol \
+			 Default: SIZE_MAX (18446744073709551615)");
+	fi_param_define(&smr_prov, "tx_size", FI_PARAM_SIZE_T,
+			"Max number of outstanding tx operations \
+			 Default: 1024");
+	fi_param_define(&smr_prov, "rx_size", FI_PARAM_SIZE_T,
+			"Max number of outstanding rx operations \
+			 Default: 1024");
+
 	smr_init_env();
 
 	old_action = calloc(SIGRTMIN, sizeof(*old_action));

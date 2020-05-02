@@ -48,8 +48,8 @@ struct rxr_env rxr_env = {
 	.tx_max_credits = RXR_DEF_MAX_TX_CREDITS,
 	.tx_min_credits = RXR_DEF_MIN_TX_CREDITS,
 	.tx_queue_size = 0,
-	.enable_sas_ordering = 1,
 	.enable_shm_transfer = 1,
+	.use_device_rdma = 0,
 	.shm_av_size = 128,
 	.shm_max_medium_size = 4096,
 	.recvwin_size = RXR_RECVWIN_SIZE,
@@ -66,6 +66,9 @@ struct rxr_env rxr_env = {
 	.timeout_interval = 0, /* 0 is random timeout */
 	.efa_cq_read_size = 50,
 	.shm_cq_read_size = 50,
+	.efa_max_medium_msg_size = 65536,
+	.efa_min_read_write_size = 65536,
+	.efa_read_segment_size = 1073741824,
 };
 
 static void rxr_init_env(void)
@@ -74,8 +77,8 @@ static void rxr_init_env(void)
 	fi_param_get_int(&rxr_prov, "tx_max_credits", &rxr_env.tx_max_credits);
 	fi_param_get_int(&rxr_prov, "tx_min_credits", &rxr_env.tx_min_credits);
 	fi_param_get_int(&rxr_prov, "tx_queue_size", &rxr_env.tx_queue_size);
-	fi_param_get_int(&rxr_prov, "enable_sas_ordering", &rxr_env.enable_sas_ordering);
 	fi_param_get_int(&rxr_prov, "enable_shm_transfer", &rxr_env.enable_shm_transfer);
+	fi_param_get_int(&rxr_prov, "use_device_rdma", &rxr_env.use_device_rdma);
 	fi_param_get_int(&rxr_prov, "shm_av_size", &rxr_env.shm_av_size);
 	fi_param_get_int(&rxr_prov, "shm_max_medium_size", &rxr_env.shm_max_medium_size);
 	fi_param_get_int(&rxr_prov, "recvwin_size", &rxr_env.recvwin_size);
@@ -84,8 +87,6 @@ static void rxr_init_env(void)
 			    &rxr_env.max_memcpy_size);
 	fi_param_get_bool(&rxr_prov, "mr_cache_enable",
 			  &efa_mr_cache_enable);
-	fi_param_get_bool(&rxr_prov, "mr_cache_merge_regions",
-			  &efa_mr_cache_merge_regions);
 	fi_param_get_size_t(&rxr_prov, "mr_max_cached_count",
 			    &efa_mr_max_cached_count);
 	fi_param_get_size_t(&rxr_prov, "mr_max_cached_size",
@@ -107,6 +108,12 @@ static void rxr_init_env(void)
 			 &rxr_env.efa_cq_read_size);
 	fi_param_get_size_t(&rxr_prov, "shm_cq_read_size",
 			 &rxr_env.shm_cq_read_size);
+	fi_param_get_size_t(&rxr_prov, "inter_max_medium_message_size",
+			    &rxr_env.efa_max_medium_msg_size);
+	fi_param_get_size_t(&rxr_prov, "inter_min_read_write_size",
+			    &rxr_env.efa_min_read_write_size);
+	fi_param_get_size_t(&rxr_prov, "inter_read_segment_size",
+			    &rxr_env.efa_read_segment_size);
 }
 
 /*
@@ -135,7 +142,7 @@ int rxr_ep_efa_addr_to_str(const void *addr, char *smr_name)
 	}
 	qpn = ((struct efa_ep_addr *)addr)->qpn;
 
-	ret = snprintf(smr_name, NAME_MAX, "/%ld_%s_%d", (size_t) getuid(), gid, qpn);
+	ret = snprintf(smr_name, NAME_MAX, "%ld_%s_%d", (size_t) getuid(), gid, qpn);
 
 	return (ret <= 0) ? ret : FI_SUCCESS;
 }
@@ -156,9 +163,15 @@ void rxr_info_to_core_mr_modes(uint32_t version,
 			FI_MR_LOCAL | FI_MR_ALLOCATED;
 		if (!hints)
 			core_info->domain_attr->mr_mode |= OFI_MR_BASIC_MAP;
-		else if (hints->domain_attr)
-			core_info->domain_attr->mr_mode |=
-				hints->domain_attr->mr_mode & OFI_MR_BASIC_MAP;
+		else {
+			if (hints->domain_attr)
+				core_info->domain_attr->mr_mode |=
+					hints->domain_attr->mr_mode & OFI_MR_BASIC_MAP;
+			core_info->addr_format = hints->addr_format;
+		}
+#ifdef HAVE_LIBCUDA
+		core_info->domain_attr->mr_mode |= FI_MR_HMEM;
+#endif
 	}
 }
 
@@ -215,8 +228,6 @@ static int rxr_info_to_core(uint32_t version, const struct fi_info *rxr_info,
 	(*core_info)->ep_attr->type = FI_EP_RDM;
 	(*core_info)->tx_attr->op_flags = FI_TRANSMIT_COMPLETE;
 
-	(*core_info)->addr_format = FI_ADDR_EFA;
-
 	/*
 	 * Skip copying address, domain, fabric info.
 	 */
@@ -256,9 +267,6 @@ void rxr_reset_rx_tx_to_core(const struct fi_info *user_info,
 	core_info->rx_attr->size =
 		user_info->rx_attr->size < core_info->rx_attr->size ?
 		user_info->rx_attr->size : core_info->rx_attr->size;
-	core_info->rx_attr->iov_limit =
-		user_info->rx_attr->iov_limit < core_info->rx_attr->iov_limit ?
-		user_info->rx_attr->iov_limit : core_info->rx_attr->iov_limit;
 	/* tx attr */
 	core_info->tx_attr->inject_size =
 		user_info->tx_attr->inject_size < core_info->tx_attr->inject_size ?
@@ -266,9 +274,6 @@ void rxr_reset_rx_tx_to_core(const struct fi_info *user_info,
 	core_info->tx_attr->size =
 		user_info->tx_attr->size < core_info->tx_attr->size ?
 		user_info->tx_attr->size : core_info->tx_attr->size;
-	core_info->tx_attr->iov_limit =
-		user_info->tx_attr->iov_limit < core_info->tx_attr->iov_limit ?
-		user_info->tx_attr->iov_limit : core_info->tx_attr->iov_limit;
 }
 
 void rxr_set_rx_tx_size(struct fi_info *info,
@@ -301,6 +306,9 @@ static int rxr_dgram_info_to_rxr(uint32_t version,
 static int rxr_info_to_rxr(uint32_t version, const struct fi_info *core_info,
 			   struct fi_info *info, const struct fi_info *hints)
 {
+	uint64_t atomic_ordering;
+	uint64_t max_atomic_size;
+
 	info->caps = rxr_info.caps;
 	info->mode = rxr_info.mode;
 
@@ -309,10 +317,8 @@ static int rxr_info_to_rxr(uint32_t version, const struct fi_info *core_info,
 	*info->ep_attr = *rxr_info.ep_attr;
 	*info->domain_attr = *rxr_info.domain_attr;
 
-	info->tx_attr->inject_size =
-		core_info->tx_attr->inject_size > RXR_CTRL_HDR_SIZE_NO_CQ ?
-		core_info->tx_attr->inject_size - RXR_CTRL_HDR_SIZE_NO_CQ
-		: 0;
+	/* TODO: update inject_size when we implement inject */
+	info->tx_attr->inject_size = 0;
 	rxr_info.tx_attr->inject_size = info->tx_attr->inject_size;
 
 	info->addr_format = core_info->addr_format;
@@ -325,10 +331,32 @@ static int rxr_info_to_rxr(uint32_t version, const struct fi_info *core_info,
 	 * based on EFA-specific constraints.
 	 */
 	if (hints) {
-		/* Disable packet reordering if the app doesn't need it */
-		if (hints->tx_attr)
-			if (!(hints->tx_attr->msg_order & FI_ORDER_SAS))
-				rxr_env.enable_sas_ordering = 0;
+		if (hints->tx_attr) {
+
+			atomic_ordering = FI_ORDER_ATOMIC_RAR | FI_ORDER_ATOMIC_RAW |
+					  FI_ORDER_ATOMIC_WAR | FI_ORDER_ATOMIC_WAW;
+			if (hints->tx_attr->msg_order & atomic_ordering) {
+				max_atomic_size = core_info->ep_attr->max_msg_size
+						  - sizeof(struct rxr_rta_hdr)
+						  - core_info->src_addrlen
+						  - RXR_IOV_LIMIT * sizeof(struct fi_rma_iov);
+
+				if (hints->tx_attr->msg_order & FI_ORDER_ATOMIC_RAW) {
+					info->ep_attr->max_order_raw_size = max_atomic_size;
+					rxr_info.ep_attr->max_order_raw_size = max_atomic_size;
+				}
+
+				if (hints->tx_attr->msg_order & FI_ORDER_ATOMIC_WAR) {
+					info->ep_attr->max_order_war_size = max_atomic_size;
+					rxr_info.ep_attr->max_order_war_size = max_atomic_size;
+				}
+
+				if (hints->tx_attr->msg_order & FI_ORDER_ATOMIC_WAW) {
+					info->ep_attr->max_order_waw_size = max_atomic_size;
+					rxr_info.ep_attr->max_order_waw_size = max_atomic_size;
+				}
+			}
+		}
 
 		/* We only support manual progress for RMA operations */
 		if (hints->caps & FI_RMA) {
@@ -339,6 +367,42 @@ static int rxr_info_to_rxr(uint32_t version, const struct fi_info *core_info,
 		/* Use a table for AV if the app has no strong requirement */
 		if (!hints->domain_attr || hints->domain_attr->av_type == FI_AV_UNSPEC)
 			info->domain_attr->av_type = FI_AV_TABLE;
+
+#ifdef HAVE_LIBCUDA
+		/* If the application requires HMEM support, we will add FI_MR_HMEM
+		 * to mr_mode, because we need application to provide descriptor
+		 * for cuda buffer.
+		 * Note we did not add FI_MR_LOCAL here because according
+		 * to FI_MR man page:
+		 *
+		 *     "If FI_MR_HMEM is set, but FI_MR_LOCAL is unset,
+		 *      only device buffers must be registered when used locally.
+		 *      "
+		 * which means FI_MR_HMEM implies FI_MR_LOCAL for cuda buffer
+		 */
+		if (hints->caps & FI_HMEM) {
+			if (hints->domain_attr &&
+			    !(hints->domain_attr->mr_mode & FI_MR_HMEM)) {
+				FI_INFO(&rxr_prov, FI_LOG_CORE,
+				        "FI_HMEM capability requires device registrations (FI_MR_HMEM)\n");
+				return -FI_ENODATA;
+			}
+
+			info->domain_attr->mr_mode |= FI_MR_HMEM;
+
+			/*
+			 * If in this case application add FI_MR_LOCAL to hints,
+			 * it would mean that application want provide descriptor
+			 * for system memory too, which we are able to use, so
+			 * we add FI_MR_LOCAL to mr_mode.
+			 *
+			 * TODO: add FI_MR_LOCAL to mr_mode for any applcations
+			 * the requested it, not just CUDA application.
+			 */
+			if (hints->domain_attr->mr_mode & FI_MR_LOCAL)
+				info->domain_attr->mr_mode |= FI_MR_LOCAL;
+		}
+#endif
 	}
 
 	rxr_set_rx_tx_size(info, core_info);
@@ -474,6 +538,21 @@ static int rxr_getinfo(uint32_t version, const char *node,
 	if (hints && hints->ep_attr && hints->ep_attr->type == FI_EP_DGRAM)
 		goto dgram_info;
 
+	/*
+	 * Using the shm provider comes with some overheads, particularly in the
+	 * progress engine when polling an empty completion queue, so avoid
+	 * initializing the provider if the app provides a hint that it does not
+	 * require node-local communication. We can still loopback over the EFA
+	 * device in cases where the app violates the hint and continues
+	 * communicating with node-local peers.
+	 */
+	if (hints
+	    /* If the app requires explicitly remote communication */
+	    && (hints->caps & FI_REMOTE_COMM)
+	    /* but not local communication */
+	    && !(hints->caps & FI_LOCAL_COMM))
+		rxr_env.enable_shm_transfer = 0;
+
 	ret = rxr_get_lower_rdm_info(version, node, service, flags,
 				     &rxr_util_prov, hints, &core_info);
 
@@ -487,19 +566,16 @@ static int rxr_getinfo(uint32_t version, const char *node,
 		util_info = fi_allocinfo();
 		if (!util_info) {
 			ret = -FI_ENOMEM;
-			fi_freeinfo(*info);
-			goto out;
+			goto free_info;
 		}
 
-		rxr_info_to_rxr(version, cur, util_info, hints);
+		ret = rxr_info_to_rxr(version, cur, util_info, hints);
+		if (ret)
+			goto free_info;
 
 		ret = rxr_copy_attr(cur, util_info);
-		if (ret) {
-			fi_freeinfo(util_info);
-			fi_freeinfo(*info);
-			goto out;
-		}
-
+		if (ret)
+			goto free_info;
 
 		ofi_alter_info(util_info, hints, version);
 		if (!*info)
@@ -534,51 +610,15 @@ dgram_info:
 			assert(!strcmp(shm_info->fabric_attr->name, "shm"));
 		}
 	}
-out:
+
 	fi_freeinfo(core_info);
 	return ret;
-}
-
-static void rxr_child_cma_write(pid_t ppid, void *remote_base, size_t remote_len)
-{
-	struct iovec local;
-	struct iovec remote;
-	int cflag = 1;
-	int ret = 0;
-
-	local.iov_base = &cflag;
-	local.iov_len = sizeof(cflag);
-	remote.iov_base = remote_base;
-	remote.iov_len = remote_len;
-	ret = process_vm_writev(ppid, &local, 1, &remote, 1, 0);
-	if (ret == -1) {
-		FI_WARN(&rxr_prov, FI_LOG_CORE,
-			"Error when child tries CMA write on its parent: %s\n",
-			strerror(errno));
-	}
-}
-
-static void rxr_check_cma_capability(void)
-{
-	pid_t pid;
-	int flag = 0;
-
-	pid = fork();
-	if (pid == 0) {
-		// child tries to CMA write on parent's memory and exits
-		rxr_child_cma_write(getppid(), (void *) &flag, sizeof(flag));
-		exit(0);
-	} else {
-		// parent waits child to exit, and check flag bit
-		wait(NULL);
-		if (flag == 0) {
-			fprintf(stderr, "SHM transfer will be disabled because of ptrace protection.\n"
-				"To enable SHM transfer, please refer to the man page fi_efa.7 for more information.\n"
-				"Also note that turning off ptrace protection has security implications. If you cannot\n"
-				"turn it off, you can suppress this message by setting FI_EFA_ENABLE_SHM_TRANSFER=0\n");
-			rxr_env.enable_shm_transfer = 0;
-		}
-	}
+free_info:
+	fi_freeinfo(core_info);
+	fi_freeinfo(util_info);
+	fi_freeinfo(*info);
+	*info = NULL;
+	return ret;
 }
 
 static void rxr_fini(void)
@@ -624,10 +664,10 @@ EFA_INI
 			"Defines the minimum number of credits a sender requests from a receiver (Default: 32).");
 	fi_param_define(&rxr_prov, "tx_queue_size", FI_PARAM_INT,
 			"Defines the maximum number of unacknowledged sends with the NIC.");
-	fi_param_define(&rxr_prov, "enable_sas_ordering", FI_PARAM_INT,
-			"Enable packet reordering for the RDM endpoint. This is always enabled when FI_ORDER_SAS is requested by the application. (Default: 1)");
 	fi_param_define(&rxr_prov, "enable_shm_transfer", FI_PARAM_INT,
 			"Enable using SHM provider to provide the communication between processes on the same system. (Default: 1)");
+	fi_param_define(&rxr_prov, "use_device_rdma", FI_PARAM_INT,
+			"whether to use device's RDMA functionality for one-sided and two-sided transfer.");
 	fi_param_define(&rxr_prov, "shm_av_size", FI_PARAM_INT,
 			"Defines the maximum number of entries in SHM provider's address vector (Default 128).");
 	fi_param_define(&rxr_prov, "shm_max_medium_size", FI_PARAM_INT,
@@ -638,8 +678,6 @@ EFA_INI
 			"Define the size of completion queue. (Default: 8192)");
 	fi_param_define(&rxr_prov, "mr_cache_enable", FI_PARAM_BOOL,
 			"Enables using the mr cache and in-line registration instead of a bounce buffer for iov's larger than max_memcpy_size. Defaults to true. When disabled, only uses a bounce buffer.");
-	fi_param_define(&rxr_prov, "mr_cache_merge_regions", FI_PARAM_BOOL,
-			"Enables merging overlapping and adjacent memory registration regions. Defaults to true.");
 	fi_param_define(&rxr_prov, "mr_max_cached_count", FI_PARAM_SIZE_T,
 			"Sets the maximum number of memory registrations that can be cached at any time.");
 	fi_param_define(&rxr_prov, "mr_max_cached_size", FI_PARAM_SIZE_T,
@@ -659,7 +697,7 @@ EFA_INI
 	fi_param_define(&rxr_prov, "rx_copy_unexp", FI_PARAM_BOOL,
 			"Enables the use of a separate pool of bounce-buffers to copy unexpected messages out of the pre-posted receive buffers. (Default: 1)");
 	fi_param_define(&rxr_prov, "rx_copy_ooo", FI_PARAM_BOOL,
-			"Enables the use of a separate pool of bounce-buffers to copy out-of-order RTS packets out of the pre-posted receive buffers. (Default: 1)");
+			"Enables the use of a separate pool of bounce-buffers to copy out-of-order RTM packets out of the pre-posted receive buffers. (Default: 1)");
 	fi_param_define(&rxr_prov, "max_timeout", FI_PARAM_INT,
 			"Set the maximum timeout (us) for backoff to a peer after a receiver not ready error. (Default: 1000000)");
 	fi_param_define(&rxr_prov, "timeout_interval", FI_PARAM_INT,
@@ -668,6 +706,12 @@ EFA_INI
 			"Set the number of EFA completion entries to read for one loop for one iteration of the progress engine. (Default: 50)");
 	fi_param_define(&rxr_prov, "shm_cq_read_size", FI_PARAM_SIZE_T,
 			"Set the number of SHM completion entries to read for one loop for one iteration of the progress engine. (Default: 50)");
+	fi_param_define(&rxr_prov, "inter_max_medium_message_size", FI_PARAM_INT,
+			"The maximum message size for inter EFA medium message protocol, messages whose size is larger than this value will be sent either by read message protocol (depend on firmware support), or long message protocol (Default 65536).");
+	fi_param_define(&rxr_prov, "inter_min_read_write_size", FI_PARAM_INT,
+			"The mimimum message size for inter EFA write to use read write protocol. If firmware support RDMA read, and FI_EFA_USE_DEVICE_RDMA is 1, write requests whose size is larger than this value will use the read write protocol (Default 65536).");
+	fi_param_define(&rxr_prov, "inter_read_segment_size", FI_PARAM_INT,
+			"Calls to RDMA read is segmented using this value.");
 	rxr_init_env();
 
 #if HAVE_EFA_DL
@@ -678,9 +722,6 @@ EFA_INI
 	lower_efa_prov = init_lower_efa_prov();
 	if (!lower_efa_prov)
 		return NULL;
-
-	if (rxr_env.enable_shm_transfer)
-		rxr_check_cma_capability();
 
 	if (rxr_env.enable_shm_transfer && rxr_get_local_gids(lower_efa_prov))
 		return NULL;

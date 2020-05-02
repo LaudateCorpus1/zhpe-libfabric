@@ -40,6 +40,7 @@
 #include "rxr_rma.h"
 #include "rxr_msg.h"
 #include "rxr_cntr.h"
+#include "rxr_atomic.h"
 #include "efa.h"
 
 static const char *rxr_cq_strerror(struct fid_cq *cq_fid, int prov_errno,
@@ -67,7 +68,7 @@ static const char *rxr_cq_strerror(struct fid_cq *cq_fid, int prov_errno,
 
 /*
  * Teardown rx_entry and write an error cq entry. With our current protocol we
- * will only encounter an RX error when sending a queued RTS or CTS packet or
+ * will only encounter an RX error when sending a queued REQ or CTS packet or
  * if we are sending a CTS message. Because of this, the sender will not send
  * any additional data packets if the receiver encounters an error. If there is
  * a scenario in the future where the sender will continue to send data packets
@@ -106,7 +107,6 @@ int rxr_cq_handle_rx_error(struct rxr_ep *ep, struct rxr_rx_entry *rx_entry,
 		break;
 	case RXR_RX_QUEUED_CTRL:
 	case RXR_RX_QUEUED_CTS_RNR:
-	case RXR_RX_QUEUED_SHM_LARGE_READ:
 	case RXR_RX_QUEUED_EOR:
 		dlist_remove(&rx_entry->queued_entry);
 		break;
@@ -121,9 +121,9 @@ int rxr_cq_handle_rx_error(struct rxr_ep *ep, struct rxr_rx_entry *rx_entry,
 				     pkt_entry, entry, tmp)
 		rxr_pkt_entry_release_tx(ep, pkt_entry);
 
-	if (rx_entry->unexp_rts_pkt) {
-		rxr_pkt_entry_release_rx(ep, rx_entry->unexp_rts_pkt);
-		rx_entry->unexp_rts_pkt = NULL;
+	if (rx_entry->unexp_pkt) {
+		rxr_pkt_entry_release_rx(ep, rx_entry->unexp_pkt);
+		rx_entry->unexp_pkt = NULL;
 	}
 
 	if (rx_entry->fi_flags & FI_MULTI_RECV)
@@ -182,17 +182,19 @@ int rxr_cq_handle_tx_error(struct rxr_ep *ep, struct rxr_tx_entry *tx_entry,
 	err_entry.prov_errno = (int)prov_errno;
 
 	switch (tx_entry->state) {
-	case RXR_TX_RTS:
-	case RXR_TX_SHM_RMA:
+	case RXR_TX_REQ:
 		break;
 	case RXR_TX_SEND:
 		dlist_remove(&tx_entry->entry);
 		break;
 	case RXR_TX_QUEUED_CTRL:
 	case RXR_TX_QUEUED_SHM_RMA:
-	case RXR_TX_QUEUED_RTS_RNR:
+	case RXR_TX_QUEUED_REQ_RNR:
 	case RXR_TX_QUEUED_DATA_RNR:
 		dlist_remove(&tx_entry->queued_entry);
+		break;
+	case RXR_TX_SENT_READRSP:
+	case RXR_TX_WAIT_READ_FINISH:
 		break;
 	default:
 		FI_WARN(&rxr_prov, FI_LOG_CQ, "tx_entry unknown state %d\n",
@@ -256,10 +258,10 @@ static inline void rxr_cq_queue_pkt(struct rxr_ep *ep,
 	 * expire.
 	 */
 	peer->rnr_ts = ofi_gettime_us();
-	if (peer->rnr_state & RXR_PEER_IN_BACKOFF)
+	if (peer->flags & RXR_PEER_IN_BACKOFF)
 		goto queue_pkt;
 
-	peer->rnr_state |= RXR_PEER_IN_BACKOFF;
+	peer->flags |= RXR_PEER_IN_BACKOFF;
 
 	if (!peer->timeout_interval) {
 		if (rxr_env.timeout_interval)
@@ -277,8 +279,8 @@ static inline void rxr_cq_queue_pkt(struct rxr_ep *ep,
 		       peer->rnr_queued_pkt_cnt);
 	} else {
 		/* Only backoff once per peer per progress thread loop. */
-		if (!(peer->rnr_state & RXR_PEER_BACKED_OFF)) {
-			peer->rnr_state |= RXR_PEER_BACKED_OFF;
+		if (!(peer->flags & RXR_PEER_BACKED_OFF)) {
+			peer->flags |= RXR_PEER_BACKED_OFF;
 			peer->rnr_timeout_exp++;
 			FI_DBG(&rxr_prov, FI_LOG_EP_DATA,
 			       "increasing backoff for peer: %" PRIu64
@@ -324,7 +326,7 @@ int rxr_cq_handle_cq_error(struct rxr_ep *ep, ssize_t err)
 	}
 
 	ret = fi_cq_readerr(ep->rdm_cq, &err_entry, 0);
-	if (ret != sizeof(err_entry)) {
+	if (ret != 1) {
 		if (ret < 0) {
 			FI_WARN(&rxr_prov, FI_LOG_CQ, "fi_cq_readerr: %s\n",
 				fi_strerror(-ret));
@@ -346,17 +348,17 @@ int rxr_cq_handle_cq_error(struct rxr_ep *ep, ssize_t err)
 	peer = rxr_ep_get_peer(ep, pkt_entry->addr);
 
 	/*
-	 * A connack send could fail at the core provider if the peer endpoint
-	 * is shutdown soon after it receives a send completion for the RTS
-	 * packet that included src_address. The connack itself is irrelevant if
+	 * A handshake send could fail at the core provider if the peer endpoint
+	 * is shutdown soon after it receives a send completion for the REQ
+	 * packet that included src_address. The handshake itself is irrelevant if
 	 * that happens, so just squelch this error entry and move on without
 	 * writing an error completion or event to the application.
 	 */
-	if (rxr_get_base_hdr(pkt_entry->pkt)->type == RXR_CONNACK_PKT) {
+	if (rxr_get_base_hdr(pkt_entry->pkt)->type == RXR_HANDSHAKE_PKT) {
 		FI_WARN(&rxr_prov, FI_LOG_CQ,
-			"Squelching error CQE for RXR_CONNACK_PKT\n");
+			"Squelching error CQE for RXR_HANDSHAKE_PKT\n");
 		/*
-		 * CONNACK packets do not have an associated rx/tx entry. Use
+		 * HANDSHAKE packets do not have an associated rx/tx entry. Use
 		 * the flags instead to determine if this is a send or recv.
 		 */
 		if (err_entry.flags & FI_SEND) {
@@ -365,7 +367,7 @@ int rxr_cq_handle_cq_error(struct rxr_ep *ep, ssize_t err)
 		} else if (err_entry.flags & FI_RECV) {
 			rxr_pkt_entry_release_rx(ep, pkt_entry);
 		} else {
-			assert(0 && "unknown err_entry flags in CONNACK packet");
+			assert(0 && "unknown err_entry flags in HANDSHAKE packet");
 		}
 		return 0;
 	}
@@ -403,8 +405,8 @@ int rxr_cq_handle_cq_error(struct rxr_ep *ep, ssize_t err)
 			tx_entry->state = RXR_TX_QUEUED_DATA_RNR;
 			dlist_insert_tail(&tx_entry->queued_entry,
 					  &ep->tx_entry_queued_list);
-		} else if (tx_entry->state == RXR_TX_RTS) {
-			tx_entry->state = RXR_TX_QUEUED_RTS_RNR;
+		} else if (tx_entry->state == RXR_TX_REQ) {
+			tx_entry->state = RXR_TX_QUEUED_REQ_RNR;
 			dlist_insert_tail(&tx_entry->queued_entry,
 					  &ep->tx_entry_queued_list);
 		}
@@ -539,11 +541,11 @@ void rxr_cq_handle_rx_completion(struct rxr_ep *ep,
 		 * The following shows the sequence of events that
 		 * is happening
 		 *
-		 * Initiator side                    Remote side
+		 * Initiator side                 Remote side
 		 * create tx_entry
 		 * create rx_entry
-		 * send rts(with rx_id)
-		 *                                receive rts
+		 * send rtr(with rx_id)
+		 *                                receive rtr
 		 *                                create rx_entry
 		 *                                create tx_entry
 		 *                                tx_entry sending data
@@ -589,46 +591,56 @@ int rxr_cq_reorder_msg(struct rxr_ep *ep,
 		       struct rxr_peer *peer,
 		       struct rxr_pkt_entry *pkt_entry)
 {
-	struct rxr_rts_hdr *rts_hdr;
 	struct rxr_pkt_entry *ooo_entry;
+	struct rxr_pkt_entry *cur_ooo_entry;
+	uint32_t msg_id;
 
-	rts_hdr = rxr_get_rts_hdr(pkt_entry->pkt);
+	assert(rxr_get_base_hdr(pkt_entry->pkt)->type >= RXR_REQ_PKT_BEGIN);
 
+	msg_id = rxr_pkt_msg_id(pkt_entry);
 	/*
 	 * TODO: Initialize peer state  at the time of AV insertion
 	 * where duplicate detection is available.
 	 */
 	if (!peer->rx_init)
-		rxr_ep_peer_init(ep, peer);
+		rxr_ep_peer_init_rx(ep, peer);
 
 #if ENABLE_DEBUG
-	if (rts_hdr->msg_id != ofi_recvwin_next_exp_id(peer->robuf))
+	if (msg_id != ofi_recvwin_next_exp_id(peer->robuf))
 		FI_DBG(&rxr_prov, FI_LOG_EP_CTRL,
-		       "msg OOO rts_hdr->msg_id: %" PRIu32 " expected: %"
-		       PRIu32 "\n", rts_hdr->msg_id,
+		       "msg OOO msg_id: %" PRIu32 " expected: %"
+		       PRIu32 "\n", msg_id,
 		       ofi_recvwin_next_exp_id(peer->robuf));
 #endif
-	if (ofi_recvwin_is_exp(peer->robuf, rts_hdr->msg_id))
+	if (ofi_recvwin_is_exp(peer->robuf, msg_id))
 		return 0;
-	else if (!ofi_recvwin_id_valid(peer->robuf, rts_hdr->msg_id))
+	else if (!ofi_recvwin_id_valid(peer->robuf, msg_id))
 		return -FI_EALREADY;
 
 	if (OFI_LIKELY(rxr_env.rx_copy_ooo)) {
 		assert(pkt_entry->type == RXR_PKT_ENTRY_POSTED);
-		ooo_entry = rxr_pkt_entry_alloc(ep, ep->rx_ooo_pkt_pool);
+		ooo_entry = rxr_pkt_entry_clone(ep, ep->rx_ooo_pkt_pool, pkt_entry, RXR_PKT_ENTRY_OOO);
 		if (OFI_UNLIKELY(!ooo_entry)) {
 			FI_WARN(&rxr_prov, FI_LOG_EP_CTRL,
 				"Unable to allocate rx_pkt_entry for OOO msg\n");
 			return -FI_ENOMEM;
 		}
-		rxr_pkt_entry_copy(ep, ooo_entry, pkt_entry, RXR_PKT_ENTRY_OOO);
-		rts_hdr = rxr_get_rts_hdr(ooo_entry->pkt);
 		rxr_pkt_entry_release_rx(ep, pkt_entry);
 	} else {
 		ooo_entry = pkt_entry;
 	}
 
-	ofi_recvwin_queue_msg(peer->robuf, &ooo_entry, rts_hdr->msg_id);
+	cur_ooo_entry = *ofi_recvwin_get_msg(peer->robuf, msg_id);
+	if (cur_ooo_entry) {
+		assert(rxr_get_base_hdr(cur_ooo_entry->pkt)->type == RXR_MEDIUM_MSGRTM_PKT ||
+		       rxr_get_base_hdr(cur_ooo_entry->pkt)->type == RXR_MEDIUM_TAGRTM_PKT);
+		assert(rxr_pkt_msg_id(cur_ooo_entry) == msg_id);
+		assert(rxr_pkt_rtm_total_len(cur_ooo_entry) == rxr_pkt_rtm_total_len(ooo_entry));
+		rxr_pkt_entry_append(cur_ooo_entry, ooo_entry);
+	} else {
+		ofi_recvwin_queue_msg(peer->robuf, &ooo_entry, msg_id);
+	}
+
 	return 1;
 }
 
@@ -636,72 +648,102 @@ void rxr_cq_proc_pending_items_in_recvwin(struct rxr_ep *ep,
 					  struct rxr_peer *peer)
 {
 	struct rxr_pkt_entry *pending_pkt;
-	struct rxr_rts_hdr *rts_hdr;
 	int ret = 0;
+	uint32_t msg_id;
 
 	while (1) {
 		pending_pkt = *ofi_recvwin_peek(peer->robuf);
 		if (!pending_pkt || !pending_pkt->pkt)
 			return;
 
-		rts_hdr = rxr_get_rts_hdr(pending_pkt->pkt);
-		*ofi_recvwin_get_next_msg(peer->robuf) = NULL;
-
+		msg_id = rxr_pkt_msg_id(pending_pkt);
 		FI_DBG(&rxr_prov, FI_LOG_EP_CTRL,
-		       "Processing msg_id %d from robuf\n", rts_hdr->msg_id);
-
-		/* rxr_pkt_proc_rts() will write error cq entry if needed */
-		ret = rxr_pkt_proc_rts(ep, pending_pkt);
+		       "Processing msg_id %d from robuf\n", msg_id);
+		/* rxr_pkt_proc_rtm_rta will write error cq entry if needed */
+		ret = rxr_pkt_proc_rtm_rta(ep, pending_pkt);
+		*ofi_recvwin_get_next_msg(peer->robuf) = NULL;
 		if (OFI_UNLIKELY(ret)) {
 			FI_WARN(&rxr_prov, FI_LOG_CQ,
 				"Error processing msg_id %d from robuf: %s\n",
-				rts_hdr->msg_id, fi_strerror(-ret));
+				msg_id, fi_strerror(-ret));
 			return;
 		}
 	}
 	return;
 }
 
-/* Handle RMA writes with immediate data at remote endpoint, write a completion */
-void rxr_cq_handle_shm_rma_write_data(struct rxr_ep *ep, struct fi_cq_data_entry *shm_comp, fi_addr_t src_addr)
+/* Handle two scenarios:
+ *  1. RMA writes with immediate data at remote endpoint,
+ *  2. atomic completion on the requester
+ * write completion for both
+ */
+void rxr_cq_handle_shm_completion(struct rxr_ep *ep, struct fi_cq_data_entry *cq_entry, fi_addr_t src_addr)
 {
-	struct rxr_rx_entry *rx_entry;
+	struct util_cq *target_cq;
 	int ret;
 
-	struct util_cq *rx_cq = ep->util_ep.rx_cq;
-	rx_entry = rxr_ep_get_rx_entry(ep, NULL, 0, 0, 0, NULL, src_addr, 0, 0);
-	rxr_copy_shm_cq_entry(&rx_entry->cq_entry, shm_comp);
+	if (cq_entry->flags & FI_ATOMIC) {
+		target_cq = ep->util_ep.tx_cq;
+	} else {
+		assert(cq_entry->flags & FI_REMOTE_CQ_DATA);
+		target_cq = ep->util_ep.rx_cq;
+	}
 
 	if (ep->util_ep.caps & FI_SOURCE)
-		ret = ofi_cq_write_src(rx_cq,
-				       rx_entry->cq_entry.op_context,
-				       rx_entry->cq_entry.flags,
-				       rx_entry->cq_entry.len,
-				       rx_entry->cq_entry.buf,
-				       rx_entry->cq_entry.data,
-				       rx_entry->cq_entry.tag,
+		ret = ofi_cq_write_src(target_cq,
+				       cq_entry->op_context,
+				       cq_entry->flags,
+				       cq_entry->len,
+				       cq_entry->buf,
+				       cq_entry->data,
+				       0,
 				       src_addr);
 	else
-		ret = ofi_cq_write(rx_cq,
-				       rx_entry->cq_entry.op_context,
-				       rx_entry->cq_entry.flags,
-				       rx_entry->cq_entry.len,
-				       rx_entry->cq_entry.buf,
-				       rx_entry->cq_entry.data,
-				       rx_entry->cq_entry.tag);
+		ret = ofi_cq_write(target_cq,
+				   cq_entry->op_context,
+				   cq_entry->flags,
+				   cq_entry->len,
+				   cq_entry->buf,
+				   cq_entry->data,
+				   0);
 
-	rxr_rm_rx_cq_check(ep, rx_cq);
+	rxr_rm_rx_cq_check(ep, target_cq);
 
 	if (OFI_UNLIKELY(ret)) {
 		FI_WARN(&rxr_prov, FI_LOG_CQ,
-			"Unable to deliver immediate data of shm provider's RMA write operation: %s\n",
+			"Unable to write a cq entry for shm operation: %s\n",
 			fi_strerror(-ret));
-		if (rxr_cq_handle_rx_error(ep, rx_entry, ret))
-			assert(0 && "failed to write err cq entry");
+		efa_eq_write_error(&ep->util_ep, FI_EIO, ret);
 	}
-	efa_cntr_report_rx_completion(&ep->util_ep, rx_entry->cq_entry.flags);
-	rxr_release_rx_entry(ep, rx_entry);
+
+	if (cq_entry->flags & FI_ATOMIC) {
+		efa_cntr_report_tx_completion(&ep->util_ep, cq_entry->flags);
+	} else {
+		assert(cq_entry->flags & FI_REMOTE_CQ_DATA);
+		efa_cntr_report_rx_completion(&ep->util_ep, cq_entry->flags);
+	}
 }
+
+static inline
+bool rxr_cq_need_tx_completion(struct rxr_ep *ep,
+			       struct rxr_tx_entry *tx_entry)
+
+{
+	if (tx_entry->fi_flags & RXR_NO_COMPLETION)
+		return false;
+
+	/*
+	 * ep->util_ep.tx_msg_flags is either 0 or FI_COMPLETION, depend on
+	 * whether app specfied FI_SELECTIVE_COMPLETION when binding CQ.
+	 * (ep->util_ep.tx_msg_flags was set in ofi_ep_bind_cq())
+	 *
+	 * If tx_msg_flags is 0, we only write completion when app specify
+	 * FI_COMPLETION in flags.
+	 */
+	return ep->util_ep.tx_msg_flags == FI_COMPLETION ||
+	       tx_entry->fi_flags & FI_COMPLETION;
+}
+
 
 void rxr_cq_write_tx_completion(struct rxr_ep *ep,
 				struct rxr_tx_entry *tx_entry)
@@ -709,8 +751,7 @@ void rxr_cq_write_tx_completion(struct rxr_ep *ep,
 	struct util_cq *tx_cq = ep->util_ep.tx_cq;
 	int ret;
 
-	if (!(tx_entry->fi_flags & RXR_NO_COMPLETION) &&
-	    ofi_need_completion(rxr_tx_flags(ep), tx_entry->fi_flags)) {
+	if (rxr_cq_need_tx_completion(ep, tx_entry)) {
 		FI_DBG(&rxr_prov, FI_LOG_CQ,
 		       "Writing send completion for tx_entry to peer: %" PRIu64
 		       " tx_id: %" PRIu32 " msg_id: %" PRIu32 " tag: %lx len: %"
@@ -754,18 +795,23 @@ void rxr_cq_write_tx_completion(struct rxr_ep *ep,
 	return;
 }
 
-int rxr_send_completion_mr_dereg(struct rxr_tx_entry *tx_entry)
+int rxr_tx_entry_mr_dereg(struct rxr_tx_entry *tx_entry)
 {
-	int i, ret = 0;
+	int i, err = 0;
 
-	for (i = tx_entry->iov_mr_start; i < tx_entry->iov_count; i++) {
+	for (i = 0; i < tx_entry->iov_count; i++) {
 		if (tx_entry->mr[i]) {
-			ret = fi_close((struct fid *)tx_entry->mr[i]);
-			if (OFI_UNLIKELY(ret))
-				return ret;
+			err = fi_close((struct fid *)tx_entry->mr[i]);
+			if (OFI_UNLIKELY(err)) {
+				FI_WARN(&rxr_prov, FI_LOG_CQ, "mr dereg failed. err=%d\n", err);
+				return err;
+			}
+
+			tx_entry->mr[i] = NULL;
 		}
 	}
-	return ret;
+
+	return 0;
 }
 
 void rxr_cq_handle_tx_completion(struct rxr_ep *ep, struct rxr_tx_entry *tx_entry)
@@ -776,9 +822,8 @@ void rxr_cq_handle_tx_completion(struct rxr_ep *ep, struct rxr_tx_entry *tx_entr
 	if (tx_entry->state == RXR_TX_SEND)
 		dlist_remove(&tx_entry->entry);
 
-	if (tx_entry->state == RXR_TX_SEND &&
-	    efa_mr_cache_enable && rxr_ep_mr_local(ep)) {
-		ret = rxr_send_completion_mr_dereg(tx_entry);
+	if (efa_mr_cache_enable && rxr_ep_mr_local(ep)) {
+		ret = rxr_tx_entry_mr_dereg(tx_entry);
 		if (OFI_UNLIKELY(ret)) {
 			FI_WARN(&rxr_prov, FI_LOG_MR,
 				"In-line memory deregistration failed with error: %s.\n",

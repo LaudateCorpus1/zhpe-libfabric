@@ -161,6 +161,11 @@ with (default: 256).
   functions when using manual progress. Higher values may provide less noise for 
   calls to fi_cq read functions, but may increase connection setup time (default: 10000)
 
+*FI_OFI_RXM_CQ_EQ_FAIRNESS*
+: Defines the maximum number of message provider CQ entries that can be
+  consecutively read across progress calls without checking to see if the
+  CM progress interval has been reached (default: 128)
+
 # Tuning
 
 ## Bandwidth
@@ -195,7 +200,6 @@ At higher # of ranks, there may be connection errors due to a node running out
 of memory. The workaround is to use shared receive contexts for the MSG provider
 (FI_OFI_RXM_USE_SRX=1) or reduce eager message size (FI_OFI_RXM_BUFFER_SIZE) and
 MSG provider TX/RX queue sizes (FI_OFI_RXM_MSG_TX_SIZE / FI_OFI_RXM_MSG_RX_SIZE).
-
 
 # SEE ALSO
 

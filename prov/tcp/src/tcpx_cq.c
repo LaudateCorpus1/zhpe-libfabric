@@ -40,15 +40,15 @@
 
 void tcpx_cq_progress(struct util_cq *cq)
 {
-	void *wait_contexts[MAX_EPOLL_EVENTS];
+	void *wait_contexts[MAX_POLL_EVENTS];
 	struct fid_list_entry *fid_entry;
-	struct util_wait_fd *fdwait;
+	struct util_wait_fd *wait_fd;
 	struct dlist_entry *item;
 	struct tcpx_ep *ep;
 	struct fid *fid;
 	int nfds, i;
 
-	fdwait = container_of(cq->wait, struct util_wait_fd, util_wait);
+	wait_fd = container_of(cq->wait, struct util_wait_fd, util_wait);
 
 	cq->cq_fastlock_acquire(&cq->ep_list_lock);
 	dlist_foreach(&cq->ep_list, item) {
@@ -56,25 +56,32 @@ void tcpx_cq_progress(struct util_cq *cq)
 		ep = container_of(fid_entry->fid, struct tcpx_ep,
 				  util_ep.ep_fid.fid);
 		tcpx_try_func(&ep->util_ep);
+		fastlock_acquire(&ep->lock);
 		tcpx_progress_tx(ep);
-		if (ep->stage_buf.off != ep->stage_buf.len)
+		if (ep->stage_buf.cur_pos < ep->stage_buf.bytes_avail)
 			tcpx_progress_rx(ep);
+		fastlock_release(&ep->lock);
 	}
 
-	nfds = ofi_epoll_wait(fdwait->epoll_fd, wait_contexts,
-			      MAX_EPOLL_EVENTS, 0);
+	nfds = (wait_fd->util_wait.wait_obj == FI_WAIT_FD) ?
+	       ofi_epoll_wait(wait_fd->epoll_fd, wait_contexts,
+			      MAX_POLL_EVENTS, 0) :
+	       ofi_pollfds_wait(wait_fd->pollfds, wait_contexts,
+				MAX_POLL_EVENTS, 0);
 	if (nfds <= 0)
 		goto unlock;
 
 	for (i = 0; i < nfds; i++) {
 		fid = wait_contexts[i];
 		if (fid->fclass != FI_CLASS_EP) {
-			fd_signal_reset(&fdwait->signal);
+			fd_signal_reset(&wait_fd->signal);
 			continue;
 		}
 
 		ep = container_of(fid, struct tcpx_ep, util_ep.ep_fid.fid);
+		fastlock_acquire(&ep->lock);
 		tcpx_progress_rx(ep);
+		fastlock_release(&ep->lock);
 	}
 unlock:
 	cq->cq_fastlock_release(&cq->ep_list_lock);
@@ -198,11 +205,11 @@ static int tcpx_cq_control(struct fid *fid, int command, void *arg)
 
 	switch(command) {
 	case FI_GETWAIT:
+	case FI_GETWAITOBJ:
 		if (!cq->wait)
-			return -FI_ENOSYS;
+			return -FI_ENODATA;
 
-		ret = fi_control(&cq->wait->wait_fid.fid,
-				 command, arg);
+		ret = fi_control(&cq->wait->wait_fid.fid, command, arg);
 		break;
 	default:
 		return -FI_ENOSYS;
@@ -300,9 +307,10 @@ int tcpx_cq_open(struct fid_domain *domain, struct fi_cq_attr *attr,
 	if (ret)
 		goto free_cq;
 
-	if (attr->wait_obj == FI_WAIT_NONE) {
+	if (attr->wait_obj == FI_WAIT_NONE ||
+	    attr->wait_obj == FI_WAIT_UNSPEC) {
 		cq_attr = *attr;
-		cq_attr.wait_obj = FI_WAIT_FD;
+		cq_attr.wait_obj = FI_WAIT_POLLFD;
 		attr = &cq_attr;
 	}
 

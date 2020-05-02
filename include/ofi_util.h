@@ -406,6 +406,9 @@ struct util_wait {
 	enum fi_wait_obj	wait_obj;
 	fi_wait_signal_func	signal;
 	fi_wait_try_func	wait_try;
+
+	struct dlist_entry	fid_list;
+	fastlock_t		lock;
 };
 
 int ofi_wait_init(struct util_fabric *fabric, struct fi_wait_attr *attr,
@@ -415,9 +418,13 @@ int fi_wait_cleanup(struct util_wait *wait);
 struct util_wait_fd {
 	struct util_wait	util_wait;
 	struct fd_signal	signal;
-	ofi_epoll_t		epoll_fd;
 	struct dlist_entry	fd_list;
-	fastlock_t		lock;
+
+	union {
+		ofi_epoll_t		epoll_fd;
+		struct ofi_pollfds	*pollfds;
+	};
+	uint64_t		change_index;
 };
 
 typedef int (*ofi_wait_try_func)(void *arg);
@@ -430,32 +437,33 @@ struct ofi_wait_fd_entry {
 	ofi_atomic32_t		ref;
 };
 
+struct ofi_wait_fid_entry {
+	struct dlist_entry	entry;
+	ofi_wait_try_func	wait_try;
+	fid_t			fid;
+	enum fi_wait_obj	wait_obj;
+	uint32_t		events;
+	ofi_atomic32_t		ref;
+	struct fi_wait_pollfd	pollfds;
+};
+
 int ofi_wait_fd_open(struct fid_fabric *fabric, struct fi_wait_attr *attr,
 		struct fid_wait **waitset);
-int ofi_wait_fd_add(struct util_wait *wait, int fd, uint32_t events,
+int ofi_wait_add_fd(struct util_wait *wait, int fd, uint32_t events,
 		    ofi_wait_try_func wait_try, void *arg, void *context);
-int ofi_wait_fd_del(struct util_wait *wait, int fd);
+int ofi_wait_del_fd(struct util_wait *wait, int fd);
+int ofi_wait_add_fid(struct util_wait *wat, fid_t fid, uint32_t events,
+		     ofi_wait_try_func wait_try);
+int ofi_wait_del_fid(struct util_wait *wait, fid_t fid);
 
 struct util_wait_yield {
 	struct util_wait	util_wait;
 	int			signal;
-	struct dlist_entry	fid_list;
-	fastlock_t		wait_lock;
 	fastlock_t		signal_lock;
-};
-
-struct ofi_wait_fid_entry {
-	struct dlist_entry	entry;
-	ofi_wait_try_func	wait_try;
-	void			*fid;
-	ofi_atomic32_t		ref;
 };
 
 int ofi_wait_yield_open(struct fid_fabric *fabric, struct fi_wait_attr *attr,
 			struct fid_wait **waitset);
-int ofi_wait_fid_add(struct util_wait *wait, ofi_wait_try_func wait_try,
-		       void *arg);
-int ofi_wait_fid_del(struct util_wait *wait, void *fid);
 
 /*
  * Completion queue
@@ -903,6 +911,10 @@ int util_getinfo_genaddr(const struct util_prov *util_prov, uint32_t version,
 					     size_t dest_addrlen,
 					     void **src_addr,
 					     size_t *src_addrlen));
+int ofi_ip_getinfo(const struct util_prov *prov, uint32_t version,
+		   const char *node, const char *service, uint64_t flags,
+		   const struct fi_info *hints, struct fi_info **info);
+
 
 struct fid_list_entry {
 	struct dlist_entry	entry;
@@ -930,6 +942,7 @@ static inline int ofi_has_util_prefix(const char *str)
 }
 
 typedef int (*ofi_alter_info_t)(uint32_t version, const struct fi_info *src_info,
+				const struct fi_info *base_info,
 				struct fi_info *dest_info);
 
 int ofi_get_core_info(uint32_t version, const char *node, const char *service,
@@ -990,6 +1003,26 @@ int ofi_ns_add_local_name(struct util_ns *ns, void *service, void *name);
 int ofi_ns_del_local_name(struct util_ns *ns, void *service, void *name);
 void *ofi_ns_resolve_name(struct util_ns *ns, const char *server,
 			  void *service);
+
+
+/* Setup coordination for credit based flow control between core and util.
+ * threshold - When number of available RQ credits > threshold, the send
+ *     handler will be invoked
+ * add_credits - Increments the number of peer RQ credits available
+ * send_handler - Called to have util code send credit message.  If the
+ *     credit message cannot be sent, the credits should be returned to
+ *     the core by calling add_credits.
+ */
+#define OFI_OPS_FLOW_CTRL "ofix_flow_ctrl_v1"
+
+struct ofi_ops_flow_ctrl {
+	size_t	size;
+	void	(*set_threshold)(struct fid_domain *domain, uint64_t threshold);
+	void	(*add_credits)(struct fid_ep *ep, uint64_t credits);
+	void	(*set_send_handler)(struct fid_domain *domain,
+			ssize_t (*send_handler)(struct fid_ep *ep, uint64_t credits));
+};
+
 
 #ifdef __cplusplus
 }

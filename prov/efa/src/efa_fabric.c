@@ -79,10 +79,8 @@
 #define EFA_NO_DEFAULT -1
 
 #define EFA_DEF_MR_CACHE_ENABLE 1
-#define EFA_DEF_MR_CACHE_MERGE_REGIONS 1
 
 int efa_mr_cache_enable		= EFA_DEF_MR_CACHE_ENABLE;
-int efa_mr_cache_merge_regions	= EFA_DEF_MR_CACHE_MERGE_REGIONS;
 size_t efa_mr_max_cached_count;
 size_t efa_mr_max_cached_size;
 
@@ -93,7 +91,7 @@ const struct fi_fabric_attr efa_fabric_attr = {
 	.fabric		= NULL,
 	.name		= NULL,
 	.prov_name	= NULL,
-	.prov_version	= EFA_PROV_VERS,
+	.prov_version	= OFI_VERSION_DEF_PROV,
 };
 
 const struct fi_domain_attr efa_domain_attr = {
@@ -102,8 +100,11 @@ const struct fi_domain_attr efa_domain_attr = {
 	.control_progress	= FI_PROGRESS_AUTO,
 	.data_progress		= FI_PROGRESS_AUTO,
 	.resource_mgmt		= FI_RM_DISABLED,
-
+#ifdef HAVE_LIBCUDA
+	.mr_mode		= OFI_MR_BASIC_MAP | FI_MR_LOCAL | FI_MR_BASIC | FI_MR_HMEM,
+#else
 	.mr_mode		= OFI_MR_BASIC_MAP | FI_MR_LOCAL | FI_MR_BASIC,
+#endif
 	.mr_key_size		= sizeof_field(struct ibv_sge, lkey),
 	.cq_data_size		= 0,
 	.tx_ctx_cnt		= 1024,
@@ -160,7 +161,7 @@ const struct fi_tx_attr efa_rdm_tx_attr = {
 	.msg_order		= EFA_MSG_ORDER,
 	.comp_order		= FI_ORDER_NONE,
 	.inject_size		= 0,
-	.rma_iov_limit		= 0,
+	.rma_iov_limit		= 1,
 };
 
 const struct efa_ep_domain efa_rdm_domain = {
@@ -476,6 +477,9 @@ static int efa_get_device_attrs(struct efa_context *ctx, struct fi_info *info)
 	struct ibv_port_attr port_attr;
 	int ret;
 
+	memset(&efadv_attr, 0, sizeof(efadv_attr));
+	memset(&device_attr, 0, sizeof(device_attr));
+
 	base_attr = &device_attr.ibv_attr;
 	ret = -ibv_query_device(ctx->ibv_ctx, base_attr);
 	if (ret) {
@@ -483,13 +487,23 @@ static int efa_get_device_attrs(struct efa_context *ctx, struct fi_info *info)
 		return ret;
 	}
 
-	ret = -efadv_query_device(ctx->ibv_ctx, &efadv_attr, sizeof(efadv_attr));
+	ret = -efadv_query_device(ctx->ibv_ctx, &efadv_attr,
+				  sizeof(efadv_attr));
 	if (ret) {
 		EFA_INFO_ERRNO(FI_LOG_FABRIC, "efadv_query_device", ret);
 		return ret;
 	}
 
 	ctx->inline_buf_size = efadv_attr.inline_buf_size;
+	ctx->max_wr_rdma_sge = base_attr->max_sge_rd;
+
+#ifdef HAVE_RDMA_SIZE
+	ctx->max_rdma_size = efadv_attr.max_rdma_size;
+	ctx->device_caps = efadv_attr.device_caps;
+#else
+	ctx->max_rdma_size = 0;
+	ctx->device_caps = 0;
+#endif
 
 	ctx->max_mr_size			= base_attr->max_mr_size;
 	info->domain_attr->cq_cnt		= base_attr->max_cq;
@@ -946,7 +960,7 @@ static void fi_efa_fini(void)
 
 struct fi_provider efa_prov = {
 	.name = EFA_PROV_NAME,
-	.version = EFA_PROV_VERS,
+	.version = OFI_VERSION_DEF_PROV,
 	.fi_version = OFI_VERSION_LATEST,
 	.getinfo = efa_getinfo,
 	.fabric = efa_fabric,

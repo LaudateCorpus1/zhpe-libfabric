@@ -237,8 +237,8 @@ struct fi_info {
 : Optional attributes related to the hardware NIC associated with
   the specified fabric, domain, and endpoint data.  This field is
   only valid for providers where the corresponding attributes are
-  closely associated with a hardware NIC.  See [`fi_nic`(3)]
-  (fi_nic.3.html) for details.
+  closely associated with a hardware NIC.  See
+  [`fi_nic`(3)](fi_nic.3.html) for details.
 
 # CAPABILITIES
 
@@ -305,7 +305,7 @@ additional optimizations.
 
 *FI_MULTICAST*
 : Indicates that the endpoint support multicast data transfers.  This
-  capability must be paired with FI_MSG.  Aplications can use FI_SEND
+  capability must be paired with FI_MSG.  Applications can use FI_SEND
   and FI_RECV to optimize multicast as send-only or receive-only.
 
 *FI_MULTI_RECV*

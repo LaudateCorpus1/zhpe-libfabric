@@ -171,25 +171,6 @@ int ofi_av_set_remove(struct fid_av_set *set, fi_addr_t addr)
 	return -FI_EINVAL;
 }
 
-int ofi_av_set_addr(struct fid_av_set *set, fi_addr_t *coll_addr)
-{
-	struct util_av_set *av_set;
-
-	av_set = container_of(set, struct util_av_set, av_set_fid);
-	*coll_addr = (uintptr_t)av_set->av->coll_mc;
-
-	return FI_SUCCESS;
-}
-
-static inline int util_coll_mc_alloc(struct util_coll_mc **coll_mc)
-{
-	*coll_mc = calloc(1, sizeof(**coll_mc));
-	if (!*coll_mc)
-		return -FI_ENOMEM;
-
-	return FI_SUCCESS;
-}
-
 static inline uint64_t util_coll_form_tag(uint32_t coll_id, uint32_t rank)
 {
 	uint64_t tag;
@@ -752,7 +733,9 @@ static int util_coll_close(struct fid *fid)
 
 	coll_mc = container_of(fid, struct util_coll_mc, mc_fid.fid);
 
+	ofi_atomic_dec32(&coll_mc->av_set->ref);
 	free(coll_mc);
+
 	return FI_SUCCESS;
 }
 
@@ -764,6 +747,31 @@ static struct fi_ops util_coll_fi_ops = {
 	.ops_open = fi_no_ops_open,
 };
 
+static inline void util_coll_mc_init(struct util_coll_mc *coll_mc,
+				   struct util_av_set *av_set,
+				   struct fid_ep *ep, void *context)
+{
+	coll_mc->mc_fid.fid.fclass = FI_CLASS_MC;
+	coll_mc->mc_fid.fid.context = context;
+	coll_mc->mc_fid.fid.ops = &util_coll_fi_ops;
+	coll_mc->mc_fid.fi_addr = (uintptr_t) coll_mc;
+	coll_mc->ep = ep;
+	assert(av_set != NULL);
+	ofi_atomic_inc32(&av_set->ref);
+	coll_mc->av_set = av_set;
+}
+
+static int ofi_av_set_addr(struct fid_av_set *set, fi_addr_t *coll_addr)
+{
+	struct util_av_set *av_set;
+
+	av_set = container_of(set, struct util_av_set, av_set_fid);
+
+	*coll_addr = (uintptr_t) &av_set->coll_mc;
+
+	return FI_SUCCESS;
+}
+
 /* TODO: Figure out requirements for using collectives.
  * e.g. require local address to be in AV?
  * Determine best way to handle first join request
@@ -772,15 +780,14 @@ static int util_coll_find_local_rank(struct fid_ep *ep, struct util_coll_mc *col
 {
 	size_t addrlen;
 	char *addr;
-	int ret, mem;
+	int ret;
+	fi_addr_t my_addr;
+	int i;
 
-	addrlen = sizeof(mem);
-	addr = (char *) &mem;
-
-	ret = fi_getname(&ep->fid, addr, &addrlen);
-	if (ret != -FI_ETOOSMALL) {
+	addrlen = 0;
+	ret = fi_getname(&ep->fid, NULL, &addrlen);
+	if (ret != FI_SUCCESS && addrlen == 0)
 		return ret;
-	}
 
 	addr = calloc(1, addrlen);
 	if (!addr)
@@ -791,8 +798,16 @@ static int util_coll_find_local_rank(struct fid_ep *ep, struct util_coll_mc *col
 		free(addr);
 		return ret;
 	}
-	coll_mc->local_rank =
-		ofi_av_lookup_fi_addr(coll_mc->av_set->av, addr);
+	my_addr = ofi_av_lookup_fi_addr(coll_mc->av_set->av, addr);
+
+	coll_mc->local_rank = FI_ADDR_NOTAVAIL;
+	if (my_addr != FI_ADDR_NOTAVAIL) {
+		for (i=0; i<coll_mc->av_set->fi_addr_count; i++)
+			if (coll_mc->av_set->fi_addr_array[i] == my_addr) {
+				coll_mc->local_rank = i;
+				break;
+			}
+	}
 
 	free(addr);
 
@@ -801,7 +816,7 @@ static int util_coll_find_local_rank(struct fid_ep *ep, struct util_coll_mc *col
 
 void util_coll_join_comp(struct util_coll_operation *coll_op)
 {
-	struct fi_eq_err_entry entry;
+	struct fi_eq_entry entry;
 	struct util_ep *ep = container_of(coll_op->mc->ep, struct util_ep, ep_fid);
 
 	coll_op->data.join.new_mc->seq = 0;
@@ -812,7 +827,7 @@ void util_coll_join_comp(struct util_coll_operation *coll_op)
 	/* write to the eq  */
 	memset(&entry, 0, sizeof(entry));
 	entry.fid = &coll_op->mc->mc_fid.fid;
-	entry.context = coll_op->mc->mc_fid.fid.context;
+	entry.context = coll_op->context;
 
 	if (ofi_eq_write(&ep->eq->eq_fid, FI_JOIN_COMPLETE, &entry,
 			 sizeof(struct fi_eq_entry), FI_COLLECTIVE) < 0)
@@ -996,21 +1011,16 @@ int ofi_join_collective(struct fid_ep *ep, fi_addr_t coll_addr,
 		coll_mc = (struct util_coll_mc*) ((uintptr_t) coll_addr);
 	}
 
-	ret = util_coll_mc_alloc(&new_coll_mc);
-	if (ret)
-		return ret;
-
-	util_ep = container_of(ep, struct util_ep, ep_fid);
+	new_coll_mc = calloc(1, sizeof(*new_coll_mc));
+	if (!new_coll_mc)
+		return -FI_ENOMEM;
 
 	// set up the new mc for future collectives
-	new_coll_mc->mc_fid.fid.fclass = FI_CLASS_MC;
-	new_coll_mc->mc_fid.fid.context = context;
-	new_coll_mc->mc_fid.fid.ops = &util_coll_fi_ops;
-	new_coll_mc->mc_fid.fi_addr = (uintptr_t) new_coll_mc;
-	new_coll_mc->av_set = av_set;
-	new_coll_mc->ep = ep;
+	util_coll_mc_init(new_coll_mc, av_set, ep, context);
 
 	coll_mc->ep = ep;
+
+	util_ep = container_of(ep, struct util_ep, ep_fid);
 
 	/* get the rank */
 	util_coll_find_local_rank(ep, new_coll_mc);
@@ -1023,18 +1033,13 @@ int ofi_join_collective(struct fid_ep *ep, fi_addr_t coll_addr,
 
 	join_op->data.join.new_mc = new_coll_mc;
 
-	if (new_coll_mc->local_rank != FI_ADDR_NOTAVAIL) {
-		ret = ofi_bitmask_create(&join_op->data.join.data, OFI_MAX_GROUP_ID);
-		if (ret)
-			goto err2;
+	ret = ofi_bitmask_create(&join_op->data.join.data, OFI_MAX_GROUP_ID);
+	if (ret)
+		goto err2;
 
-		ret = ofi_bitmask_create(&join_op->data.join.tmp, OFI_MAX_GROUP_ID);
-		if (ret)
-			goto err3;
-
-	} else {
-		ofi_bitmask_set_all(&join_op->data.join.data);
-	}
+	ret = ofi_bitmask_create(&join_op->data.join.tmp, OFI_MAX_GROUP_ID);
+	if (ret)
+		goto err3;
 
 	ret = util_coll_allreduce(join_op, util_ep->coll_cid_mask->bytes,
 				  join_op->data.join.data.bytes,
@@ -1080,23 +1085,66 @@ static int util_coll_copy_from_av(struct util_av *av, void *addr,
 	return FI_SUCCESS;
 }
 
+static int util_av_set_close(struct fid *fid)
+{
+	struct util_av_set *av_set;
+
+	av_set = container_of(fid, struct util_av_set, av_set_fid.fid);
+
+	// release reference taken by internal coll_mc embedded in av_set
+	ofi_atomic_dec32(&av_set->ref);
+	if (ofi_atomic_get32(&av_set->ref) > 0)
+		return -FI_EBUSY;
+
+	free(av_set);
+
+	return FI_SUCCESS;
+}
+
+static struct fi_ops util_av_set_fi_ops = {
+	.size = sizeof(struct fi_ops),
+	.close = util_av_set_close,
+	.bind = fi_no_bind,
+	.control = fi_no_control,
+	.ops_open = fi_no_ops_open,
+};
+
+static inline int util_av_set_init(struct util_av_set *av_set,
+				   struct util_av *util_av,
+				   void *context)
+{
+	int ret = FI_SUCCESS;
+
+	av_set->av_set_fid.ops = &util_av_set_ops;
+	av_set->av_set_fid.fid.fclass = FI_CLASS_AV_SET;
+	av_set->av_set_fid.fid.context = context;
+	av_set->av_set_fid.fid.ops = &util_av_set_fi_ops;
+	av_set->av = util_av;
+	ofi_atomic_initialize32(&av_set->ref, 0);
+	ret = fastlock_init(&av_set->lock);
+
+	return ret;
+}
+
 static int util_coll_av_init(struct util_av *av)
 {
-
 	struct util_coll_mc *coll_mc;
 	int ret;
 
 	assert(!av->coll_mc);
 
-	ret = util_coll_mc_alloc(&coll_mc);
-	if (ret)
-		return ret;
+	coll_mc = calloc(1, sizeof(*coll_mc));
+	if (!coll_mc)
+		return -FI_ENOMEM;
 
 	coll_mc->av_set = calloc(1, sizeof(*coll_mc->av_set));
 	if (!coll_mc->av_set) {
 		ret = -FI_ENOMEM;
 		goto err1;
 	}
+	ret = util_av_set_init(coll_mc->av_set, av, NULL);
+	if (ret)
+		goto err3;
 
 	coll_mc->av_set->fi_addr_array =
 		calloc(av->count, sizeof(*coll_mc->av_set->fi_addr_array));
@@ -1105,23 +1153,13 @@ static int util_coll_av_init(struct util_av *av)
 		goto err2;
 	}
 
-	ret = fastlock_init(&coll_mc->av_set->lock);
-	if (ret)
-		goto err3;
-
-	coll_mc->av_set->av = av;
 	ret = ofi_av_elements_iter(av, util_coll_copy_from_av,
 				   (void *)coll_mc->av_set);
 	if (ret)
 		goto err4;
 
-	coll_mc->av_set->av_set_fid.fid.fclass = FI_CLASS_AV_SET;
-	coll_mc->av_set->av_set_fid.ops = &util_av_set_ops;
+	util_coll_mc_init(coll_mc, coll_mc->av_set, NULL, NULL);
 
-	coll_mc->mc_fid.fi_addr = (uintptr_t) coll_mc;
-	coll_mc->mc_fid.fid.fclass = FI_CLASS_MC;
-	coll_mc->mc_fid.fid.context = NULL;
-	coll_mc->mc_fid.fid.ops = &util_coll_fi_ops;
 	av->coll_mc = coll_mc;
 	return FI_SUCCESS;
 
@@ -1153,7 +1191,7 @@ int ofi_av_set(struct fid_av *av, struct fi_av_set_attr *attr,
 	if (!av_set)
 		return -FI_ENOMEM;
 
-	ret = fastlock_init(&av_set->lock);
+	ret = util_av_set_init(av_set, util_av, context);
 	if (ret)
 		goto err1;
 
@@ -1167,10 +1205,8 @@ int ofi_av_set(struct fid_av *av, struct fi_av_set_attr *attr,
 		av_set->fi_addr_count++;
 	}
 
-	av_set->av = util_av;
-	av_set->av_set_fid.ops = &util_av_set_ops;
-	av_set->av_set_fid.fid.fclass = FI_CLASS_AV_SET;
-	av_set->av_set_fid.fid.context = context;
+	util_coll_mc_init(&av_set->coll_mc, av_set, NULL, context);
+
 	(*av_set_fid) = &av_set->av_set_fid;
 	return FI_SUCCESS;
 err2:

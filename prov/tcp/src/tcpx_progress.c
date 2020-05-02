@@ -59,34 +59,35 @@ static void tcpx_cq_report_xfer_fail(struct tcpx_ep *tcpx_ep, int err)
 	}
 }
 
-static void tcpx_report_error(struct tcpx_ep *tcpx_ep, int err)
-{
-	struct fi_eq_err_entry err_entry = {0};
-
-	tcpx_cq_report_xfer_fail(tcpx_ep, err);
-	err_entry.fid = &tcpx_ep->util_ep.ep_fid.fid;
-	err_entry.context = tcpx_ep->util_ep.ep_fid.fid.context;
-	err_entry.err = -err;
-
-	fi_eq_write(&tcpx_ep->util_ep.eq->eq_fid, FI_SHUTDOWN,
-		    &err_entry, sizeof(err_entry), UTIL_FLAG_ERROR);
-}
-
+/**
+ * Shutdown is done in two phases, phase1 writes the FI_SHUTDOWN event, which
+ * a polling thread still needs to handle, phase2 removes the fd
+ * of the ep from polling, so that a polling thread won't spin
+ * if it does not close the connection immediately after it handled
+ * FI_SHUTDOWN
+ */
 int tcpx_ep_shutdown_report(struct tcpx_ep *ep, fid_t fid)
 {
 	struct fi_eq_cm_entry cm_entry = {0};
 	ssize_t len;
 
-	if (ep->cm_state == TCPX_EP_SHUTDOWN)
-		return FI_SUCCESS;
-
-	tcpx_cq_report_xfer_fail(ep, -FI_ENOTCONN);
-	ep->cm_state = TCPX_EP_SHUTDOWN;
-	cm_entry.fid = fid;
-	len =  fi_eq_write(&ep->util_ep.eq->eq_fid, FI_SHUTDOWN,
-			   &cm_entry, sizeof(cm_entry), 0);
-	if (len < 0)
-		return (int) len;
+	switch (ep->cm_state) {
+	case TCPX_EP_POLL_REMOVED:
+		break;
+	case TCPX_EP_SHUTDOWN:
+		tcpx_ep_wait_fd_del(ep);
+		ep->cm_state = TCPX_EP_POLL_REMOVED;
+		break;
+	default:
+		tcpx_cq_report_xfer_fail(ep, -FI_ENOTCONN);
+		ep->cm_state = TCPX_EP_SHUTDOWN;
+		cm_entry.fid = fid;
+		len =  fi_eq_write(&ep->util_ep.eq->eq_fid, FI_SHUTDOWN,
+				   &cm_entry, sizeof(cm_entry), 0);
+		if (len < 0)
+			return (int) len;
+		break;
+	}
 
 	return FI_SUCCESS;
 }
@@ -244,7 +245,7 @@ static void tcpx_pmem_commit(struct tcpx_xfer_entry *rx_entry)
 	}
 }
 
-static int process_rx_remote_write_entry(struct tcpx_xfer_entry *rx_entry)
+static int process_remote_write(struct tcpx_xfer_entry *rx_entry)
 {
 	struct tcpx_cq *tcpx_cq;
 	int ret = FI_SUCCESS;
@@ -282,7 +283,7 @@ static int process_rx_remote_write_entry(struct tcpx_xfer_entry *rx_entry)
 	return ret;
 }
 
-static int process_rx_read_entry(struct tcpx_xfer_entry *rx_entry)
+static int process_remote_read(struct tcpx_xfer_entry *rx_entry)
 {
 	struct tcpx_cq *tcpx_cq;
 	int ret = FI_SUCCESS;
@@ -390,20 +391,23 @@ static int tcpx_validate_rx_rma_data(struct tcpx_xfer_entry *rx_entry,
 	return FI_SUCCESS;
 }
 
-int tcpx_get_rx_entry_op_invalid(struct tcpx_ep *tcpx_ep)
+int tcpx_op_invalid(struct tcpx_ep *tcpx_ep)
 {
 	return -FI_EINVAL;
 }
 
-static inline void
-tcpx_rx_detect_init(struct tcpx_cur_rx_msg *cur_rx_msg)
-
+static void tcpx_rx_setup(struct tcpx_ep *ep, struct tcpx_xfer_entry *rx_entry,
+			  tcpx_rx_process_fn_t process_fn)
 {
-	cur_rx_msg->hdr_len = sizeof(cur_rx_msg->hdr.base_hdr);
-	cur_rx_msg->done_len = 0;
+	ep->cur_rx_entry = rx_entry;
+	ep->cur_rx_proc_fn = process_fn;
+
+	/* Reset to receive next message */
+	ep->cur_rx_msg.hdr_len = sizeof(ep->cur_rx_msg.hdr.base_hdr);
+	ep->cur_rx_msg.done_len = 0;
 }
 
-int tcpx_get_rx_entry_op_msg(struct tcpx_ep *tcpx_ep)
+int tcpx_op_msg(struct tcpx_ep *tcpx_ep)
 {
 	struct tcpx_xfer_entry *rx_entry;
 	struct tcpx_xfer_entry *tx_entry;
@@ -423,7 +427,7 @@ int tcpx_get_rx_entry_op_msg(struct tcpx_ep *tcpx_ep)
 
 		slist_remove_head(&tx_entry->ep->tx_rsp_pend_queue);
 		tcpx_xfer_entry_release(tcpx_cq, tx_entry);
-		tcpx_rx_detect_init(cur_rx_msg);
+		tcpx_rx_setup(tcpx_ep, NULL, NULL);
 		return -FI_EAGAIN;
 	}
 
@@ -465,16 +469,14 @@ int tcpx_get_rx_entry_op_msg(struct tcpx_ep *tcpx_ep)
 		return ret;
 	}
 
-	tcpx_ep->cur_rx_proc_fn = process_rx_entry;
 	if (cur_rx_msg->hdr.base_hdr.flags & OFI_REMOTE_CQ_DATA)
 		rx_entry->flags |= FI_REMOTE_CQ_DATA;
 
-	tcpx_rx_detect_init(cur_rx_msg);
-	tcpx_ep->cur_rx_entry = rx_entry;
+	tcpx_rx_setup(tcpx_ep, rx_entry, process_rx_entry);
 	return FI_SUCCESS;
 }
 
-int tcpx_get_rx_entry_op_read_req(struct tcpx_ep *tcpx_ep)
+int tcpx_op_read_req(struct tcpx_ep *tcpx_ep)
 {
 	struct tcpx_xfer_entry *rx_entry;
 	struct tcpx_cq *tcpx_cq;
@@ -506,13 +508,11 @@ int tcpx_get_rx_entry_op_read_req(struct tcpx_ep *tcpx_ep)
 		return ret;
 	}
 
-	tcpx_rx_detect_init(&tcpx_ep->cur_rx_msg);
-	tcpx_ep->cur_rx_entry = rx_entry;
-	tcpx_ep->cur_rx_proc_fn = tcpx_prepare_rx_remote_read_resp;
+	tcpx_rx_setup(tcpx_ep, rx_entry, tcpx_prepare_rx_remote_read_resp);
 	return FI_SUCCESS;
 }
 
-int tcpx_get_rx_entry_op_write(struct tcpx_ep *tcpx_ep)
+int tcpx_op_write(struct tcpx_ep *tcpx_ep)
 {
 	struct tcpx_xfer_entry *rx_entry;
 	struct tcpx_cq *tcpx_cq;
@@ -546,14 +546,12 @@ int tcpx_get_rx_entry_op_write(struct tcpx_ep *tcpx_ep)
 	}
 
 	tcpx_copy_rma_iov_to_msg_iov(rx_entry);
-	tcpx_rx_detect_init(&tcpx_ep->cur_rx_msg);
-	tcpx_ep->cur_rx_entry = rx_entry;
-	tcpx_ep->cur_rx_proc_fn = process_rx_remote_write_entry;
+	tcpx_rx_setup(tcpx_ep, rx_entry, process_remote_write);
 	return FI_SUCCESS;
 
 }
 
-int tcpx_get_rx_entry_op_read_rsp(struct tcpx_ep *tcpx_ep)
+int tcpx_op_read_rsp(struct tcpx_ep *tcpx_ep)
 {
 	struct tcpx_xfer_entry *rx_entry;
 	struct slist_entry *entry;
@@ -571,23 +569,41 @@ int tcpx_get_rx_entry_op_read_rsp(struct tcpx_ep *tcpx_ep)
 	rx_entry->rem_len = (rx_entry->hdr.base_hdr.size -
 			     tcpx_ep->cur_rx_msg.done_len);
 
-	tcpx_rx_detect_init(&tcpx_ep->cur_rx_msg);
-	tcpx_ep->cur_rx_entry = rx_entry;
-	tcpx_ep->cur_rx_proc_fn = process_rx_read_entry;
+	tcpx_rx_setup(tcpx_ep, rx_entry, process_remote_read);
 	return FI_SUCCESS;
 }
 
-static inline int tcpx_get_next_rx_hdr(struct tcpx_ep *ep)
+static int tcpx_get_next_rx_hdr(struct tcpx_ep *ep)
 {
 	int ret;
 
 	/* hdr already read from socket in previous call */
-	if (ep->cur_rx_msg.hdr_len == ep->cur_rx_msg.done_len)
+	if (ep->cur_rx_msg.done_len >= ep->cur_rx_msg.hdr_len)
 		return FI_SUCCESS;
 
-	ret = tcpx_comm_recv_hdr(ep->sock, &ep->stage_buf, &ep->cur_rx_msg);
-	if (ret)
+	ret = tcpx_recv_hdr(ep->sock, &ep->stage_buf, &ep->cur_rx_msg);
+	if (ret < 0)
 		return ret;
+
+	ep->cur_rx_msg.done_len += ret;
+	if (ep->cur_rx_msg.done_len >= sizeof(ep->cur_rx_msg.hdr.base_hdr)) {
+		ep->cur_rx_msg.hdr_len = (size_t) ep->cur_rx_msg.hdr.
+						  base_hdr.payload_off;
+
+		if (ep->cur_rx_msg.hdr_len > ep->cur_rx_msg.done_len) {
+			/* Still more header to read */
+			ret = tcpx_recv_hdr(ep->sock, &ep->stage_buf,
+					    &ep->cur_rx_msg);
+			if (ret < 0)
+				return ret;
+
+			ep->cur_rx_msg.done_len += ret;
+		}
+	}
+
+	/* TODO: cur_rx_msg.hdr_len is initialized in some non-obvious place */
+	if (ep->cur_rx_msg.done_len < ep->cur_rx_msg.hdr_len)
+		return -FI_EAGAIN;
 
 	ep->hdr_bswap(&ep->cur_rx_msg.hdr.base_hdr);
 	return FI_SUCCESS;
@@ -598,7 +614,8 @@ void tcpx_progress_rx(struct tcpx_ep *ep)
 {
 	int ret;
 
-	if (!ep->cur_rx_entry && (ep->stage_buf.len == ep->stage_buf.off)) {
+	if (!ep->cur_rx_entry &&
+	    (ep->stage_buf.cur_pos == ep->stage_buf.bytes_avail)) {
 		ret = tcpx_read_to_buffer(ep->sock, &ep->stage_buf);
 		if (ret)
 			goto err;
@@ -610,24 +627,25 @@ void tcpx_progress_rx(struct tcpx_ep *ep)
 			if (ret)
 				goto err;
 
-			ret = ep->get_rx_entry[ep->cur_rx_msg.hdr.base_hdr.op](ep);
+			ret = ep->start_op[ep->cur_rx_msg.hdr.base_hdr.op](ep);
 			if (ret)
 				goto err;
 		}
-		assert(ep->cur_rx_proc_fn != NULL);
+		assert(ep->cur_rx_proc_fn);
 		ep->cur_rx_proc_fn(ep->cur_rx_entry);
 
-	} while (ep->stage_buf.len != ep->stage_buf.off);
+	} while (ep->stage_buf.cur_pos < ep->stage_buf.bytes_avail);
 
 	return;
 err:
 	if (OFI_SOCK_TRY_SND_RCV_AGAIN(-ret))
 		return;
 
+	/* Failed current RX entry should clean itself */
+	assert(!ep->cur_rx_entry);
+
 	if (ret == -FI_ENOTCONN)
 		tcpx_ep_shutdown_report(ep, &ep->util_ep.ep_fid.fid);
-	else
-		tcpx_report_error(ep, ret);
 }
 
 /* Must hold ep lock */
@@ -651,25 +669,30 @@ int tcpx_try_func(void *util_ep)
 	int ret;
 
 	ep = container_of(util_ep, struct tcpx_ep, util_ep);
+	wait_fd = container_of(((struct util_ep *) util_ep)->tx_cq->wait,
+			       struct util_wait_fd, util_wait);
 
 	fastlock_acquire(&ep->lock);
-	if (!slist_empty(&ep->tx_queue) && !ep->epoll_out_set) {
-		ep->epoll_out_set = true;
-		events = OFI_EPOLL_IN | OFI_EPOLL_OUT;
+	if (!slist_empty(&ep->tx_queue) && !ep->pollout_set) {
+		ep->pollout_set = true;
+		events = (wait_fd->util_wait.wait_obj == FI_WAIT_FD) ?
+			 (OFI_EPOLL_IN | OFI_EPOLL_OUT) : (POLLIN | POLLOUT);
 		goto epoll_mod;
-	} else if (slist_empty(&ep->tx_queue) && ep->epoll_out_set) {
-		ep->epoll_out_set = false;
-		events = OFI_EPOLL_IN;
+	} else if (slist_empty(&ep->tx_queue) && ep->pollout_set) {
+		ep->pollout_set = false;
+		events = (wait_fd->util_wait.wait_obj == FI_WAIT_FD) ?
+			 OFI_EPOLL_IN : POLLIN;
 		goto epoll_mod;
 	}
 	fastlock_release(&ep->lock);
 	return FI_SUCCESS;
 
 epoll_mod:
-	wait_fd = container_of(((struct util_ep *) util_ep)->tx_cq->wait,
-			       struct util_wait_fd, util_wait);
-	ret = ofi_epoll_mod(wait_fd->epoll_fd, ep->sock, events,
-			    &ep->util_ep.ep_fid.fid);
+	ret = (wait_fd->util_wait.wait_obj == FI_WAIT_FD) ?
+	      ofi_epoll_mod(wait_fd->epoll_fd, ep->sock, events,
+			    &ep->util_ep.ep_fid.fid) :
+	      ofi_pollfds_mod(wait_fd->pollfds, ep->sock, events,
+			      &ep->util_ep.ep_fid.fid);
 	if (ret)
 		FI_WARN(&tcpx_prov, FI_LOG_EP_DATA,
 			"epoll modify failed\n");

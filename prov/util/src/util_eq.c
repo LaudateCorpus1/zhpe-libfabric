@@ -202,6 +202,7 @@ int ofi_eq_control(struct fid *fid, int command, void *arg)
 
 	switch (command) {
 	case FI_GETWAIT:
+	case FI_GETWAITOBJ:
 		ret = fi_control(&eq->wait->wait_fid.fid, command, arg);
 		break;
 	default:
@@ -289,6 +290,7 @@ static int util_eq_init(struct fid_fabric *fabric, struct util_eq *eq,
 		break;
 	case FI_WAIT_UNSPEC:
 	case FI_WAIT_FD:
+	case FI_WAIT_POLLFD:
 	case FI_WAIT_MUTEX_COND:
 	case FI_WAIT_YIELD:
 		memset(&wait_attr, 0, sizeof wait_attr);
@@ -363,6 +365,7 @@ static int util_verify_eq_attr(const struct fi_provider *prov,
 	case FI_WAIT_NONE:
 	case FI_WAIT_UNSPEC:
 	case FI_WAIT_FD:
+	case FI_WAIT_POLLFD:
 	case FI_WAIT_MUTEX_COND:
 	case FI_WAIT_YIELD:
 		break;

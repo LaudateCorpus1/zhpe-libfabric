@@ -140,8 +140,7 @@ rxm_ep_atomic_common(struct rxm_ep *rxm_ep, struct rxm_conn *rxm_conn,
 		goto restore_credit;
 	}
 
-	tx_buf = (struct rxm_tx_atomic_buf *)
-		 rxm_tx_buf_alloc(rxm_ep, RXM_BUF_POOL_TX_ATOMIC);
+	tx_buf = rxm_tx_buf_alloc(rxm_ep, RXM_BUF_POOL_TX_ATOMIC);
 	if (OFI_UNLIKELY(!tx_buf)) {
 		FI_WARN(&rxm_prov, FI_LOG_EP_DATA,
 			"Ran out of buffers from Atomic buffer pool\n");
@@ -507,6 +506,9 @@ int rxm_ep_query_atomic(struct fid_domain *domain, enum fi_datatype datatype,
 		rxm_domain->max_atomic_size / 2 : rxm_domain->max_atomic_size;
 	attr->size = ofi_datatype_size(datatype);
 	attr->count = tot_size / attr->size;
+
+	if (attr->count == 0)
+		return -FI_EOPNOTSUPP;
 
 	return FI_SUCCESS;
 }

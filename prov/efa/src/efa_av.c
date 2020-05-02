@@ -68,6 +68,12 @@ static bool efa_is_local_peer(struct efa_av *av, const void *addr)
 	return 0;
 }
 
+static bool efa_is_same_addr(struct efa_ep_addr *lhs, struct efa_ep_addr *rhs)
+{
+	return !memcmp(lhs->raw, rhs->raw, sizeof(lhs->raw)) &&
+	       lhs->qpn == rhs->qpn && lhs->qkey == rhs->qkey;
+}
+
 static inline struct efa_conn *efa_av_tbl_idx_to_conn(struct efa_av *av, fi_addr_t addr)
 {
 	if (OFI_UNLIKELY(addr == FI_ADDR_UNSPEC))
@@ -162,7 +168,7 @@ static int efa_av_insert_ah(struct efa_av *av, struct efa_ep_addr *addr,
 
 	memset(&ah_attr, 0, sizeof(struct ibv_ah_attr));
 	inet_ntop(AF_INET6, addr->raw, str, INET6_ADDRSTRLEN);
-	EFA_INFO(FI_LOG_AV, "Insert address: GID[%s] QP[%u]\n", str, addr->qpn);
+	EFA_INFO(FI_LOG_AV, "Insert address: GID[%s] QP[%u] QKEY[%u]\n", str, addr->qpn, addr->qkey);
 	if (!efa_av_is_valid_address(addr)) {
 		EFA_WARN(FI_LOG_AV, "Failed to insert bad addr");
 		err = -FI_EADDRNOTAVAIL;
@@ -234,7 +240,7 @@ static int efa_av_insert_ah(struct efa_av *av, struct efa_ep_addr *addr,
 err_destroy_ah:
 	ibv_destroy_ah(conn->ah.ibv_ah);
 err_free_conn:
-	free(conn);
+	ofi_freealign(conn);
 err_invalid:
 	*fi_addr = FI_ADDR_NOTAVAIL;
 	return err;
@@ -289,8 +295,28 @@ int efa_av_insert_addr(struct efa_av *av, struct efa_ep_addr *addr,
 	memcpy((void *)&av_entry->ep_addr, addr, EFA_EP_ADDR_LEN);
 	av_entry->rdm_addr = *fi_addr;
 
+	/*
+	 * Walk through all the EPs that bound to the AV,
+	 * update is_self flag corresponding peer structure
+	 */
+	dlist_foreach(&av->util_av.ep_list, ep_list_entry) {
+		util_ep = container_of(ep_list_entry, struct util_ep, av_entry);
+		rxr_ep = container_of(util_ep, struct rxr_ep, util_ep);
+		peer = rxr_ep_get_peer(rxr_ep, *fi_addr);
+		assert(peer);
+		peer->is_self = efa_is_same_addr((struct efa_ep_addr *)rxr_ep->core_addr,
+						 addr);
+	}
+
 	/* If peer is local, insert the address into shm provider's av */
 	if (rxr_env.enable_shm_transfer && efa_is_local_peer(av, addr)) {
+		if (av->shm_used >= rxr_env.shm_av_size) {
+			ret = -FI_ENOMEM;
+			EFA_WARN(FI_LOG_AV,
+				 "Max number of shm AV entry %d has been reached.\n",
+				 rxr_env.shm_av_size);
+			goto err_free_av_entry;
+		}
 		ret = rxr_ep_efa_addr_to_str(addr, smr_name);
 		if (ret != FI_SUCCESS)
 			goto err_free_av_entry;
@@ -310,7 +336,8 @@ int efa_av_insert_addr(struct efa_av *av, struct efa_ep_addr *addr,
 			" rdm_fiaddr = %" PRIu64 " shm_rdm_fiaddr = %" PRIu64
 			"\n", smr_name, *(uint64_t *)addr, *fi_addr, shm_fiaddr);
 
-		assert(shm_fiaddr < EFA_SHM_MAX_AV_COUNT);
+		assert(shm_fiaddr < rxr_env.shm_av_size);
+		av->shm_used++;
 		av_entry->local_mapping = 1;
 		av_entry->shm_rdm_addr = shm_fiaddr;
 		av->shm_rdm_addr_map[shm_fiaddr] = av_entry->rdm_addr;
@@ -488,7 +515,7 @@ static int efa_av_remove_ah(struct fid_av *av_fid, fi_addr_t *fi_addr,
 	av->used--;
 
 err_free_conn:
-	free(conn);
+	ofi_freealign(conn);
 	return ret;
 }
 
@@ -524,7 +551,8 @@ static int efa_av_remove(struct fid_av *av_fid, fi_addr_t *fi_addr,
 				if (ret)
 					goto err_free_av_entry;
 
-				assert(av_entry->shm_rdm_addr < EFA_SHM_MAX_AV_COUNT);
+				av->shm_used--;
+				assert(av_entry->shm_rdm_addr < rxr_env.shm_av_size);
 				av->shm_rdm_addr_map[av_entry->shm_rdm_addr] = FI_ADDR_UNSPEC;
 			}
 			HASH_DEL(av->av_map, av_entry);
@@ -584,7 +612,8 @@ static int efa_av_close(struct fid *fid)
 	}
 	free(av->conn_table);
 	if (av->ep_type == FI_EP_RDM) {
-		if (rxr_env.enable_shm_transfer) {
+		if (rxr_env.enable_shm_transfer && av->shm_rdm_av &&
+		    &av->shm_rdm_av->fid) {
 			ret = fi_close(&av->shm_rdm_av->fid);
 			if (ret) {
 				err = ret;
@@ -626,6 +655,7 @@ int efa_av_open(struct fid_domain *domain_fid, struct fi_av_attr *attr,
 	struct efa_domain *efa_domain;
 	struct util_domain *util_domain;
 	struct rxr_domain *rxr_domain;
+	struct efa_domain_base *efa_domain_base;
 	struct efa_av *av;
 	struct util_av_attr util_attr;
 	size_t universe_size;
@@ -654,16 +684,19 @@ int efa_av_open(struct fid_domain *domain_fid, struct fi_av_attr *attr,
 	av = calloc(1, sizeof(*av));
 	if (!av)
 		return -FI_ENOMEM;
-	/*
-	 * This needs be revisited once fabric domain is set to efa for both
-	 * dgram and rdm.For rdm need both efa_domain and rxr_domain (for shm_domain)
-	 */
+
 	util_domain = container_of(domain_fid, struct util_domain,
-			domain_fid);
+				   domain_fid);
+	efa_domain_base = container_of(util_domain, struct efa_domain_base,
+				       util_domain.domain_fid);
 	attr->type = FI_AV_TABLE;
-	if (strstr(util_domain->name, "rdm")) {
-		rxr_domain = container_of(domain_fid, struct rxr_domain,
-						util_domain.domain_fid);
+	/*
+	 * An rxr_domain fid was passed to the user if this is an RDM
+	 * endpoint, otherwise it is an efa_domain fid.  This will be
+	 * removed once the rxr and efa domain structures are combined.
+	 */
+	if (efa_domain_base->type == EFA_DOMAIN_RDM) {
+		rxr_domain = (struct rxr_domain *)efa_domain_base;
 		efa_domain = container_of(rxr_domain->rdm_domain, struct efa_domain,
 						util_domain.domain_fid);
 		av->ep_type = FI_EP_RDM;
@@ -686,22 +719,24 @@ int efa_av_open(struct fid_domain *domain_fid, struct fi_av_attr *attr,
 			 * the need of the instances with more CPUs.
 			 */
 			if (rxr_env.shm_av_size > EFA_SHM_MAX_AV_COUNT) {
-				ret = -FI_ENOMEM;
-				goto err_close_rdm_av;
+				ret = -FI_ENOSYS;
+				EFA_WARN(FI_LOG_AV, "The requested av size is beyond"
+					 " shm supported maximum av size: %s\n",
+					 fi_strerror(-ret));
+				goto err_close_util_av;
 			}
 			av_attr.count = rxr_env.shm_av_size;
 			assert(av_attr.type == FI_AV_TABLE);
-			ret = fi_av_open(rxr_domain->shm_domain, &av_attr, &av->shm_rdm_av, context);
+			ret = fi_av_open(efa_domain->shm_domain, &av_attr,
+					&av->shm_rdm_av, context);
 			if (ret)
-				goto err_close_rdm_av;
+				goto err_close_util_av;
 
 			for (i = 0; i < EFA_SHM_MAX_AV_COUNT; ++i)
 				av->shm_rdm_addr_map[i] = FI_ADDR_UNSPEC;
 		}
 	} else {
-		// Currently the domain is set to efa for only dgram
-		efa_domain = container_of(domain_fid, struct efa_domain,
-			util_domain.domain_fid);
+		efa_domain = (struct efa_domain *)efa_domain_base;
 		av->ep_type = FI_EP_DGRAM;
 	}
 
@@ -712,13 +747,14 @@ int efa_av_open(struct fid_domain *domain_fid, struct fi_av_attr *attr,
 	av->type = attr->type;
 	av->used = 0;
 	av->next = 0;
+	av->shm_used = 0;
 
 	if (av->type == FI_AV_TABLE && av->util_av.count > 0) {
 		av->conn_table = calloc(av->util_av.count, sizeof(*av->conn_table));
 		if (!av->conn_table) {
 			ret = -FI_ENOMEM;
 			if (av->ep_type == FI_EP_DGRAM)
-				goto err;
+				goto err_close_util_av;
 			else
 				goto err_close_shm_av;
 		}
@@ -744,11 +780,11 @@ err_close_shm_av:
 			EFA_WARN(FI_LOG_AV, "Unable to close shm av: %s\n",
 				fi_strerror(ret));
 	}
-err_close_rdm_av:
-	retv = fi_close(&av->util_av.av_fid.fid);
+err_close_util_av:
+	retv = ofi_av_close(&av->util_av);
 	if (retv)
 		EFA_WARN(FI_LOG_AV,
-			 "Unable to close rdm av: %s\n", fi_strerror(-retv));
+			 "Unable to close util_av: %s\n", fi_strerror(-retv));
 err:
 	free(av);
 	return ret;

@@ -122,12 +122,11 @@ static int tcpx_ep_connect(struct fid_ep *ep, const void *addr,
 		memcpy(cm_ctx->cm_data, param, paramlen);
 	}
 
-	ret = ofi_wait_fd_add(tcpx_ep->util_ep.eq->wait, tcpx_ep->sock,
-			      OFI_EPOLL_OUT, tcpx_eq_wait_try_func, NULL,cm_ctx);
+	ret = ofi_wait_add_fd(tcpx_ep->util_ep.eq->wait, tcpx_ep->sock,
+			      POLLOUT, tcpx_eq_wait_try_func, NULL,cm_ctx);
 	if (ret)
 		goto err;
 
-	tcpx_ep->util_ep.eq->wait->signal(tcpx_ep->util_ep.eq->wait);
 	return 0;
 err:
 	free(cm_ctx);
@@ -157,14 +156,12 @@ static int tcpx_ep_accept(struct fid_ep *ep, const void *param, size_t paramlen)
 		memcpy(cm_ctx->cm_data, param, paramlen);
 	}
 
-	ret = ofi_wait_fd_add(tcpx_ep->util_ep.eq->wait, tcpx_ep->sock,
-			      OFI_EPOLL_OUT, tcpx_eq_wait_try_func, NULL, cm_ctx);
-	if (ret) {
+	ret = ofi_wait_add_fd(tcpx_ep->util_ep.eq->wait, tcpx_ep->sock,
+			      POLLOUT, tcpx_eq_wait_try_func, NULL, cm_ctx);
+	if (ret)
 		free(cm_ctx);
-		return ret;
-	}
-	tcpx_ep->util_ep.eq->wait->signal(tcpx_ep->util_ep.eq->wait);
-	return 0;
+
+	return ret;
 }
 
 static int tcpx_ep_shutdown(struct fid_ep *ep, uint64_t flags)
@@ -347,29 +344,41 @@ static void tcpx_ep_tx_rx_queues_release(struct tcpx_ep *ep)
 	fastlock_release(&ep->lock);
 }
 
-static int tcpx_ep_close(struct fid *fid)
+/**
+ * Release the ep from polling
+ */
+void tcpx_ep_wait_fd_del(struct tcpx_ep *ep)
 {
+	FI_DBG(&tcpx_prov, FI_LOG_EP_CTRL, "releasing ep=%p\n", ep);
+
 	struct tcpx_eq *eq;
-	struct tcpx_ep *ep = container_of(fid, struct tcpx_ep,
-					  util_ep.ep_fid.fid);
 
 	eq = container_of(ep->util_ep.eq, struct tcpx_eq,
 			  util_eq);
 
-	tcpx_ep_tx_rx_queues_release(ep);
-
 	/* eq->close_lock protects from processing stale connection events */
 	fastlock_acquire(&eq->close_lock);
 	if (ep->util_ep.rx_cq)
-		ofi_wait_fd_del(ep->util_ep.rx_cq->wait, ep->sock);
+		ofi_wait_del_fd(ep->util_ep.rx_cq->wait, ep->sock);
 
 	if (ep->util_ep.tx_cq)
-		ofi_wait_fd_del(ep->util_ep.tx_cq->wait, ep->sock);
+		ofi_wait_del_fd(ep->util_ep.tx_cq->wait, ep->sock);
 
 	if (ep->util_ep.eq->wait)
-		ofi_wait_fd_del(ep->util_ep.eq->wait, ep->sock);
+		ofi_wait_del_fd(ep->util_ep.eq->wait, ep->sock);
 
 	fastlock_release(&eq->close_lock);
+}
+
+static int tcpx_ep_close(struct fid *fid)
+{
+	struct tcpx_ep *ep = container_of(fid, struct tcpx_ep,
+					  util_ep.ep_fid.fid);
+
+	tcpx_ep_tx_rx_queues_release(ep);
+
+	tcpx_ep_wait_fd_del(ep); /* ensure that everything is really released */
+
 	ofi_eq_remove_fid_events(ep->util_ep.eq, &ep->util_ep.ep_fid.fid);
 	ofi_close_socket(ep->sock);
 	ofi_endpoint_close(&ep->util_ep);
@@ -536,10 +545,6 @@ int tcpx_endpoint(struct fid_domain *domain, struct fi_info *info,
 	if (ret)
 		goto err3;
 
-	ep->stage_buf.size = STAGE_BUF_SIZE;
-	ep->stage_buf.len = 0;
-	ep->stage_buf.off = 0;
-
 	slist_init(&ep->rx_queue);
 	slist_init(&ep->tx_queue);
 	slist_init(&ep->rma_read_queue);
@@ -556,11 +561,11 @@ int tcpx_endpoint(struct fid_domain *domain, struct fi_info *info,
 	(*ep_fid)->msg = &tcpx_msg_ops;
 	(*ep_fid)->rma = &tcpx_rma_ops;
 
-	ep->get_rx_entry[ofi_op_msg] = tcpx_get_rx_entry_op_msg;
-	ep->get_rx_entry[ofi_op_tagged] = tcpx_get_rx_entry_op_invalid;
-	ep->get_rx_entry[ofi_op_read_req] = tcpx_get_rx_entry_op_read_req;
-	ep->get_rx_entry[ofi_op_read_rsp] = tcpx_get_rx_entry_op_read_rsp;
-	ep->get_rx_entry[ofi_op_write] = tcpx_get_rx_entry_op_write;
+	ep->start_op[ofi_op_msg] = tcpx_op_msg;
+	ep->start_op[ofi_op_tagged] = tcpx_op_invalid;
+	ep->start_op[ofi_op_read_req] = tcpx_op_read_req;
+	ep->start_op[ofi_op_read_rsp] = tcpx_op_read_rsp;
+	ep->start_op[ofi_op_write] = tcpx_op_write;
 	return 0;
 err3:
 	ofi_close_socket(ep->sock);
@@ -577,7 +582,7 @@ static int tcpx_pep_fi_close(struct fid *fid)
 
 	pep = container_of(fid, struct tcpx_pep, util_pep.pep_fid.fid);
 	if (pep->util_pep.eq)
-		ofi_wait_fd_del(pep->util_pep.eq->wait, pep->sock);
+		ofi_wait_del_fd(pep->util_pep.eq->wait, pep->sock);
 
 	ofi_close_socket(pep->sock);
 	ofi_pep_close(&pep->util_pep);
@@ -667,11 +672,10 @@ static int tcpx_pep_listen(struct fid_pep *pep)
 		return -ofi_sockerr();
 	}
 
-	ret = ofi_wait_fd_add(tcpx_pep->util_pep.eq->wait, tcpx_pep->sock,
-			      OFI_EPOLL_IN, tcpx_eq_wait_try_func,
+	ret = ofi_wait_add_fd(tcpx_pep->util_pep.eq->wait, tcpx_pep->sock,
+			      POLLIN, tcpx_eq_wait_try_func,
 			      NULL, &tcpx_pep->cm_ctx);
 
-	tcpx_pep->util_pep.eq->wait->signal(tcpx_pep->util_pep.eq->wait);
 	return ret;
 }
 

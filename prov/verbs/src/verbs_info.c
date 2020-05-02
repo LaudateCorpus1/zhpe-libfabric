@@ -70,7 +70,7 @@
 		   (ib_ud_addr)->lid, (ib_ud_addr)->service)
 
 const struct fi_fabric_attr verbs_fabric_attr = {
-	.prov_version		= VERBS_PROV_VERS,
+	.prov_version		= OFI_VERSION_DEF_PROV,
 };
 
 const struct fi_domain_attr verbs_domain_attr = {
@@ -256,6 +256,13 @@ static int vrb_check_hints(uint32_t version, const struct fi_info *hints,
 	}
 
 	if (hints->domain_attr) {
+		if (hints->domain_attr->name &&
+		    strcasecmp(hints->domain_attr->name, info->domain_attr->name)) {
+			VERBS_INFO(FI_LOG_CORE, "skipping device %s (want %s)\n",
+				   info->domain_attr->name, hints->domain_attr->name);
+			return -FI_ENODATA;
+		}
+
 		ret = ofi_check_domain_attr(&vrb_prov, version,
 					    info->domain_attr,
 					    hints);
@@ -735,6 +742,8 @@ static int vrb_have_device(void)
 {
 	struct ibv_device **devs;
 	struct ibv_context *verbs;
+	struct ibv_device_attr attr;
+	const int AWS_VENDOR_ID = 0x1d0f;
 	int i, ret = 0;
 
 	devs = ibv_get_device_list(NULL);
@@ -744,9 +753,21 @@ static int vrb_have_device(void)
 	for (i = 0; devs[i]; i++) {
 		verbs = ibv_open_device(devs[i]);
 		if (verbs) {
+			ret = ibv_query_device(verbs, &attr);
 			ibv_close_device(verbs);
-			ret = 1;
-			break;
+			/*
+			 * According to the librdmacm library interface,
+			 * rdma_get_devices() in vrb_init_info leaves devices
+			 * open even after rdma_free_devices() is called,
+			 * causing failure in efa provider.
+			 * Also, efa and verb devices are not expected to
+			 * co-exist on a system. If its an efa device, then it
+			 * should be handled by the efa provider.
+			 */
+			if (!ret && (attr.vendor_id != AWS_VENDOR_ID)) {
+				ret = 1;
+				break;
+			}
 		}
 	}
 

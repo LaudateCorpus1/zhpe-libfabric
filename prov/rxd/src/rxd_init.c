@@ -77,7 +77,7 @@ void rxd_info_to_core_mr_modes(uint32_t version, const struct fi_info *hints,
 }
 
 int rxd_info_to_core(uint32_t version, const struct fi_info *rxd_info,
-		     struct fi_info *core_info)
+		     const struct fi_info *base_info, struct fi_info *core_info)
 {
 	rxd_info_to_core_mr_modes(version, rxd_info, core_info);
 	core_info->caps = FI_MSG;
@@ -88,7 +88,7 @@ int rxd_info_to_core(uint32_t version, const struct fi_info *rxd_info,
 }
 
 int rxd_info_to_rxd(uint32_t version, const struct fi_info *core_info,
-		    struct fi_info *info)
+		    const struct fi_info *base_info, struct fi_info *info)
 {
 	info->caps = ofi_pick_core_flags(rxd_info.caps, core_info->caps,
 					 FI_LOCAL_COMM | FI_REMOTE_COMM);
@@ -130,7 +130,7 @@ static void rxd_fini(void)
 
 struct fi_provider rxd_prov = {
 	.name = OFI_UTIL_PREFIX "rxd",
-	.version = FI_VERSION(RXD_MAJOR_VERSION, RXD_MINOR_VERSION),
+	.version = OFI_VERSION_DEF_PROV,
 	.fi_version = OFI_VERSION_LATEST,
 	.getinfo = rxd_getinfo,
 	.fabric = rxd_fabric,
