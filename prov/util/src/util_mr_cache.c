@@ -150,24 +150,31 @@ void ofi_mr_cache_notify(struct ofi_mr_cache *cache, const void *addr, size_t le
 		util_mr_uncache_entry(cache, entry);
 }
 
+/* Caller must hold ofi_mem_monitor lock, will be dropped. */
+static void util_mr_cache_clean_locked(struct ofi_mr_cache *cache)
+{
+	struct ofi_mr_entry *entry;
+	DEFINE_LIST(flush_list);
+
+	dlist_splice_head(&flush_list, &cache->flush_list);
+	pthread_mutex_unlock(&cache->monitor->lock);
+	while (!dlist_empty(&flush_list)) {
+		dlist_pop_front(&flush_list, struct ofi_mr_entry,
+				entry, list_entry);
+		FI_DBG(cache->domain->prov, FI_LOG_MR, "flush %p (len: %zu)\n",
+		       entry->info.iov.iov_base, entry->info.iov.iov_len);
+		util_mr_free_entry(cache, entry);
+	}
+}
+
 bool ofi_mr_cache_flush(struct ofi_mr_cache *cache)
 {
 	struct ofi_mr_entry *entry;
 
 	pthread_mutex_lock(&cache->monitor->lock);
-	while (!dlist_empty(&cache->flush_list)) {
-		dlist_pop_front(&cache->flush_list, struct ofi_mr_entry,
-				entry, list_entry);
-		FI_DBG(cache->domain->prov, FI_LOG_MR, "flush %p (len: %zu)\n",
-		       entry->info.iov.iov_base, entry->info.iov.iov_len);
-		pthread_mutex_unlock(&cache->monitor->lock);
-
-		util_mr_free_entry(cache, entry);
-		pthread_mutex_lock(&cache->monitor->lock);
-	}
-
 	if (dlist_empty(&cache->lru_list)) {
-		pthread_mutex_unlock(&cache->monitor->lock);
+		util_mr_cache_clean_locked(cache);
+		/* monitor lock dropped. */
 		return false;
 	}
 
@@ -187,7 +194,8 @@ bool ofi_mr_cache_flush(struct ofi_mr_cache *cache)
 	} while (!dlist_empty(&cache->lru_list) &&
 		 ((cache->cached_cnt >= cache_params.max_cnt) ||
 		  (cache->cached_size >= cache_params.max_size)));
-	pthread_mutex_unlock(&cache->monitor->lock);
+	util_mr_cache_clean_locked(cache);
+	/* monitor lock dropped. */
 
 	return true;
 }
@@ -319,7 +327,8 @@ int ofi_mr_cache_search(struct ofi_mr_cache *cache, const struct fi_mr_attr *att
 			util_mr_uncache_entry(cache, *entry);
 			*entry = cache->storage.find(&cache->storage, &info);
 		}
-		pthread_mutex_unlock(&cache->monitor->lock);
+		util_mr_cache_clean_locked(cache);
+		/* monitor lock dropped. */
 
 		ret = util_mr_cache_create(cache, &info, entry);
 		if (ret && ret != -FI_EAGAIN) {
