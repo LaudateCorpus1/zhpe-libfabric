@@ -148,7 +148,7 @@ int zhpe_dom_mr_cache_init(struct zhpe_dom *zdom)
 	zdom->cache.entry_data_size = sizeof(struct zhpe_mr *);
 	zdom->cache.add_region = zhpe_mr_cache_add_region;
 	zdom->cache.delete_region = zhpe_mr_cache_delete_region;
-	ret = ofi_mr_cache_init(&zdom->util_domain, default_monitor,
+	ret = ofi_mr_cache_init(&zdom->util_domain, uffd_monitor,
 				&zdom->cache);
 	if (ret < 0)
 		goto done;
