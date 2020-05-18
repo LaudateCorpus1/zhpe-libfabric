@@ -818,11 +818,41 @@ void zhpe_rx_start_recv_user(struct zhpe_rx_entry *rx_matched,
 			goto error_complete;
 		rx_matched->lstate.cnt = rc;
 		rx_matched->lstate.held = true;
-		if (OFI_LIKELY(rx_matched->rx_state == ZHPE_RX_STATE_RND)) {
+
+		zhpe_stats_stamp_dbg(__func__, __LINE__,
+				     (uintptr_t)rx_matched,
+				     ntohs(rx_matched->src_cmp_idxn),
+				     rx_matched->rx_state, 0);
+
+		switch ((enum zhpe_rx_state)rx_matched->rx_state) {
+
+		case ZHPE_RX_STATE_RND:
 			rx_send_start_rnd(rx_matched);
 			zctx->pe_ctx_ops->signal(zctx);
-		} else
+			break;
+
+		case ZHPE_RX_STATE_RND_M:
 			rx_matched->matched = true;
+			break;
+
+		case ZHPE_RX_STATE_EAGER:
+			rx_set_state(rx_matched, ZHPE_RX_STATE_EAGER_CLAIMED);
+			break;
+
+		case ZHPE_RX_STATE_EAGER_DONE:
+			zhpe_iov_state_reset(&rx_matched->lstate);
+			zhpe_iov_state_reset(&rx_matched->bstate);
+			zhpe_copy_iov(&rx_matched->lstate, &rx_matched->bstate);
+			zhpe_rx_complete(rx_matched,
+					 rx_matched->tx_entry.cstat.status);
+			break;
+
+		default:
+			ZHPE_LOG_ERROR("rx_matched %p in bad state %d\n",
+				       rx_matched, rx_matched->rx_state);
+			abort();
+		}
+
 		break;
 
 	case ZHPE_RX_STATE_EAGER:
