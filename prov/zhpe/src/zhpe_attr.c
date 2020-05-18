@@ -62,6 +62,7 @@
 #define ZHPE_EP_MSG_PREFIX_SZ	(0)
 #define ZHPE_EP_MAX_CM_DATA_SZ  (256)
 #define ZHPE_EP_MAX_CM_DATA_SZ  (256)
+#define ZHPE_EP_QUEUE_PER_SLICE (0)
 #define ZHPE_EP_RX_CAP		(FI_DIRECTED_RECV | FI_RECV |	\
 				 FI_REMOTE_READ | FI_REMOTE_WRITE)
 #define ZHPE_EP_RX_POLL_TIMEOUT	(100)
@@ -70,7 +71,7 @@
 
 #define ZHPE_EQ_DEF_SZ		(1<<8)
 
-#define ZHPE_MR_CACHE_ENABLE	(true)
+#define ZHPE_MR_CACHE_ENABLE	(1)
 
 #define ZHPE_INFO_CAP		(ZHPE_DOM_CAP | ZHPE_EP_CAP |	\
 				 ZHPE_EP_RX_CAP | ZHPE_EP_TX_CAP)
@@ -209,4 +210,5 @@ char	*zhpe_conn_flowctl_table;
 int	zhpe_eq_def_sz		= ZHPE_EQ_DEF_SZ;
 int	zhpe_ep_rx_poll_timeout	= ZHPE_EP_RX_POLL_TIMEOUT;
 size_t	zhpe_ep_max_eager_sz	= ZHPE_EP_DEF_MAX_EAGER;
+int	zhpe_ep_queue_per_slice	= ZHPE_EP_QUEUE_PER_SLICE;
 int	zhpe_mr_cache_enable	= ZHPE_MR_CACHE_ENABLE;

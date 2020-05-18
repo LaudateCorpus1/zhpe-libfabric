@@ -1405,7 +1405,7 @@ static int ctx_progress_tx(struct zhpe_ctx *zctx)
 	struct dlist_entry	*next;
 
 	ctx_progress_ztq(zctx, zctx->ztq_hi);
-	for (i = 0; i < zhpeq_attr.z.num_slices; i++)
+	for (i = 0; i < zctx->tx_ztq_slices; i++)
 		ctx_progress_ztq(zctx, zctx->ztq_lo[i]);
 	if (OFI_UNLIKELY(!dlist_empty(&zctx->tx_dequeue_list))) {
 		first = zctx->tx_dequeue_list.next;

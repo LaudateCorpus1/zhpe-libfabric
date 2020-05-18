@@ -212,8 +212,11 @@ static int zhpe_ctx_qalloc(struct zhpe_ctx *zctx)
 	size_t			i;
 	struct sockaddr_zhpe	sz;
 	uint32_t		qspecific;
+	uint8_t			queues;
+	int			slice;
 
 	manual = (zdom->util_domain.data_progress == FI_PROGRESS_MANUAL);
+	queues = (zhpe_ep_queue_per_slice ? zhpeq_attr.z.num_slices : 1);
 
 	zctx_lock(zctx);
 	/* High priority for ENQA. */
@@ -226,9 +229,14 @@ static int zhpe_ctx_qalloc(struct zhpe_ctx *zctx)
 	zctx->tx_size = zctx->ztq_hi->tqinfo.cmdq.ent * 2;
 	/* Low priority for RMA. */
 	for (i = 0; i < ZHPE_MAX_SLICES; i++) {
-		/* ZZZ: Traffic class? */
+		/*
+		 * Start with same queue as high priority queue.
+		 * ZZZ: Traffic class?
+		 */
+		slice = ((i + zctx->ztq_hi->tqinfo.slice) &
+			 (ZHPE_MAX_SLICES - 1));
 		ret = zhpeq_tq_alloc(zqdom, tx_size, tx_size, 0, ZHPEQ_PRIO_LO,
-				     SLICE_DEMAND | (1U << i),
+				     SLICE_DEMAND | (1U << slice),
 				     &zctx->ztq_lo[zctx->tx_ztq_slices]);
 		if (ret < 0) {
 			if (ret == -ENOENT)
@@ -236,7 +244,7 @@ static int zhpe_ctx_qalloc(struct zhpe_ctx *zctx)
 			ZHPE_LOG_ERROR("zhpeq_tq_alloc() error %d\n", ret);
 			goto done;
 		}
-		if (++(zctx->tx_ztq_slices) >= zhpeq_attr.z.num_slices)
+		if (++(zctx->tx_ztq_slices) >= queues)
 			break;
 	}
 	if (!zctx->tx_ztq_slices) {
