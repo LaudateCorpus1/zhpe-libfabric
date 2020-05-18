@@ -359,6 +359,7 @@ static void tx_handle_rx_get_buf(struct zhpe_tx_entry *tx_entry,
 	default:
 		ZHPE_LOG_ERROR("rx_entry %p in bad state %d\n",
 			       rx_entry, rx_entry->rx_state);
+		abort();
 	}
 }
 
