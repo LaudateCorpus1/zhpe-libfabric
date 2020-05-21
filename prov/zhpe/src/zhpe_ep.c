@@ -212,11 +212,9 @@ static int zhpe_ctx_qalloc(struct zhpe_ctx *zctx)
 	size_t			i;
 	struct sockaddr_zhpe	sz;
 	uint32_t		qspecific;
-	uint8_t			queues;
 	int			slice;
 
 	manual = (zdom->util_domain.data_progress == FI_PROGRESS_MANUAL);
-	queues = (zhpe_ep_queue_per_slice ? zhpeq_attr.z.num_slices : 1);
 
 	zctx_lock(zctx);
 	/* High priority for ENQA. */
@@ -244,7 +242,8 @@ static int zhpe_ctx_qalloc(struct zhpe_ctx *zctx)
 			ZHPE_LOG_ERROR("zhpeq_tq_alloc() error %d\n", ret);
 			goto done;
 		}
-		if (++(zctx->tx_ztq_slices) >= queues)
+		zctx->tx_ztq_slices++;
+		if (!zhpe_ep_queue_per_slice)
 			break;
 	}
 	if (!zctx->tx_ztq_slices) {

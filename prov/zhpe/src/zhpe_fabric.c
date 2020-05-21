@@ -36,8 +36,6 @@
 
 #define ZHPE_SUBSYS	FI_LOG_FABRIC
 
-struct zhpeq_attr		zhpeq_attr;
-
 static struct fi_ops_fabric zhpe_fab_ops = {
 	.size			= sizeof(struct fi_ops_fabric),
 	.domain			= zhpe_domain,
@@ -414,13 +412,10 @@ int zhpe_getinfo(uint32_t api_version, const char *node, const char *service,
 	struct fi_info		*info;
 
 	/*
-	 * This routine returns either zero or -FI_ENODATA. Other errors
+	 * zhpe_getinfo() returns either zero or -FI_ENODATA. Other errors
 	 * will be logged, but not returned to the caller.
-	 *
-	 * NOTE: zhpeq_init() has internal locking and will guarantee
-	 * that zhpeq_attr is updated only once.
 	 */
-	rc = zhpeq_init(ZHPEQ_API_VERSION, &zhpeq_attr);
+	rc = zhpeq_init(ZHPEQ_API_VERSION, NULL);
 	if (rc < 0) {
 		ZHPE_LOG_ERROR("zhpeq_init() error %d:%s\n",
 			       rc, fi_strerror(-rc));

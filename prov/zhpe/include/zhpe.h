@@ -115,7 +115,6 @@ extern int			zhpe_ep_rx_poll_timeout;
 extern size_t			zhpe_ep_max_eager_sz;
 extern int			zhpe_mr_cache_enable;
 
-extern struct zhpeq_attr	zhpeq_attr;
 extern struct fi_fabric_attr	zhpe_fabric_attr;
 extern struct fi_domain_attr	zhpe_domain_attr;
 extern struct fi_info		zhpe_info_msg;

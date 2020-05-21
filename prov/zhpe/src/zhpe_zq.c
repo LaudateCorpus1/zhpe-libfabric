@@ -394,7 +394,7 @@ void zhpe_iov_rma(struct zhpe_tx_entry *tx_entry,
 		opi = iov_rma_puti;
 	}
 
-	for (i = 0; i < zhpeq_attr.z.num_slices; i++) {
+	for (i = 0; i < zctx->tx_ztq_slices; i++) {
 		ztq = zctx->ztq_lo[zctx->tx_ztq_rotor++];
 		if (OFI_UNLIKELY(zctx->tx_ztq_rotor >= zctx->tx_ztq_slices))
 			zctx->tx_ztq_rotor = 0;
