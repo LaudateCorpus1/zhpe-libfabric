@@ -1212,10 +1212,6 @@ static void rx_handle_msg_send(struct zhpe_conn *conn, struct zhpe_msg *msg)
 
 static void rx_handle_msg(struct zhpe_conn *conn, struct zhpe_msg *msg)
 {
-	zhpe_stats_stamp_dbg(__func__, __LINE__,
-			     (uintptr_t)conn, (uintptr_t)msg, msg->hdr.op,
-			     ntohl(msg->hdr.seqn));
-
 	switch (msg->hdr.op) {
 
 	case ZHPE_OP_CONNECT2:
@@ -1319,11 +1315,15 @@ void zhpe_rx_oos_free(struct zhpeq_rx_seq *zseq, struct zhpeq_rx_oos *rx_oos)
 	return zhpe_buf_free(&conn->zctx->rx_oos_pool, rx_oos);
 }
 
-static void rx_oos_msg_handler(void *handler_data,
-			       struct zhpe_enqa_payload *epay)
+static void rx_oos_msg_handler(void *handler_data, struct zhpe_rdm_entry *rqe)
 {
 	struct zhpe_conn	*conn = handler_data;
-	struct zhpe_msg		*msg = (void *)epay;
+	struct zhpe_msg		*msg = (void *)&rqe->payload;
+
+	zhpe_stats_stamp_dbg(__func__, __LINE__,
+			     (uintptr_t)conn, (uintptr_t)msg,
+			     msg->hdr.op,  ntohl(msg->hdr.seqn));
+	zhpe_stats_stamp_dbgc(rqe->hdr.sgcid, rqe->hdr.reqctxid, 0, 0, 0, 0);
 
 	rx_handle_msg(conn, msg);
 }
@@ -1335,6 +1335,11 @@ static void rx_oos_msg_handler_connected(struct zhpe_conn *conn,
 	uint32_t		rx_seq = ntohl(msg->hdr.seqn);
 
 	if (rx_seq == conn->rx_zseq.seq) {
+		zhpe_stats_stamp_dbg(__func__, __LINE__,
+				     (uintptr_t)conn, (uintptr_t)msg,
+				     msg->hdr.op, rx_seq);
+		zhpe_stats_stamp_dbgc(rqe->hdr.sgcid, rqe->hdr.reqctxid,
+				      0, 0, 0, 0);
 		rx_handle_msg(conn, msg);
 		conn->rx_zseq.seq++;
 		zhpeq_rx_oos_spill(&conn->rx_zseq, UINT32_MAX,
@@ -1352,6 +1357,11 @@ void zhpe_rx_msg_handler_connected(struct zhpe_conn *conn,
 	uint32_t		rx_seq = ntohl(msg->hdr.seqn);
 
 	if (OFI_LIKELY(rx_seq == conn->rx_zseq.seq)) {
+		zhpe_stats_stamp_dbg(__func__, __LINE__,
+				     (uintptr_t)conn, (uintptr_t)msg,
+				     msg->hdr.op, rx_seq);
+		zhpe_stats_stamp_dbgc(rqe->hdr.sgcid, rqe->hdr.reqctxid,
+				      0, 0, 0, 0);
 		rx_handle_msg(conn, msg);
 		conn->rx_zseq.seq++;
 	} else {
@@ -1420,6 +1430,8 @@ static void ctx_progress_ztq(struct zhpe_ctx *zctx, struct zhpeq_tq *ztq)
 
 	while (OFI_LIKELY((cqe = zhpeq_tq_cq_entry(ztq)) != NULL)) {
 		tx_entry = zhpeq_tq_cq_context(ztq, cqe);
+		zhpe_stats_stamp_dbg(__func__, __LINE__,
+				     (uintptr_t)tx_entry, 0, 0, 0);
 		tx_entry->conn->tx_queued--;
 		zctx->tx_queued--;
 		assert(zctx->tx_queued >= 0);
