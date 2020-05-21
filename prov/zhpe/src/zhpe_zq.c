@@ -424,6 +424,12 @@ void zhpe_iov_rma(struct zhpe_tx_entry *tx_entry,
 			lptr = zhpe_iov_state_ptr(lstate);
 			rza = zhpe_iov_state_addr(rstate);
 
+			zhpe_stats_stamp_dbg(__func__, __LINE__,
+					     (uintptr_t)tx_entry,
+					     ztq->tqinfo.slice, reservation, 0);
+			zhpe_stats_stamp_dbgc((uintptr_t)lptr, rza, len,
+					      0, 0, 0);
+
 			/* Optimize short transfers; matters less if big. */
 			if (OFI_LIKELY(len <= ZHPEQ_MAX_IMM))
 				opi(wqe, lptr, len, rza);

@@ -587,12 +587,12 @@ static int send_inline(struct zhpe_ctx *zctx, void *op_context, uint64_t tag,
 		send_inline_msg1(conn, wqe[0], buf, len, op, op_zflags, tag,
 				 cq_data, tx_entry->cmp_idx);
 		zhpeq_tq_insert(zctx->ztq_hi, reservation[0]);
-		zhpe_stats_stamp_dbg(__func__, __LINE__, (uintptr_t)conn,
-				     ntohs(conn->rem_conn_idxn), op,
-				     conn->tx_seq - 1);
 		zhpe_stats_stamp_dbg(__func__, __LINE__,
 				     (uintptr_t)tx_entry, tx_entry->cmp_idx,
-				     reservation[0], 0);
+				     (uintptr_t)conn, op);
+		zhpe_stats_stamp_dbgc(ntohs(conn->rem_conn_idxn),
+				      conn->tx_seq - 1, reservation[0],
+				      0, 0, 0);
 	} else {
 		tx_entry->cstat.completions++;
 		zhpe_tx_reserve(zctx->ztq_hi, tx_entry, 2, wqe, reservation);
@@ -605,12 +605,12 @@ static int send_inline(struct zhpe_ctx *zctx, void *op_context, uint64_t tag,
 		send_inline_msg2(conn, wqe[1], buf, len);
 		zhpeq_tq_insert(zctx->ztq_hi, reservation[0]);
 		zhpeq_tq_insert(zctx->ztq_hi, reservation[1]);
-		zhpe_stats_stamp_dbg(__func__, __LINE__, (uintptr_t)conn,
-				     ntohs(conn->rem_conn_idxn), op,
-				     conn->tx_seq - 2);
 		zhpe_stats_stamp_dbg(__func__, __LINE__,
 				     (uintptr_t)tx_entry, tx_entry->cmp_idx,
-				     reservation[0], reservation[1]);
+				     (uintptr_t)conn, op);
+		zhpe_stats_stamp_dbgc(ntohs(conn->rem_conn_idxn),
+				      conn->tx_seq - 2, reservation[0],
+				      reservation[1], 0, 0);
 	}
 	zhpeq_tq_commit(zctx->ztq_hi);
 	zctx->pe_ctx_ops->signal(zctx);
@@ -782,12 +782,12 @@ static int send_iov(struct zhpe_ctx *zctx, void *op_context, uint64_t tag,
 				  uiov_cnt, tx_entry->cmp_idx);
 		send_iov_iov(wqe[0], i, &uiov[0]);
 		zhpeq_tq_insert(zctx->ztq_hi, reservation[0]);
-		zhpe_stats_stamp_dbg(__func__, __LINE__, (uintptr_t)conn,
-				     ntohs(conn->rem_conn_idxn), op,
-				     conn->tx_seq - 1);
 		zhpe_stats_stamp_dbg(__func__, __LINE__,
 				     (uintptr_t)tx_entry, tx_entry->cmp_idx,
-				     reservation[0], 0);
+				     (uintptr_t)conn, op);
+		zhpe_stats_stamp_dbgc(ntohs(conn->rem_conn_idxn),
+				      conn->tx_seq - 1, reservation[0],
+				      0, 0, 0);
 		goto done_unlock;
 	}
 
@@ -805,12 +805,12 @@ static int send_iov(struct zhpe_ctx *zctx, void *op_context, uint64_t tag,
 		send_iov_iov(wqe[1], 0, &uiov[1]);
 		zhpeq_tq_insert(zctx->ztq_hi, reservation[0]);
 		zhpeq_tq_insert(zctx->ztq_hi, reservation[1]);
-		zhpe_stats_stamp_dbg(__func__, __LINE__, (uintptr_t)conn,
-				     ntohs(conn->rem_conn_idxn), op,
-				     conn->tx_seq - 2);
 		zhpe_stats_stamp_dbg(__func__, __LINE__,
 				     (uintptr_t)tx_entry, tx_entry->cmp_idx,
-				     reservation[0], reservation[1]);
+				     (uintptr_t)conn, op);
+		zhpe_stats_stamp_dbgc(ntohs(conn->rem_conn_idxn),
+				      conn->tx_seq - 2, reservation[0],
+				      reservation[1], 0, 0);
 	} else {
 		/* Fits in one message. */
 		zhpe_tx_reserve(zctx->ztq_hi, tx_entry, 1, wqe, reservation);
@@ -820,12 +820,12 @@ static int send_iov(struct zhpe_ctx *zctx, void *op_context, uint64_t tag,
 		i = send_iov_iov(wqe[0], i, &uiov[0]);
 		send_iov_iov(wqe[0], i, &uiov[1]);
 		zhpeq_tq_insert(zctx->ztq_hi, reservation[0]);
-		zhpe_stats_stamp_dbg(__func__, __LINE__, (uintptr_t)conn,
-				     ntohs(conn->rem_conn_idxn), op,
-				     conn->tx_seq - 1);
 		zhpe_stats_stamp_dbg(__func__, __LINE__,
 				     (uintptr_t)tx_entry, tx_entry->cmp_idx,
-				     reservation[0], 0);
+				     (uintptr_t)conn, op);
+		zhpe_stats_stamp_dbgc(ntohs(conn->rem_conn_idxn),
+				      conn->tx_seq - 1, reservation[0],
+				      0, 0, 0);
 	}
 
  done_unlock:
@@ -1621,22 +1621,22 @@ void zhpe_msg_prov_no_eflags(struct zhpe_conn *conn, uint8_t op,
 			     uint16_t cmp_idxn, uint32_t tx_seq)
 {
 	struct zhpe_ctx		*zctx = conn->zctx;
+	struct zhpe_tx_entry	*tx_entry = &conn->tx_entry_prov;
 	int32_t			reservation[1];
 	union zhpe_hw_wq_entry	*wqe[1];
 
 	/* Assume conn->zctx is locked. */
-	zhpe_tx_reserve(zctx->ztq_hi, &conn->tx_entry_prov, 1,
-			wqe, reservation);
+	zhpe_tx_reserve(zctx->ztq_hi, tx_entry, 1, wqe, reservation);
 	send_inline_special(conn, op, payload, paylen, conn->rem_conn_idxn,
 			    cmp_idxn, tx_seq, conn->tkey.rem_gcid,
 			    conn->rem_rspctxid, wqe[0]);
 	zhpeq_tq_insert(zctx->ztq_hi, reservation[0]);
 	zhpeq_tq_commit(zctx->ztq_hi);
-	zhpe_stats_stamp_dbg(__func__, __LINE__, (uintptr_t)conn,
-			     ntohs(conn->rem_conn_idxn), op, tx_seq);
 	zhpe_stats_stamp_dbg(__func__, __LINE__,
-			     (uintptr_t)&conn->tx_entry_prov, 0,
-			     reservation[0], 0);
+			     (uintptr_t)tx_entry, tx_entry->cmp_idx,
+			     (uintptr_t)conn, op);
+	zhpe_stats_stamp_dbgc(ntohs(conn->rem_conn_idxn),
+			      tx_seq, reservation[0], 0, 0, 0);
 	/* Need to signal only from user contexts. */
 }
 
@@ -1654,21 +1654,20 @@ void zhpe_msg_connect(struct zhpe_ctx *zctx, uint8_t op,
 		      uint32_t dgcid, uint32_t rspctxid)
 {
 	struct zhpe_conn	*conn = zctx->conn0;
+	struct zhpe_tx_entry	*tx_entry = &conn->tx_entry_prov;
 	int32_t			reservation[1];
 	union zhpe_hw_wq_entry	*wqe[1];
 
 	/* Assume conn->zctx is locked. */
-	zhpe_tx_reserve(zctx->ztq_hi, &conn->tx_entry_prov, 1,
-			wqe, reservation);
+	zhpe_tx_reserve(zctx->ztq_hi, tx_entry, 1, wqe, reservation);
 	send_inline_special(conn, op, payload, paylen, 0, 0, tx_seq,
 			    dgcid, rspctxid, wqe[0]);
 	zhpeq_tq_insert(zctx->ztq_hi, reservation[0]);
 	zhpeq_tq_commit(zctx->ztq_hi);
-	zhpe_stats_stamp_dbg(__func__, __LINE__, (uintptr_t)conn,
-			     ntohs(conn->rem_conn_idxn), op, tx_seq);
 	zhpe_stats_stamp_dbg(__func__, __LINE__,
-			     (uintptr_t)&conn->tx_entry_prov, 0,
-			     reservation[0], 0);
+			     (uintptr_t)tx_entry, tx_entry->cmp_idx,
+			     (uintptr_t)conn, op);
+	zhpe_stats_stamp_dbgc(0, tx_seq, reservation[0], 0, 0, 0);
 	zctx->pe_ctx_ops->signal(zctx);
 }
 

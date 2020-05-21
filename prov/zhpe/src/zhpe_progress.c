@@ -59,9 +59,6 @@ void zhpe_send_status(struct zhpe_conn *conn, uint16_t cmp_idxn, int32_t status)
 	/* cmp_idxn is in network byte order. */
 	assert(ntohs(cmp_idxn));
 
-	zhpe_stats_stamp_dbg(__func__, __LINE__,
-			     0, ntohs(cmp_idxn), status, conn->tx_seq);
-
 	assert((int16_t)status == status);
 	msg_status.statusn = htons(status);
 
@@ -331,7 +328,7 @@ static void tx_handle_rx_get_buf(struct zhpe_tx_entry *tx_entry,
 
 	zhpe_stats_stamp_dbg(__func__, __LINE__,
 			     (uintptr_t)rx_entry, ntohs(rx_entry->src_cmp_idxn),
-			     0, 0);
+			     rx_entry->rx_state, 0);
 
 	switch (rx_entry->rx_state) {
 
@@ -725,6 +722,10 @@ static void rx_send_start_rnd(struct zhpe_rx_entry *rx_entry)
 void zhpe_rx_start_recv(struct zhpe_rx_entry *rx_matched,
 			enum zhpe_rx_state rx_state)
 {
+	zhpe_stats_stamp_dbg(__func__, __LINE__,
+			     (uintptr_t)rx_matched,
+			     ntohs(rx_matched->src_cmp_idxn), rx_state, 0);
+
 	/* zctx_lock must be locked. */
 	switch (rx_state) {
 
@@ -781,6 +782,11 @@ void zhpe_rx_start_recv_user(struct zhpe_rx_entry *rx_matched,
 	struct zhpe_ctx		*zctx = rx_matched->zctx;
 	int			rc;
 	size_t			len;
+
+	zhpe_stats_stamp_dbg(__func__, __LINE__,
+			     (uintptr_t)rx_matched,
+			     ntohs(rx_matched->src_cmp_idxn),
+			     rx_matched->rx_state, 0);
 
 	/* zctx_lock must be locked. */
 	rc = zhpe_get_uiov_len(uiov, uiov_cnt, &rx_matched->total_user);

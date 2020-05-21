@@ -278,6 +278,8 @@ static int zhpe_ctx_qalloc(struct zhpe_ctx *zctx)
 		memcpy(zep->uuid, sz.sz_uuid, sizeof(zep->uuid));
 	zctx->lcl_gcid = zhpeu_uuid_to_gcid(sz.sz_uuid);
 	zctx->lcl_rspctxid = ntohl(sz.sz_queue);
+	zhpe_stats_stamp_dbg(__func__, __LINE__,
+			     zctx->lcl_gcid, zctx->lcl_rspctxid, 0, 0);
 
 	/* Allocate the ctx_ptrs array twice the size of the cmdq. */
 	i = zctx->ztq_hi->tqinfo.cmdq.ent * 2;

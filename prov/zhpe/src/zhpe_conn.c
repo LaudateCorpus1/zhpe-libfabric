@@ -157,16 +157,19 @@ static bool conn_dequeue_wqe(struct zhpe_conn *conn,
 		if (OFI_UNLIKELY(tx_entry->cmp_idx))
 			msg->hdr.cmp_idxn = htons(tx_entry->cmp_idx);
 		msg->hdr.retry = retry_idx;
-	}
+		zhpe_stats_stamp_dbg(__func__, __LINE__,
+				     (uintptr_t)tx_entry, tx_entry->cmp_idx,
+				     reservation, be64toh(msg->hdr.seqn));
+	} else
+		zhpe_stats_stamp_dbg(__func__, __LINE__,
+				     (uintptr_t)tx_entry, tx_entry->cmp_idx,
+				     reservation, 0);
 
 	conn->tx_queued++;
 	/* "Consumes" the zctx->tx_queued that was added when queued. */
 	tx_entry->cstat.flags &= ~ZHPE_CS_FLAG_QUEUED;
 	zhpeq_tq_set_context(zctx->ztq_hi, reservation, tx_entry);
 	zhpeq_tq_insert(zctx->ztq_hi, reservation);
-	zhpe_stats_stamp_dbg(__func__, __LINE__,
-			     (uintptr_t)tx_entry, tx_entry->cmp_idx,
-			     reservation, conn->tx_seq - 1);
 	zhpeq_tq_commit(zctx->ztq_hi);
 	zctx->pe_ctx_ops->signal(zctx);
 	dlist_remove(&txqe->dentry);

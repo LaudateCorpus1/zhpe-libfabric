@@ -87,9 +87,6 @@ void zhpe_rma_rkey_import(struct zhpe_conn *conn, uint64_t key,
 	assert_always(rbnode != NULL);
 	rkey = rbnode->data;
 	if (OFI_LIKELY(blob_len)) {
-		zhpe_stats_stamp_dbg(__func__, __LINE__,
-				     (uintptr_t)rbnode, tkey.rem_gcid,
-				     tkey.rem_rspctxid, tkey.key);
 		rc = zhpeq_qkdata_import(zctx2zdom(zctx)->zqdom,
 					 conn->addr_cookie, blob, blob_len,
 					 &rkey->qkdata);
@@ -98,11 +95,18 @@ void zhpe_rma_rkey_import(struct zhpe_conn *conn, uint64_t key,
 		assert_always(!rc);
 		if (conn->rem_rma_flags & FI_ZHPE_RMA_ZERO_OFF)
 			rkey->offset = rkey->qkdata->z.vaddr;
+		zhpe_stats_stamp_dbg(__func__, __LINE__,
+				     tkey.rem_gcid, tkey.rem_rspctxid,
+				     tkey.key, (uintptr_t)rkey);
+		zhpe_stats_stamp_dbgc(rkey->qkdata->z.vaddr,
+				      rkey->qkdata->z.len,
+				      rkey->qkdata->z.zaddr,
+				      rkey->qkdata->z.access, rkey->offset, 0);
 		status = 0;
 	} else {
 		zhpe_stats_stamp_dbg(__func__, __LINE__,
-				     (uintptr_t)rbnode, tkey.rem_gcid,
-				     tkey.rem_rspctxid, tkey.key);
+				     tkey.rem_gcid, tkey.rem_rspctxid,
+				     tkey.key, (uintptr_t)rkey);
 		ofi_rbmap_delete(&zctx->rkey_tree, rbnode);
 		status = -FI_ENOKEY;
 	}
@@ -133,11 +137,11 @@ void zhpe_rma_rkey_revoke(struct zhpe_conn *conn, uint64_t key)
 
 	/* Sequencing and locking on the sender means the entry must exist. */
 	rbnode = ofi_rbmap_find(&zctx->rkey_tree, &tkey);
-	zhpe_stats_stamp_dbg(__func__, __LINE__,
-			     (uintptr_t)rbnode, tkey.rem_gcid,
-			     tkey.rem_rspctxid, tkey.key);
 	assert_always(rbnode);
 	rkey = rbnode->data;
+	zhpe_stats_stamp_dbg(__func__, __LINE__,
+			     tkey.rem_gcid, tkey.rem_rspctxid,
+			     tkey.key, (uintptr_t)rkey);
 	ofi_rbmap_delete(&zctx->rkey_tree, rbnode);
 	zhpe_rma_rkey_put(rkey);
 }
@@ -161,8 +165,8 @@ zhpe_rma_rkey_lookup(struct zhpe_conn *conn, uint64_t key,
 
 	rbnode = ofi_rbmap_find(&zctx->rkey_tree, &tkey);
 	zhpe_stats_stamp_dbg(__func__, __LINE__,
-			     (uintptr_t)rbnode, tkey.rem_gcid,
-			     tkey.rem_rspctxid, tkey.key);
+			     tkey.rem_gcid, tkey.rem_rspctxid, tkey.key,
+			     (uintptr_t)(rbnode ? rbnode->data : NULL));
 	if (OFI_UNLIKELY(!rbnode)) {
 		rkey = xmalloc(sizeof(*rkey));
 		rkey->tkey = tkey;
@@ -195,16 +199,22 @@ static void rma_rkey_fixup(struct zhpe_rma_entry *rma_entry)
 	int			rc;
 	struct zhpe_iov3	*riov;
 	uint32_t		qaccess;
+	uint64_t		pre_base;
 
 	if (OFI_UNLIKELY(!rma_entry->rstate.cnt))
 		return;
 	qaccess = (rma_entry->tx_entry.rma_get ? ZHPEQ_MR_GET_REMOTE :
 		   ZHPEQ_MR_PUT_REMOTE);
 	riov = rma_entry->riov;
+	pre_base = riov->iov_base;
 	riov->iov_base += riov->iov_rkey->offset;
 	rc = zhpeq_rem_key_access(riov->iov_rkey->qkdata, riov->iov_base,
 				  riov->iov_len, qaccess, &riov->iov_base);
 	zhpe_cstat_update_status(&rma_entry->tx_entry.cstat, rc);
+	zhpe_stats_stamp_dbg(__func__, __LINE__,
+			     rma_entry->tx_entry.conn->tkey.rem_gcid,
+			     rma_entry->tx_entry.conn->rem_rspctxid,
+			     pre_base, riov->iov_base);
 	if (rma_entry->rstate.cnt > 1) {
 		riov++;
 		riov->iov_base += riov->iov_rkey->offset;
@@ -280,6 +290,9 @@ void zhpe_rma_tx_start(struct zhpe_rma_entry *rma_entry)
 					    rma_entry->cq_data);
 	}
 
+	zhpe_stats_stamp_dbg(__func__, __LINE__,
+			     (uintptr_t)tx_entry, tx_entry->cstat.status,
+			     0, 0);
 	zhpe_rma_complete(rma_entry);
 }
 
@@ -332,6 +345,8 @@ static int rma_iov_op(struct zhpe_ctx *zctx, void *op_context, uint64_t cq_data,
 
 	if (OFI_UNLIKELY(zctx->zep->disabled))
 		return -FI_EOPBADSTATE;
+
+	zhpe_stats_stamp_dbg(__func__, __LINE__, 0, 0, 0, 0);
 
 	zctx_lock(zctx);
 	zhpe_stats_start(zhpe_stats_subid(RMA, 10));

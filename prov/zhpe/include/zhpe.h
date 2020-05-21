@@ -1596,6 +1596,8 @@ static inline void zhpe_conn_flags_set(struct zhpe_conn *conn, uint8_t flags)
 		dlist_insert_tail(&conn->tx_dequeue_dentry,
 				  &conn->zctx->tx_dequeue_list);
 	conn->flags |= flags | ZHPE_CONN_FLAG_CLEANUP;
+	zhpe_stats_stamp_dbg(__func__, __LINE__,
+			     (uintptr_t)conn, flags, conn->flags, 0);
 }
 
 static inline void zhpe_conn_fence_check(struct zhpe_tx_entry *tx_entry,
