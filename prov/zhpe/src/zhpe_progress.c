@@ -1353,7 +1353,7 @@ static void rx_oos_msg_handler_connected(struct zhpe_conn *conn,
 		if (unlikely(!conn->rx_zseq.rx_oos_list))
 			conn->rx_msg_handler = zhpe_rx_msg_handler_connected;
 	} else
-		zhpeq_rx_oos_insert(&conn->rx_zseq, (void *)msg, rx_seq);
+		zhpeq_rx_oos_insert(&conn->rx_zseq, rqe, rx_seq);
 }
 
 void zhpe_rx_msg_handler_connected(struct zhpe_conn *conn,
@@ -1371,7 +1371,7 @@ void zhpe_rx_msg_handler_connected(struct zhpe_conn *conn,
 		rx_handle_msg(conn, msg);
 		conn->rx_zseq.seq++;
 	} else {
-		zhpeq_rx_oos_insert(&conn->rx_zseq, (void *)msg, rx_seq);
+		zhpeq_rx_oos_insert(&conn->rx_zseq, rqe, rx_seq);
 		conn->rx_msg_handler = rx_oos_msg_handler_connected;
 	}
 }
