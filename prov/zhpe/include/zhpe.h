@@ -815,12 +815,12 @@ static inline uint64_t zhpe_iov_state_avail(const struct zhpe_iov_state *state)
 
 bool zhpe_iov_state_adv(struct zhpe_iov_state *state, uint64_t incr);
 uint64_t zhpe_iov_state_avail(const struct zhpe_iov_state *state);
-uint64_t zhpe_copy_iov(struct zhpe_iov_state *dstate,
+uint64_t zhpe_iov_copy(struct zhpe_iov_state *dstate,
 		       struct zhpe_iov_state *sstate);
-uint64_t zhpe_copy_iov_to_mem(void *dst, uint64_t dst_len,
+uint64_t zhpe_iov_copy_to_mem(void *dst, uint64_t dst_len,
 			      struct zhpe_iov_state *sstate);
-uint64_t zhpe_copy_mem_to_iov(struct zhpe_iov_state *dstate, const void *src,
-			      uint64_t src_len);
+uint64_t zhpe_iov_copy_from_mem(struct zhpe_iov_state *dstate, const void *src,
+				uint64_t src_len);
 void zhpe_iov_rma(struct zhpe_tx_entry *tx_entry,
 		  uint64_t max_seg_bytes, uint32_t max_seg_ops);
 

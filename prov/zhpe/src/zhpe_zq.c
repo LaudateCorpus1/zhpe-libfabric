@@ -535,7 +535,7 @@ bool zhpe_iov_state_adv(struct zhpe_iov_state *state, uint64_t incr)
 	return (state->idx >= state->cnt);
 }
 
-uint64_t zhpe_copy_iov(struct zhpe_iov_state *dstate,
+uint64_t zhpe_iov_copy(struct zhpe_iov_state *dstate,
 		       struct zhpe_iov_state *sstate)
 {
 	uint64_t		ret = 0;
@@ -565,7 +565,7 @@ uint64_t zhpe_copy_iov(struct zhpe_iov_state *dstate,
 	return ret;
 }
 
-uint64_t zhpe_copy_iov_to_mem(void *dst, uint64_t dst_len,
+uint64_t zhpe_iov_copy_to_mem(void *dst, uint64_t dst_len,
 			      struct zhpe_iov_state *sstate)
 {
 	struct iovec		diov = {
@@ -578,11 +578,11 @@ uint64_t zhpe_copy_iov_to_mem(void *dst, uint64_t dst_len,
 		.cnt		= 1,
 	};
 
-	return zhpe_copy_iov(&dstate, sstate);
+	return zhpe_iov_copy(&dstate, sstate);
 }
 
-uint64_t zhpe_copy_mem_to_iov(struct zhpe_iov_state *dstate, const void *src,
-			    uint64_t src_len)
+uint64_t zhpe_iov_copy_from_mem(struct zhpe_iov_state *dstate, const void *src,
+				uint64_t src_len)
 {
 	struct iovec		siov = {
 		.iov_base	= (void *)src,
@@ -594,7 +594,7 @@ uint64_t zhpe_copy_mem_to_iov(struct zhpe_iov_state *dstate, const void *src,
 		.cnt		= 1,
 	};
 
-	return zhpe_copy_iov(dstate, &sstate);
+	return zhpe_iov_copy(dstate, &sstate);
 }
 
 char *zhpe_straddr(char *buf, size_t *len,

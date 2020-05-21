@@ -352,7 +352,7 @@ static int rma_iov_op(struct zhpe_ctx *zctx, void *op_context, uint64_t cq_data,
 					       &rma_entry->lstate);
 			zhpe_stats_stop(zhpe_stats_subid(RMA, 20));
 			if (!get && (op_flags & FI_INJECT)) {
-				zhpe_copy_iov_to_mem(rma_entry->inline_data,
+				zhpe_iov_copy_to_mem(rma_entry->inline_data,
 						     total, &rma_entry->lstate);
 				zhpe_iov_state_reset(&rma_entry->lstate);
 				rma_entry->lstate.cnt = 1;

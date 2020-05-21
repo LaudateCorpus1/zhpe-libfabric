@@ -352,7 +352,7 @@ static void tx_handle_rx_get_buf(struct zhpe_tx_entry *tx_entry,
 	case ZHPE_RX_STATE_EAGER_CLAIMED:
 		zhpe_iov_state_reset(&rx_entry->lstate);
 		zhpe_iov_state_reset(&rx_entry->bstate);
-		zhpe_copy_iov(&rx_entry->lstate, &rx_entry->bstate);
+		zhpe_iov_copy(&rx_entry->lstate, &rx_entry->bstate);
 		zhpe_rx_complete(rx_entry, rx_entry->tx_entry.cstat.status);
 		break;
 
@@ -744,7 +744,7 @@ void zhpe_rx_start_recv(struct zhpe_rx_entry *rx_matched,
 	case ZHPE_RX_STATE_EAGER_DONE:
 		zhpe_iov_state_reset(&rx_matched->lstate);
 		zhpe_iov_state_reset(&rx_matched->bstate);
-		zhpe_copy_iov(&rx_matched->lstate, &rx_matched->bstate);
+		zhpe_iov_copy(&rx_matched->lstate, &rx_matched->bstate);
 		zhpe_rx_complete(rx_matched, rx_matched->tx_entry.cstat.status);
 		break;
 
@@ -755,9 +755,9 @@ void zhpe_rx_start_recv(struct zhpe_rx_entry *rx_matched,
 			return;
 		}
 		zhpe_iov_state_reset(&rx_matched->lstate);
-		zhpe_copy_mem_to_iov(&rx_matched->lstate,
-				     rx_matched->inline_data,
-				     rx_matched->total_wire);
+		zhpe_iov_copy_from_mem(&rx_matched->lstate,
+				       rx_matched->inline_data,
+				       rx_matched->total_wire);
 		zhpe_rx_complete(rx_matched, 0);
 		break;
 
@@ -842,7 +842,7 @@ void zhpe_rx_start_recv_user(struct zhpe_rx_entry *rx_matched,
 		case ZHPE_RX_STATE_EAGER_DONE:
 			zhpe_iov_state_reset(&rx_matched->lstate);
 			zhpe_iov_state_reset(&rx_matched->bstate);
-			zhpe_copy_iov(&rx_matched->lstate, &rx_matched->bstate);
+			zhpe_iov_copy(&rx_matched->lstate, &rx_matched->bstate);
 			zhpe_rx_complete(rx_matched,
 					 rx_matched->tx_entry.cstat.status);
 			break;
@@ -866,7 +866,7 @@ void zhpe_rx_start_recv_user(struct zhpe_rx_entry *rx_matched,
 				       &rx_matched->lstate);
 		zhpe_iov_state_reset(&rx_matched->lstate);
 		zhpe_iov_state_reset(&rx_matched->bstate);
-		zhpe_copy_iov(&rx_matched->lstate, &rx_matched->bstate);
+		zhpe_iov_copy(&rx_matched->lstate, &rx_matched->bstate);
 		zhpe_rx_complete(rx_matched, rx_matched->tx_entry.cstat.status);
 		break;
 
@@ -874,9 +874,9 @@ void zhpe_rx_start_recv_user(struct zhpe_rx_entry *rx_matched,
 		zhpe_get_uiov_buffered(uiov, udesc, uiov_cnt,
 				       &rx_matched->lstate);
 		zhpe_iov_state_reset(&rx_matched->lstate);
-		zhpe_copy_mem_to_iov(&rx_matched->lstate,
-				     rx_matched->inline_data,
-				     rx_matched->total_wire);
+		zhpe_iov_copy_from_mem(&rx_matched->lstate,
+				       rx_matched->inline_data,
+				       rx_matched->total_wire);
 		zhpe_rx_complete(rx_matched, 0);
 		break;
 
