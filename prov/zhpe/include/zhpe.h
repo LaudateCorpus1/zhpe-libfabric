@@ -1458,11 +1458,11 @@ void zhpe_rx_peek_recv(struct zhpe_ctx *zctx,
 		       struct zhpe_rx_match_info *user_info, uint64_t flags,
 		       struct fi_context *context);
 void zhpe_rx_discard_recv(struct zhpe_rx_entry *rx_entry);
-void zhpe_rx_start_recv_user(struct zhpe_rx_entry *rx_matched,
-			     const struct iovec *uiov, void **udesc,
-			     size_t uiov_cnt);
-void zhpe_rx_start_recv(struct zhpe_rx_entry *rx_matched,
-			enum zhpe_rx_state rx_state);
+void zhpe_rx_matched_user(struct zhpe_rx_entry *rx_matched,
+			  const struct iovec *uiov, void **udesc,
+			  size_t uiov_cnt);
+void zhpe_rx_matched_wire(struct zhpe_rx_entry *rx_matched,
+			  enum zhpe_rx_state rx_state);
 void zhpe_rx_complete(struct zhpe_rx_entry *rx_entry, int status);
 
 void zhpe_tx_call_handler(struct zhpe_tx_entry *tx_entry,

@@ -213,8 +213,8 @@ static int recv_peek_claim(struct zhpe_ctx *zctx,
 		rx_wire = ((struct fi_context *)msg->context)->internal[0];
 		rx_wire->op_context = msg->context;
 		rx_wire->op_flags |= op_flags;
-		zhpe_rx_start_recv_user(rx_wire, msg->msg_iov, msg->desc,
-					msg->iov_count);
+		zhpe_rx_matched_user(rx_wire, msg->msg_iov, msg->desc,
+				     msg->iov_count);
 		zctx_unlock(zctx);
 
 		return 0;
@@ -305,7 +305,7 @@ static int recv_iov(struct zhpe_ctx *zctx, const struct iovec *uiov,
 		rx_wire->total_user = total_user;
 		rx_wire->op_context = op_context;
 		rx_wire->op_flags |= op_flags;
-		zhpe_rx_start_recv_user(rx_wire, uiov, udesc, uiov_cnt);
+		zhpe_rx_matched_user(rx_wire, uiov, udesc, uiov_cnt);
 		zhpe_stats_stop(zhpe_stats_subid(RECV, 40));
 		zctx_unlock(zctx);
 
@@ -322,14 +322,15 @@ static int recv_iov(struct zhpe_ctx *zctx, const struct iovec *uiov,
 	dlist_insert_tail(&rx_user->dentry, &match_lists->user_list);
 	ZHPE_LOG_DBG("rx_user: %p zctx: %p flags: 0x%" PRIx64 "\n",
 		     rx_user, zctx, op_flags);
+	zhpe_stats_stamp_dbg(__func__, __LINE__, (uintptr_t)rx_user, 0, 0, 0);
 	if (OFI_UNLIKELY(!total_user)) {
 		rx_user->lstate_ready = true;
 		zctx_unlock(zctx);
 
 		return 0;
 	}
-
 	rx_user->lstate_ready = false;
+
 	/*
 	 * Unfortunately, regardless of the length of the receive
 	 * buffer, the sender can be trying to send a large message
@@ -365,7 +366,7 @@ static int recv_iov(struct zhpe_ctx *zctx, const struct iovec *uiov,
 	rx_user->lstate.held = true;
 	rx_user->lstate_ready = true;
 	if (rx_user->matched)
-		zhpe_rx_start_recv(rx_user, rx_user->rx_state);
+		zhpe_rx_matched_wire(rx_user, rx_user->rx_state);
 	zctx_unlock(zctx);
 
 	return 0;
