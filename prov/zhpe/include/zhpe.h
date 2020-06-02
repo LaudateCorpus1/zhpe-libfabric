@@ -907,7 +907,7 @@ struct zhpe_pe_ctx_ops {
 	void		(*signal)(struct zhpe_ctx *zctx);
 };
 
-extern struct zhpe_pe_ctx_ops zhpe_pe_ctx_ops_auto_rx_active;
+extern struct zhpe_pe_ctx_ops zhpe_pe_ctx_ops_auto_tx_idle;
 extern struct zhpe_pe_ctx_ops zhpe_pe_ctx_ops_manual;
 
 enum {

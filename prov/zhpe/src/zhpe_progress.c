@@ -1461,11 +1461,11 @@ static int ctx_progress_tx(struct zhpe_ctx *zctx)
 	return (zctx->tx_queued != 0);
 }
 
-static void pe_ctx_null_op(struct zhpe_ctx *zctx)
+static void pe_ctx_null_signal(struct zhpe_ctx *zctx)
 {
 }
 
-static int pe_ctx_null_progress_op(struct zhpe_pe *pe, struct zhpe_ctx *zctx)
+static int pe_ctx_null_progress(struct zhpe_pe *pe, struct zhpe_ctx *zctx)
 {
 	return 0;
 }
@@ -1475,7 +1475,7 @@ static int pe_ctx_progress_tx(struct zhpe_pe *pe, struct zhpe_ctx *zctx);
 
 static struct zhpe_pe_ctx_ops pe_ctx_ops_auto_tx_active = {
 	.progress	= pe_ctx_progress_tx,
-	.signal		= pe_ctx_null_op,
+	.signal		= pe_ctx_null_signal,
 };
 
 static void pe_ctx_signal(struct zhpe_ctx *zctx)
@@ -1485,19 +1485,19 @@ static void pe_ctx_signal(struct zhpe_ctx *zctx)
 	zhpeu_thr_wait_signal(&zctx2zdom(zctx)->pe->work_head.thr_wait);
 }
 
-static struct zhpe_pe_ctx_ops pe_ctx_ops_auto_tx_idle = {
-	.progress	= pe_ctx_progress_tx,
+struct zhpe_pe_ctx_ops zhpe_pe_ctx_ops_auto_tx_idle = {
+	.progress	= pe_ctx_null_progress,
 	.signal		= pe_ctx_signal,
 };
 
-struct zhpe_pe_ctx_ops zhpe_pe_ctx_ops_auto_rx_active = {
+static struct zhpe_pe_ctx_ops pe_ctx_ops_auto_rx_active = {
 	.progress	= pe_ctx_progress,
-	.signal		= pe_ctx_null_op,
+	.signal		= pe_ctx_null_signal,
 };
 
 struct zhpe_pe_ctx_ops zhpe_pe_ctx_ops_manual = {
-	.progress	= pe_ctx_null_progress_op,
-	.signal		= pe_ctx_null_op,
+	.progress	= pe_ctx_null_progress,
+	.signal		= pe_ctx_null_signal,
 };
 
 static int pe_ctx_age_rx(struct zhpe_pe *pe, struct zhpe_ctx *zctx)
@@ -1505,7 +1505,7 @@ static int pe_ctx_age_rx(struct zhpe_pe *pe, struct zhpe_ctx *zctx)
 	/* zctx_lock() must be held. */
 	if (zhpeq_rq_epoll_check(zctx->zrq, pe->now) &&
 	    zhpeq_rq_epoll_enable(zctx->zrq)) {
-		zctx->pe_ctx_ops = &pe_ctx_ops_auto_tx_idle;
+		zctx->pe_ctx_ops = &zhpe_pe_ctx_ops_auto_tx_idle;
 		return 0;
 	}
 
@@ -1516,7 +1516,7 @@ static int pe_ctx_age_tx(struct zhpe_pe *pe, struct zhpe_ctx *zctx)
 {
 	/* zctx_lock() must be held. */
 	if (zhpeq_rq_epoll_check(zctx->zrq, pe->now)) {
-		zctx->pe_ctx_ops = &pe_ctx_ops_auto_tx_idle;
+		zctx->pe_ctx_ops = &zhpe_pe_ctx_ops_auto_tx_idle;
 		return 0;
 	}
 
@@ -1589,7 +1589,7 @@ void zhpe_pe_epoll_handler(struct zhpeq_rq *zrq, void *handler_data)
 	struct zhpe_ctx		*zctx = handler_data;
 
 	zctx_lock(zctx);
-	zctx->pe_ctx_ops = &zhpe_pe_ctx_ops_auto_rx_active;
+	zctx->pe_ctx_ops = &pe_ctx_ops_auto_rx_active;
 	zctx_unlock(zctx);
 }
 

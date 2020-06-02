@@ -1076,7 +1076,7 @@ static int zhpe_ctx_alloc(struct zhpe_ep *zep, uint8_t ctx_idx,
 		zctx->pe_ctx_ops = &zhpe_pe_ctx_ops_manual;
 	} else {
 		progress = NULL;
-		zctx->pe_ctx_ops = &zhpe_pe_ctx_ops_auto_rx_active;
+		zctx->pe_ctx_ops = &zhpe_pe_ctx_ops_auto_tx_idle;
 	}
 
 	ret = ofi_endpoint_init(&zep->zdom->util_domain.domain_fid,
