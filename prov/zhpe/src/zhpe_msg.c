@@ -95,7 +95,7 @@ static int rx_match_info_init(struct zhpe_ctx *zctx, uint64_t opt_flags,
 	return 0;
 }
 
-static int get_buf_zmr(struct zhpe_ctx *zctx, void *base, size_t len,
+static int reg_buf_zmr(struct zhpe_ctx *zctx, void *base, size_t len,
 		       void *udesc, uint32_t qaccess, struct zhpe_mr **zmr_out)
 {
 	int			ret;
@@ -119,75 +119,85 @@ static int get_buf_zmr(struct zhpe_ctx *zctx, void *base, size_t len,
 	return ret;
 }
 
-int zhpe_get_uiov(struct zhpe_ctx *zctx,
-		  const struct iovec *uiov, void **udesc, size_t uiov_cnt,
-		  uint32_t qaccess, struct zhpe_iov3 *liov)
+int zhpe_reg_lstate(struct zhpe_ctx *zctx,
+		    uint32_t qaccess, struct zhpe_iov_state *lstate)
 {
 	int			rc;
+	struct zhpe_iov3	*liov = lstate->viov;
 	struct zhpe_mr		*zmr;
 
-	assert(uiov_cnt > 0);
-	assert(uiov_cnt <= ZHPE_EP_MAX_IOV);
-	liov[0].iov_base = (uintptr_t)uiov[0].iov_base;
-	liov[0].iov_len = uiov[0].iov_len;
-	rc = get_buf_zmr(zctx, uiov[0].iov_base, uiov[0].iov_len,
-			 udesc[0], qaccess, &zmr);
+	if (OFI_UNLIKELY(!lstate->cnt))
+		return 0;
+
+	rc = reg_buf_zmr(zctx, (void *)liov[0].iov_base, liov[0].iov_len,
+			 liov[0].iov_desc, qaccess, &zmr);
 	liov[0].iov_desc = zmr;
 	if (OFI_UNLIKELY(rc < 0))
 		return rc;
-	if (OFI_LIKELY(uiov_cnt == 1))
-		return 1;
-	liov[1].iov_base = (uintptr_t)uiov[1].iov_base;
-	liov[1].iov_len = uiov[1].iov_len;
-	rc = get_buf_zmr(zctx, uiov[1].iov_base, uiov[1].iov_len,
-			 udesc[1], qaccess, &zmr);
+
+	lstate->held = true;
+
+	if (OFI_LIKELY(lstate->cnt == 1))
+		return 0;
+
+	rc = reg_buf_zmr(zctx, (void *)liov[1].iov_base, liov[1].iov_len,
+			 liov[1].iov_desc, qaccess, &zmr);
 	liov[1].iov_desc = zmr;
 	if (OFI_UNLIKELY(rc < 0)) {
 		zhpe_dom_mr_put(liov[0].iov_desc);
+		lstate->held = false;
 		return rc;
 	}
 
 	return 2;
 }
 
-int zhpe_get_uiov_maxlen(struct zhpe_ctx *zctx,
-			 const struct iovec *uiov, void **udesc,
-			 size_t uiov_cnt, uint32_t qaccess, uint64_t maxlen,
-			 struct zhpe_iov3 *liov)
+int zhpe_reg_lstate_maxlen(struct zhpe_ctx *zctx,
+			   uint32_t qaccess, struct zhpe_iov_state *lstate,
+			   uint64_t maxlen)
 {
 	int			rc;
+	struct zhpe_iov3	*liov = lstate->viov;
 	struct zhpe_mr		*zmr;
 	uint64_t		len;
 
-	assert(uiov_cnt > 0);
-	assert(uiov_cnt <= ZHPE_EP_MAX_IOV);
-	assert(maxlen > 0);
-	liov[0].iov_base = (uintptr_t)uiov[0].iov_base;
-	len = max((uint64_t)uiov[0].iov_len, maxlen);
+	if (OFI_UNLIKELY(!lstate->cnt))
+		return 0;
+	if (OFI_UNLIKELY(!maxlen)) {
+		lstate->cnt = 0;
+		return 0;
+	}
+
+	len = min(liov[0].iov_len, maxlen);
 	maxlen -= len;
 	liov[0].iov_len = len;
-	rc = get_buf_zmr(zctx, uiov[0].iov_base, len,
-			 udesc[0], qaccess, &zmr);
+	rc = reg_buf_zmr(zctx, (void *)liov[0].iov_base, len,
+			 liov[0].iov_desc, qaccess, &zmr);
 	liov[0].iov_desc = zmr;
 	if (OFI_UNLIKELY(rc < 0))
 		return rc;
-	if (OFI_LIKELY(uiov_cnt == 1))
-		return 1;
-	if (OFI_UNLIKELY(!maxlen))
-		return 1;
-	liov[1].iov_base = (uintptr_t)uiov[1].iov_base;
-	len = max((uint64_t)uiov[1].iov_len, maxlen);
-	maxlen -= len;
+
+	lstate->held = true;
+
+	if (OFI_LIKELY(lstate->cnt == 1))
+		return 0;
+	if (OFI_UNLIKELY(!maxlen)) {
+		lstate->cnt = 1;
+		return 0;
+	}
+
+	len = min(liov[1].iov_len, maxlen);
 	liov[1].iov_len = len;
-	rc = get_buf_zmr(zctx, uiov[1].iov_base, len,
-			 udesc[1], qaccess, &zmr);
+	rc = reg_buf_zmr(zctx, (void *)liov[1].iov_base, len,
+			 liov[1].iov_desc, qaccess, &zmr);
 	liov[1].iov_desc = zmr;
 	if (OFI_UNLIKELY(rc < 0)) {
 		zhpe_dom_mr_put(liov[0].iov_desc);
+		lstate->held = false;
 		return rc;
 	}
 
-	return 2;
+	return 0;
 }
 
 static int recv_peek_claim(struct zhpe_ctx *zctx,
@@ -213,11 +223,14 @@ static int recv_peek_claim(struct zhpe_ctx *zctx,
 		rx_wire = ((struct fi_context *)msg->context)->internal[0];
 		rx_wire->op_context = msg->context;
 		rx_wire->op_flags |= op_flags;
-		zhpe_rx_matched_user(rx_wire, msg->msg_iov, msg->desc,
-				     msg->iov_count);
+		rc = zhpe_get_uiov_len(msg->msg_iov, msg->iov_count,
+				       &rx_wire->total_user);
+		if (OFI_LIKELY(rc >= 0))
+			zhpe_rx_matched_user(rx_wire, msg->msg_iov, msg->desc,
+					     msg->iov_count);
 		zctx_unlock(zctx);
 
-		return 0;
+		return rc;
 
 	case FI_CLAIM | FI_DISCARD:
 		if (OFI_UNLIKELY(!msg->context))
@@ -298,8 +311,6 @@ static int recv_iov(struct zhpe_ctx *zctx, const struct iovec *uiov,
 				struct zhpe_rx_entry, rx_wire, dentry) {
 		if (!user_info.match_fn(&user_info, &rx_wire->match_info))
 			continue;
-		ZHPE_LOG_DBG("rx_wire: %p ctx: %p flags: 0x%" PRIx64 "\n",
-			     rx_wire, zctx, op_flags);
 		dlist_remove(&rx_wire->dentry);
 		dlist_insert_tail(&rx_wire->dentry, &zctx->rx_work_list);
 		rx_wire->total_user = total_user;
@@ -318,55 +329,8 @@ static int recv_iov(struct zhpe_ctx *zctx, const struct iovec *uiov,
 	rx_user->op_context = op_context;
 	rx_user->op_flags = op_flags;
 	rx_user->match_info = user_info;
-	rx_user->matched = false;
+	zhpe_get_uiov_lstate(uiov, udesc, uiov_cnt, &rx_user->lstate);
 	dlist_insert_tail(&rx_user->dentry, &match_lists->user_list);
-	ZHPE_LOG_DBG("rx_user: %p zctx: %p flags: 0x%" PRIx64 "\n",
-		     rx_user, zctx, op_flags);
-	zhpe_stats_stamp_dbg(__func__, __LINE__, (uintptr_t)rx_user, 0, 0, 0);
-	if (OFI_UNLIKELY(!total_user)) {
-		rx_user->lstate_ready = true;
-		zctx_unlock(zctx);
-
-		return 0;
-	}
-	rx_user->lstate_ready = false;
-
-	/*
-	 * Unfortunately, regardless of the length of the receive
-	 * buffer, the sender can be trying to send a large message
-	 * to a tiny buffer and we just won't know until later.
-	 * Register/hold in the hope that there will be reuse.
-	 *
-	 * ZZZ: registration thread?
-	 *
-	 * Dropping the lock here adds a lot of edges.
-	 */
-	zhpe_stats_start(zhpe_stats_subid(RECV, 20));
-	zctx_unlock(zctx);
-	rc = zhpe_get_uiov(zctx, uiov, udesc, uiov_cnt,
-			   ZHPEQ_MR_RECV, rx_user->liov);
-	zctx_lock(zctx);
-	zhpe_stats_stop(zhpe_stats_subid(RECV, 20));
-	/* Registration/access error? */
-	if (OFI_UNLIKELY(rc < 0)) {
-		/* Yes. */
-		if (rx_user->matched) {
-			zhpe_rx_complete(rx_user, rc);
-			rc = 0;
-		} else {
-			dlist_remove(&rx_user->dentry);
-			zhpe_rx_entry_free(rx_user);
-		}
-		zctx_unlock(zctx);
-
-		return rc;
-	}
-	/* No, registration succeeded: start I/O if we matched. */
-	rx_user->lstate.cnt = rc;
-	rx_user->lstate.held = true;
-	rx_user->lstate_ready = true;
-	if (rx_user->matched)
-		zhpe_rx_matched_wire(rx_user, rx_user->rx_state);
 	zctx_unlock(zctx);
 
 	return 0;
@@ -621,7 +585,7 @@ static int send_inline(struct zhpe_ctx *zctx, void *op_context, uint64_t tag,
 	return 0;
 }
 
-static int send_get_uiov(struct zhpe_ctx *zctx,
+static int send_reg_uiov(struct zhpe_ctx *zctx,
 			 const struct iovec *uiov, void **udesc,
 			 size_t uiov_cnt, void **ptrs)
 {
@@ -630,14 +594,14 @@ static int send_get_uiov(struct zhpe_ctx *zctx,
 
 	assert(uiov_cnt > 0);
 	assert(uiov_cnt <= ZHPE_EP_MAX_IOV);
-	rc = get_buf_zmr(zctx, uiov[0].iov_base, uiov[0].iov_len,
+	rc = reg_buf_zmr(zctx, uiov[0].iov_base, uiov[0].iov_len,
 			 udesc[0], ZHPEQ_MR_SEND, &zmr);
 	ptrs[0] = zmr;
 	if (OFI_UNLIKELY(rc < 0))
 		return rc;
 	if (OFI_LIKELY(uiov_cnt == 1))
 		return 1;
-	rc = get_buf_zmr(zctx, uiov[1].iov_base, uiov[1].iov_len,
+	rc = reg_buf_zmr(zctx, uiov[1].iov_base, uiov[1].iov_len,
 			 udesc[1], ZHPEQ_MR_SEND, &zmr);
 	ptrs[1] = zmr;
 	if (OFI_UNLIKELY(rc < 0)) {
@@ -736,7 +700,7 @@ static int send_iov(struct zhpe_ctx *zctx, void *op_context, uint64_t tag,
 		return -FI_EINVAL;
 
 	zhpe_stats_start(zhpe_stats_subid(SEND, 20));
-	rc = send_get_uiov(zctx, uiov, udesc, uiov_cnt, ptrs);
+	rc = send_reg_uiov(zctx, uiov, udesc, uiov_cnt, ptrs);
 	zhpe_stats_stop(zhpe_stats_subid(SEND, 20));
 	if (OFI_UNLIKELY(rc < 0))
 		return rc;
@@ -1633,12 +1597,12 @@ void zhpe_msg_prov_no_eflags(struct zhpe_conn *conn, uint8_t op,
 			    conn->rem_rspctxid, wqe[0]);
 	zhpeq_tq_insert(zctx->ztq_hi, reservation[0]);
 	zhpeq_tq_commit(zctx->ztq_hi);
+	zctx->pe_ctx_ops->signal(zctx);
 	zhpe_stats_stamp_dbg(__func__, __LINE__,
 			     (uintptr_t)tx_entry, tx_entry->cmp_idx,
 			     (uintptr_t)conn, op);
 	zhpe_stats_stamp_dbgc(ntohs(conn->rem_conn_idxn),
 			      tx_seq, reservation[0], 0, 0, 0);
-	/* Need to signal only from user contexts. */
 }
 
 void zhpe_msg_prov(struct zhpe_conn *conn, uint8_t op, const void *payload,

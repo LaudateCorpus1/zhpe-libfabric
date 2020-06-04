@@ -360,12 +360,10 @@ static int rma_iov_op(struct zhpe_ctx *zctx, void *op_context, uint64_t cq_data,
 	rma_entry->op_flags = op_flags;
 	rma_entry->op_context = op_context;
 
+	zhpe_stats_start(zhpe_stats_subid(RMA, 20));
+	zhpe_get_uiov_lstate(uiov, udesc, uiov_cnt, &rma_entry->lstate);
 	if (OFI_UNLIKELY(total <= ZHPEQ_MAX_IMM)) {
 		if (OFI_LIKELY(total)) {
-			zhpe_stats_start(zhpe_stats_subid(RMA, 20));
-			zhpe_get_uiov_buffered(uiov, udesc, uiov_cnt,
-					       &rma_entry->lstate);
-			zhpe_stats_stop(zhpe_stats_subid(RMA, 20));
 			if (!get && (op_flags & FI_INJECT)) {
 				zhpe_iov_copy_to_mem(rma_entry->inline_data,
 						     total, &rma_entry->lstate);
@@ -382,22 +380,17 @@ static int rma_iov_op(struct zhpe_ctx *zctx, void *op_context, uint64_t cq_data,
 				ZHPE_CS_FLAG_RMA_DONE;
 		}
 	} else {
-		zhpe_stats_start(zhpe_stats_subid(RMA, 20));
 		zctx_unlock(zctx);
-		rc = zhpe_get_uiov(zctx, uiov, udesc, uiov_cnt,
-				   (get ? ZHPEQ_MR_GET : ZHPEQ_MR_PUT),
-				   rma_entry->liov);
+		rc = zhpe_reg_lstate(zctx, (get ? ZHPEQ_MR_GET : ZHPEQ_MR_PUT),
+				     &rma_entry->lstate);
 		zctx_lock(zctx);
-		zhpe_stats_stop(zhpe_stats_subid(RMA, 20));
 		if (OFI_UNLIKELY(rc < 0)) {
 			zhpe_rma_entry_free(rma_entry);
 			zctx_unlock(zctx);
-
 			return rc;
 		}
-		rma_entry->lstate.cnt = rc;
-		rma_entry->lstate.held = true;
 	}
+	zhpe_stats_stop(zhpe_stats_subid(RMA, 20));
 
 	/* Check eflags after we may have dropped and reacquired the lock. */
 	if (OFI_UNLIKELY(conn->eflags)) {

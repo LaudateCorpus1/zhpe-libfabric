@@ -686,8 +686,9 @@ void zhpe_rx_peek_recv(struct zhpe_ctx *zctx,
 static void rx_send_start_buf(struct zhpe_rx_entry *rx_entry)
 {
 	int			rc;
+	struct zhpe_ctx		*zctx = rx_entry->zctx;
 
-	rc = zhpe_slab_alloc(&rx_entry->zctx->eager,
+	rc = zhpe_slab_alloc(&zctx->eager,
 			     rx_entry->total_wire, rx_entry->bstate.viov);
 	if (OFI_UNLIKELY(rc < 0))
 		return;
@@ -705,52 +706,49 @@ static void rx_send_start_buf(struct zhpe_rx_entry *rx_entry)
 
 static void rx_send_start_rnd(struct zhpe_rx_entry *rx_entry)
 {
+	int			rc;
+	struct zhpe_ctx		*zctx = rx_entry->zctx;
+	uint64_t		len;
 
-	zhpe_iov_state_reset(&rx_entry->lstate);
+	zhpe_stats_start(zhpe_stats_subid(RECV, 20));
+	zctx_unlock(zctx);
+	/* Restrict possible registration to minimum needed. */
+	len = min(rx_entry->total_wire, rx_entry->total_user);
+	rc = zhpe_reg_lstate_maxlen(zctx, ZHPEQ_MR_RECV, &rx_entry->lstate,
+				    len);
+	zctx_lock(zctx);
+	zhpe_stats_stop(zhpe_stats_subid(RECV, 20));
+	if (OFI_UNLIKELY(rc < 0)) {
+		zhpe_rx_complete(rx_entry, rc);
+		return;
+	}
+
 	rx_entry->tx_entry.ptrs[0] = &rx_entry->lstate;
 	zhpe_iov_state_reset(&rx_entry->rstate);
 	rx_entry->tx_entry.tx_handler = ZHPE_TX_HANDLE_RX_GET_RND;
 	zhpe_cstat_init(&rx_entry->tx_entry.cstat, 0, ZHPE_CS_FLAG_RMA);
 	zhpe_iov_rma(&rx_entry->tx_entry, ZHPE_SEG_MAX_BYTES, ZHPE_SEG_MAX_OPS);
+	zctx->pe_ctx_ops->signal(zctx);
 	zhpe_stats_stamp_dbg(__func__, __LINE__, (uintptr_t)rx_entry, 0, 0, 0);
 }
 
-void zhpe_rx_matched_wire(struct zhpe_rx_entry *rx_matched,
-			  enum zhpe_rx_state rx_state)
+static void rx_matched_wire(struct zhpe_rx_entry *rx_matched)
 {
 	zhpe_stats_stamp_dbg(__func__, __LINE__,
-			     (uintptr_t)rx_matched, rx_state, 0, 0);
-
-	if (OFI_UNLIKELY(!rx_matched->lstate_ready)) {
-		rx_set_state(rx_matched, rx_state);
-		rx_matched->matched = true;
-		return;
-	}
+			     (uintptr_t)rx_matched, rx_matched->rx_state, 0, 0);
 
 	/* zctx_lock must be locked. */
-	switch (rx_state) {
+	switch (rx_matched->rx_state) {
 
 	case ZHPE_RX_STATE_RND:
 		rx_send_start_rnd(rx_matched);
 		break;
 
-	case ZHPE_RX_STATE_EAGER_DONE:
-		zhpe_iov_state_reset(&rx_matched->lstate);
-		zhpe_iov_state_reset(&rx_matched->bstate);
-		zhpe_iov_copy(&rx_matched->lstate, &rx_matched->bstate);
-		zhpe_rx_complete(rx_matched, rx_matched->tx_entry.cstat.status);
-		break;
-
 	case ZHPE_RX_STATE_INLINE:
-		zhpe_iov_state_reset(&rx_matched->lstate);
 		zhpe_iov_copy_from_mem(&rx_matched->lstate,
 				       rx_matched->inline_data,
 				       rx_matched->total_wire);
 		zhpe_rx_complete(rx_matched, 0);
-		break;
-
-	case ZHPE_RX_STATE_INLINE_M:
-	case ZHPE_RX_STATE_RND_M:
 		break;
 
 	default:
@@ -766,105 +764,33 @@ void zhpe_rx_matched_user(struct zhpe_rx_entry *rx_matched,
 			  const struct iovec *uiov, void **udesc,
 			  size_t uiov_cnt)
 {
-	struct zhpe_ctx		*zctx = rx_matched->zctx;
-	int			rc;
-	size_t			len;
-
 	zhpe_stats_stamp_dbg(__func__, __LINE__,
 			     (uintptr_t)rx_matched, rx_matched->rx_state, 0, 0);
 
 	/* zctx_lock must be locked. */
-	rc = zhpe_get_uiov_len(uiov, uiov_cnt, &rx_matched->total_user);
-	if (OFI_UNLIKELY(rc < 0))
-		goto error_complete;
+	zhpe_get_uiov_lstate(uiov, udesc, uiov_cnt, &rx_matched->lstate);
 
 	switch ((enum zhpe_rx_state)rx_matched->rx_state) {
 
 	case ZHPE_RX_STATE_RND:
-		zctx_unlock(zctx);
-		/* Restrict possible registration to minimum needed. */
-		len = min(rx_matched->total_wire, rx_matched->total_user);
-		zhpe_stats_start(zhpe_stats_subid(RECV, 20));
-		rc = zhpe_get_uiov_maxlen(zctx, uiov, udesc, uiov_cnt,
-					  ZHPEQ_MR_RECV, len, rx_matched->liov);
-		zhpe_stats_stop(zhpe_stats_subid(RECV, 20));
-		zctx_lock(zctx);
-		if (OFI_UNLIKELY(rc < 0))
-			goto error_complete;
-		rx_matched->lstate.cnt = rc;
-		rx_matched->lstate.held = true;
 		rx_send_start_rnd(rx_matched);
-		zctx->pe_ctx_ops->signal(zctx);
 		break;
 
 	case ZHPE_RX_STATE_RND_M:
-		/* We don't know what will be needed, register everything. */
-		zctx_unlock(zctx);
-		zhpe_stats_start(zhpe_stats_subid(RECV, 20));
-		rc = zhpe_get_uiov(zctx, uiov, udesc, uiov_cnt,
-				   ZHPEQ_MR_RECV, rx_matched->liov);
-		zhpe_stats_stop(zhpe_stats_subid(RECV, 20));
-		zctx_lock(zctx);
-		if (OFI_UNLIKELY(rc < 0))
-			goto error_complete;
-		rx_matched->lstate.cnt = rc;
-		rx_matched->lstate.held = true;
-		rx_matched->lstate_ready = true;
-
-		zhpe_stats_stamp_dbg(__func__, __LINE__,
-				     (uintptr_t)rx_matched,
-				     rx_matched->rx_state, 0, 0);
-
-		switch ((enum zhpe_rx_state)rx_matched->rx_state) {
-
-		case ZHPE_RX_STATE_RND:
-			rx_send_start_rnd(rx_matched);
-			zctx->pe_ctx_ops->signal(zctx);
-			break;
-
-		case ZHPE_RX_STATE_RND_M:
-			rx_matched->matched = true;
-			break;
-
-		case ZHPE_RX_STATE_EAGER:
-			rx_set_state(rx_matched, ZHPE_RX_STATE_EAGER_CLAIMED);
-			break;
-
-		case ZHPE_RX_STATE_EAGER_DONE:
-			zhpe_iov_state_reset(&rx_matched->lstate);
-			zhpe_iov_state_reset(&rx_matched->bstate);
-			zhpe_iov_copy(&rx_matched->lstate, &rx_matched->bstate);
-			zhpe_rx_complete(rx_matched,
-					 rx_matched->tx_entry.cstat.status);
-			break;
-
-		default:
-			ZHPE_LOG_ERROR("rx_matched %p in bad state %d\n",
-				       rx_matched, rx_matched->rx_state);
-			abort();
-		}
-
+		rx_set_state(rx_matched, ZHPE_RX_STATE_RND_M_MATCHED);
 		break;
 
 	case ZHPE_RX_STATE_EAGER:
-		zhpe_get_uiov_buffered(uiov, udesc, uiov_cnt,
-				       &rx_matched->lstate);
 		rx_set_state(rx_matched, ZHPE_RX_STATE_EAGER_CLAIMED);
 		break;
 
 	case ZHPE_RX_STATE_EAGER_DONE:
-		zhpe_get_uiov_buffered(uiov, udesc, uiov_cnt,
-				       &rx_matched->lstate);
-		zhpe_iov_state_reset(&rx_matched->lstate);
 		zhpe_iov_state_reset(&rx_matched->bstate);
 		zhpe_iov_copy(&rx_matched->lstate, &rx_matched->bstate);
 		zhpe_rx_complete(rx_matched, rx_matched->tx_entry.cstat.status);
 		break;
 
 	case ZHPE_RX_STATE_INLINE:
-		zhpe_get_uiov_buffered(uiov, udesc, uiov_cnt,
-				       &rx_matched->lstate);
-		zhpe_iov_state_reset(&rx_matched->lstate);
 		zhpe_iov_copy_from_mem(&rx_matched->lstate,
 				       rx_matched->inline_data,
 				       rx_matched->total_wire);
@@ -872,10 +798,7 @@ void zhpe_rx_matched_user(struct zhpe_rx_entry *rx_matched,
 		break;
 
 	case ZHPE_RX_STATE_INLINE_M:
-		zhpe_get_uiov_buffered(uiov, udesc, uiov_cnt,
-				       &rx_matched->lstate);
-		rx_matched->matched = true;
-		rx_matched->lstate_ready = true;
+		rx_set_state(rx_matched, ZHPE_RX_STATE_INLINE_M_MATCHED);
 		break;
 
 	default:
@@ -883,11 +806,6 @@ void zhpe_rx_matched_user(struct zhpe_rx_entry *rx_matched,
 			       rx_matched, rx_matched->rx_state);
 		abort();
 	}
-
-	return;
-
- error_complete:
-	zhpe_rx_complete(rx_matched, rc);
 }
 
 static void rx_handle_msg_status(struct zhpe_conn *conn, struct zhpe_msg *msg)
@@ -1080,30 +998,30 @@ static void rx_handle_msg_final_inline(struct zhpe_conn *conn,
 				       struct zhpe_msg *msg)
 {
 	struct zhpe_rx_entry	*rx_wire = conn->rx_pending;
+	uint8_t			rx_state_orig = rx_wire->rx_state;
 	union zhpe_msg_payload	*pay = (void *)msg->payload;
 
 	memcpy(rx_wire->inline_data + rx_wire->total_wire, pay, msg->hdr.len);
 	rx_wire->total_wire += msg->hdr.len;
 	/* Optimize immediate delivery. */
-	if (OFI_LIKELY(rx_wire->matched))
-		zhpe_rx_matched_wire(rx_wire, ZHPE_RX_STATE_INLINE);
-	else
-		rx_set_state(rx_wire, ZHPE_RX_STATE_INLINE);
+	rx_state_orig = rx_wire->rx_state;
+	rx_set_state(rx_wire, ZHPE_RX_STATE_INLINE);
+	if (OFI_LIKELY(rx_state_orig == ZHPE_RX_STATE_INLINE_M_MATCHED))
+		rx_matched_wire(rx_wire);
 }
 
 static void rx_handle_msg_final_iov(struct zhpe_conn *conn,
 				    struct zhpe_msg *msg)
 {
 	struct zhpe_rx_entry	*rx_wire = conn->rx_pending;
+	uint8_t			rx_state_orig = rx_wire->rx_state;
 
 	rx_wire_get_riov(rx_wire, msg, 0);
-	if (OFI_LIKELY(rx_wire->matched))
-		zhpe_rx_matched_wire(rx_wire, ZHPE_RX_STATE_RND);
-	else {
-		rx_set_state(rx_wire, ZHPE_RX_STATE_RND);
-		if (OFI_LIKELY(rx_wire->total_wire < zhpe_ep_max_eager_sz))
-			rx_send_start_buf(rx_wire);
-	}
+	rx_set_state(rx_wire, ZHPE_RX_STATE_RND);
+	if (OFI_LIKELY(rx_state_orig == ZHPE_RX_STATE_RND_M_MATCHED))
+		rx_matched_wire(rx_wire);
+	else if (OFI_LIKELY(rx_wire->total_wire <= zhpe_ep_max_eager_sz))
+		rx_send_start_buf(rx_wire);
 }
 
 static void rx_wire_init(struct zhpe_rx_entry *rx_wire, struct zhpe_conn *conn,
@@ -1111,6 +1029,7 @@ static void rx_wire_init(struct zhpe_rx_entry *rx_wire, struct zhpe_conn *conn,
 			 bool matched)
 {
 	union zhpe_msg_payload	*pay = (void *)msg->payload;
+	uint8_t			rx_state;
 
 	zhpe_stats_stamp_dbg(__func__, __LINE__,
 			     (uintptr_t)rx_wire, ntohs(msg->hdr.cmp_idxn),
@@ -1130,16 +1049,17 @@ static void rx_wire_init(struct zhpe_rx_entry *rx_wire, struct zhpe_conn *conn,
 		rx_wire->total_wire = msg->hdr.len;
 		memcpy(rx_wire->inline_data, &pay->data[i], msg->hdr.len);
 		if (msg->hdr.op & ZHPE_OP_SEND_MX) {
-			rx_set_state(rx_wire, ZHPE_RX_STATE_INLINE_M);
 			conn->rx_pending = rx_wire;
 			conn->rx_pending_fn = rx_handle_msg_final_inline;
-			rx_wire->matched = matched;
-		}  else {
 			if (matched)
-				zhpe_rx_matched_wire(rx_wire,
-						   ZHPE_RX_STATE_INLINE);
+				rx_state = ZHPE_RX_STATE_INLINE_M_MATCHED;
 			else
-				rx_set_state(rx_wire, ZHPE_RX_STATE_INLINE);
+				rx_state = ZHPE_RX_STATE_INLINE_M;
+			rx_set_state(rx_wire, rx_state);
+		}  else {
+			rx_set_state(rx_wire, ZHPE_RX_STATE_INLINE);
+			if (matched)
+				rx_matched_wire(rx_wire);
 		}
 
 		return;
@@ -1150,18 +1070,20 @@ static void rx_wire_init(struct zhpe_rx_entry *rx_wire, struct zhpe_conn *conn,
 		rx_wire_get_riov(rx_wire, msg, i);
 
 	if (msg->hdr.op & ZHPE_OP_SEND_MX) {
-		rx_set_state(rx_wire, ZHPE_RX_STATE_RND_M);
 		conn->rx_pending = rx_wire;
 		conn->rx_pending_fn = rx_handle_msg_final_iov;
-		rx_wire->matched = matched;
-	}  else {
 		if (matched)
-			zhpe_rx_matched_wire(rx_wire, ZHPE_RX_STATE_RND);
-		else {
-			rx_set_state(rx_wire, ZHPE_RX_STATE_RND);
-			if (rx_wire->total_wire < zhpe_ep_max_eager_sz)
-				rx_send_start_buf(rx_wire);
-		}
+			rx_state = ZHPE_RX_STATE_RND_M_MATCHED;
+		else
+			rx_state = ZHPE_RX_STATE_RND_M;
+		rx_set_state(rx_wire, rx_state);
+	}  else {
+		rx_set_state(rx_wire, ZHPE_RX_STATE_RND);
+		if (matched)
+			rx_matched_wire(rx_wire);
+		else if (OFI_LIKELY(rx_wire->total_wire <=
+				    zhpe_ep_max_eager_sz))
+			rx_send_start_buf(rx_wire);
 	}
 }
 

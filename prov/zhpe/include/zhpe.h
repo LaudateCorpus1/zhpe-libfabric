@@ -1106,8 +1106,10 @@ enum zhpe_rx_state {
 	ZHPE_RX_STATE_IDLE,
 	ZHPE_RX_STATE_INLINE,
 	ZHPE_RX_STATE_INLINE_M,
+	ZHPE_RX_STATE_INLINE_M_MATCHED,
 	ZHPE_RX_STATE_RND,
 	ZHPE_RX_STATE_RND_M,
+	ZHPE_RX_STATE_RND_M_MATCHED,
 	ZHPE_RX_STATE_EAGER,
 	ZHPE_RX_STATE_EAGER_CLAIMED,
 	ZHPE_RX_STATE_EAGER_DONE,
@@ -1139,8 +1141,6 @@ struct zhpe_rx_entry {
 	uint16_t		src_cmp_idxn;
 	uint8_t			src_flags;
 	uint8_t			rx_state;
-	bool			matched;
-	bool			lstate_ready;
 };
 
 struct zhpe_msg_hdr {
@@ -1461,8 +1461,6 @@ void zhpe_rx_discard_recv(struct zhpe_rx_entry *rx_entry);
 void zhpe_rx_matched_user(struct zhpe_rx_entry *rx_matched,
 			  const struct iovec *uiov, void **udesc,
 			  size_t uiov_cnt);
-void zhpe_rx_matched_wire(struct zhpe_rx_entry *rx_matched,
-			  enum zhpe_rx_state rx_state);
 void zhpe_rx_complete(struct zhpe_rx_entry *rx_entry, int status);
 
 void zhpe_tx_call_handler(struct zhpe_tx_entry *tx_entry,
@@ -1685,21 +1683,24 @@ static inline int zhpe_get_urma_len(const struct fi_rma_iov *urma,
 	return 0;
 }
 
-static inline void zhpe_get_uiov_buffered(const struct iovec *uiov,
-					  void **udesc, size_t uiov_cnt,
-					  struct zhpe_iov_state *lstate)
+static inline void zhpe_get_uiov_lstate(const struct iovec *uiov,
+					void **udesc, size_t uiov_cnt,
+					struct zhpe_iov_state *lstate)
 {
 	struct zhpe_iov3	*liov = lstate->viov;
 
 	assert(uiov_cnt <= ZHPE_EP_MAX_IOV);
+	zhpe_iov_state_reset(lstate);
 	lstate->cnt = uiov_cnt;
 	if (OFI_UNLIKELY(!uiov_cnt))
 		return;
 	liov[0].iov_base = (uintptr_t)uiov[0].iov_base;
 	liov[0].iov_len = uiov[0].iov_len;
+	liov[0].iov_desc = udesc[0];
 	if (OFI_UNLIKELY(uiov_cnt > 1)) {
 		liov[1].iov_base = (uintptr_t)uiov[1].iov_base;
 		liov[1].iov_len = uiov[1].iov_len;
+		liov[1].iov_desc = udesc[1];
 	}
 }
 
@@ -1782,15 +1783,11 @@ static inline uint64_t zhpe_av_get_tx_idx(struct zhpe_av *zav,
 	return (fiaddr << zav->rx_ctx_bits) | zhpe_av_get_rx_idx(zav, fiaddr);
 }
 
-int zhpe_get_buf_zmr(struct zhpe_ctx *zctx, void *base, size_t len,
-		     void *udesc, struct zhpe_mr **zmr_out);
-int zhpe_get_uiov(struct zhpe_ctx *zctx,
-		  const struct iovec *uiov, void **udesc, size_t uiov_cnt,
-		  uint32_t qaccess, struct zhpe_iov3 *liov);
-int zhpe_get_uiov_maxlen(struct zhpe_ctx *zctx,
-			 const struct iovec *uiov, void **udesc,
-			 size_t uiov_cnt, uint32_t qaccess, uint64_t maxlen,
-			 struct zhpe_iov3 *liov);
+int zhpe_reg_lstate(struct zhpe_ctx *zctx,
+		    uint32_t qaccess, struct zhpe_iov_state *lstate);
+int zhpe_reg_lstate_maxlen(struct zhpe_ctx *zctx,
+			   uint32_t qaccess, struct zhpe_iov_state *lstate,
+			   uint64_t maxlen);
 int zhpe_get_urma_total(const struct fi_rma_iov *urma, size_t urma_cnt,
 			uint32_t qaccess, uint64_t total,
 			struct zhpe_rma_entry *rma_entry);
