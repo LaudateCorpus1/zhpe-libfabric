@@ -368,8 +368,12 @@ void zhpe_dom_key_export(struct zhpe_conn *conn, uint64_t key)
 	if (OFI_LIKELY(rbnode != NULL)) {
 		attr = rbnode->data;
 		kexp->zmr = attr->context;
-		assert_always((uintptr_t)attr->mr_iov[0].iov_base ==
+		assert_always((uintptr_t)attr->mr_iov[0].iov_base >=
 			      kexp->zmr->qkdata->z.vaddr);
+		assert_always(((uintptr_t)attr->mr_iov[0].iov_base +
+			       attr->mr_iov[0].iov_len) <=
+			      (kexp->zmr->qkdata->z.vaddr +
+			       kexp->zmr->qkdata->z.len));
 		zhpe_stats_stamp_dbg(__func__, __LINE__,
 				     key, (uintptr_t)kexp->zmr,
 				     kexp->zmr->closed, 0);
