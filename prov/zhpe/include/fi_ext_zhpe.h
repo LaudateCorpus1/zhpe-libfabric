@@ -65,6 +65,8 @@ struct fi_zhpe_ep_counters {
 	uint32_t		version;
 	uint32_t		len;
 	uint64_t		hw_atomics;
+	uint64_t		rx_oos;
+	uint64_t		tx_retry;
 };
 
 /* zhpe provider specific ops */

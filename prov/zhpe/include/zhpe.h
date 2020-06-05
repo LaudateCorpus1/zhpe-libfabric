@@ -434,7 +434,7 @@ struct zhpe_conn {
 	int32_t			tx_size;
 	struct dlist_entry	tx_queue;
 	struct dlist_entry	tx_dequeue_dentry;
-	void			(*tx_dequeue)(struct zhpe_conn *conn);
+	int			(*tx_dequeue)(struct zhpe_conn *conn);
 	uint64_t		tx_flowctl_retry_cnt;
 	uint64_t		tx_flowctl_decay;
 	uint64_t		tx_flowctl_dequeue;
@@ -1585,7 +1585,8 @@ void zhpe_conn_fini(struct zhpe_ctx *zctx);
 int zhpe_conn_init_flowctl(const char *table);
 void zhpe_conn_flowctl(struct zhpe_conn *conn, uint8_t retry_idx);
 void zhpe_conn_cleanup(struct zhpe_ctx *zctx);
-void zhpe_conn_dequeue_fence(struct zhpe_conn *conn);
+void zhpe_conn_counters(struct zhpe_ctx *zctx,
+			struct fi_zhpe_ep_counters *counters);
 int zhpe_conn_eflags_error(uint8_t eflags);
 
 static inline void zhpe_conn_flags_set(struct zhpe_conn *conn, uint8_t flags)
@@ -1612,7 +1613,6 @@ static inline void zhpe_conn_fence_check(struct zhpe_tx_entry *tx_entry,
 			 dlist_empty(&conn->tx_queue)))
 		return;
 	zhpe_conn_flags_set(conn, ZHPE_CONN_FLAG_FENCE);
-	conn->tx_dequeue = zhpe_conn_dequeue_fence;
 	conn->tx_fences++;
 	tx_entry->cstat.flags |= ZHPE_CS_FLAG_FENCE | ZHPE_CS_FLAG_QUEUED;
 }

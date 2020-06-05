@@ -275,6 +275,9 @@ static int zhpe_ext_ep_counters(struct fid_ep *fid_ep,
 
 	zctx_lock(zctx);
 	counters->hw_atomics = zctx->hw_atomics;
+	counters->rx_oos = 0;
+	counters->tx_retry = 0;
+	zhpe_conn_counters(zctx, counters);
 	zctx_unlock(zctx);
 	ret = 0;
 

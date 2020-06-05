@@ -113,24 +113,26 @@ void zhpe_conn_flowctl(struct zhpe_conn *conn, uint8_t retry_idx)
 	}
 }
 
-static void conn_dequeue_rma(struct zhpe_conn *conn,
-			     struct zhpe_tx_queue_entry *txqe)
+static int conn_dequeue_rma(struct zhpe_conn *conn,
+			    struct zhpe_tx_queue_entry *txqe)
 {
 	struct zhpe_tx_entry	*tx_entry = txqe->tx_entry;
 
 	zhpe_iov_rma(tx_entry, ZHPE_SEG_MAX_BYTES, ZHPE_SEG_MAX_OPS);
 	if (OFI_UNLIKELY(!tx_entry->cstat.completions))
-		return;
+		return 0;
 
 	conn->zctx->tx_queued--;
 	assert(conn->zctx->tx_queued >= 0);
 	tx_entry->cstat.flags &= ~ZHPE_CS_FLAG_QUEUED;
 	dlist_remove(&txqe->dentry);
 	zhpe_buf_free(&conn->zctx->tx_queue_pool, txqe);
+
+	return 1;
 }
 
-static bool conn_dequeue_wqe(struct zhpe_conn *conn,
-			     struct zhpe_tx_queue_entry *txqe,
+static int conn_dequeue_wqe(struct zhpe_conn *conn,
+			    struct zhpe_tx_queue_entry *txqe,
 			     uint8_t retry_idx)
 {
 	struct zhpe_ctx		*zctx = conn->zctx;
@@ -142,7 +144,7 @@ static bool conn_dequeue_wqe(struct zhpe_conn *conn,
 	reservation = zhpeq_tq_reserve(zctx->ztq_hi);
 	if (OFI_UNLIKELY(reservation < 0)) {
 		assert(reservation == -EAGAIN);
-		return false;
+		return 0;
 	}
 
 	wqe = zhpeq_tq_get_wqe(zctx->ztq_hi, reservation);
@@ -151,7 +153,7 @@ static bool conn_dequeue_wqe(struct zhpe_conn *conn,
 	if (OFI_LIKELY(wqe->hdr.opcode == ZHPE_HW_OPCODE_ENQA)) {
 		if (OFI_UNLIKELY(!zhpe_tx_entry_slot_alloc(tx_entry))) {
 			zhpeq_tq_unreserve(zctx->ztq_hi, reservation);
-			return false;
+			return 0;
 		}
 		msg = (void *)&wqe->enqa.payload;
 		if (OFI_UNLIKELY(tx_entry->cmp_idx))
@@ -159,7 +161,7 @@ static bool conn_dequeue_wqe(struct zhpe_conn *conn,
 		msg->hdr.retry = retry_idx;
 		zhpe_stats_stamp_dbg(__func__, __LINE__,
 				     (uintptr_t)tx_entry, tx_entry->cmp_idx,
-				     reservation, be64toh(msg->hdr.seqn));
+				     reservation, ntohl(msg->hdr.seqn));
 	} else
 		zhpe_stats_stamp_dbg(__func__, __LINE__,
 				     (uintptr_t)tx_entry, tx_entry->cmp_idx,
@@ -175,10 +177,10 @@ static bool conn_dequeue_wqe(struct zhpe_conn *conn,
 	dlist_remove(&txqe->dentry);
 	zhpe_buf_free(&zctx->tx_queue_pool, txqe);
 
-	return true;
+	return 1;
 }
 
-static void conn_dequeue_wqe_throttled(struct zhpe_conn *conn,
+static int conn_dequeue_wqe_throttled(struct zhpe_conn *conn,
 				      struct zhpe_tx_queue_entry *txqe)
 {
 	uint64_t		now = get_cycles_approx();
@@ -195,97 +197,69 @@ static void conn_dequeue_wqe_throttled(struct zhpe_conn *conn,
 		conn->tx_flowctl_decay = now;
 		assert_always(conn->tx_flowctl_delay_idx > 0);
 		conn->tx_flowctl_delay_idx--;
-		if (OFI_UNLIKELY(!conn->tx_flowctl_delay_idx))
-			conn->flags &= ~ZHPE_CONN_FLAG_FLOWCTL;
 		zhpe_stats_stamp_dbg(__func__, __LINE__,
 				     (uintptr_t)conn,
 				     conn->tx_flowctl_delay_idx,
 				     conn->tx_flowctl_retry_idx, conn->flags);
+		if (OFI_UNLIKELY(!conn->tx_flowctl_delay_idx)) {
+			conn->flags &= ~ZHPE_CONN_FLAG_FLOWCTL;
+			return 1;
+		}
 	}
+
+	return 0;
 }
 
-static void conn_dequeue(struct zhpe_conn *conn)
+static int conn_dequeue(struct zhpe_conn *conn)
 {
 	struct zhpe_tx_queue_entry *txqe;
 
 	if (dlist_empty(&conn->tx_queue)) {
 		if (OFI_LIKELY(conn->flags != ZHPE_CONN_FLAG_CLEANUP))
-			return;
+			return 0;
 		conn->flags = 0;
 		dlist_remove_init(&conn->tx_dequeue_dentry);
-		return;
+		return 0;
 	}
 
 	/* One at a time: round-robin tx queue amongst conns. */
 	txqe = container_of(conn->tx_queue.next, struct zhpe_tx_queue_entry,
 			    dentry);
 
-	/* Handle RMA retry. */
-	if (OFI_UNLIKELY(txqe->tx_entry->cstat.flags & ZHPE_CS_FLAG_RMA)) {
-		conn_dequeue_rma(conn, txqe);
-		return;
-	}
-
-	/* Assume flow control isn't the reason we're here. */
-	if (OFI_UNLIKELY(conn->flags & ZHPE_CONN_FLAG_FLOWCTL))
-		conn_dequeue_wqe_throttled(conn, txqe);
-	else
-		conn_dequeue_wqe(conn, txqe, 0);
-}
-
-void zhpe_conn_dequeue_fence(struct zhpe_conn *conn)
-{
-	struct zhpe_tx_queue_entry *txqe;
-
-	if (OFI_UNLIKELY(dlist_empty(&conn->tx_queue)))
-		/* Should never get here because of fence logic below. */
-		assert_always(false);
-
-	/* One at a time: round-robin tx queue amongst conns. */
-	txqe = container_of(conn->tx_queue.next, struct zhpe_tx_queue_entry,
-			    dentry);
-
-	if (txqe->tx_entry->cstat.flags & ZHPE_CS_FLAG_FENCE) {
+	/* Handle fence */
+	if (OFI_UNLIKELY(txqe->tx_entry->cstat.flags & ZHPE_CS_FLAG_FENCE)) {
 		if (OFI_LIKELY(conn->tx_queued))
-			return;
+			return 0;
 		/* A fenced RMA/Atomic could be waiting on key responses. */
 		if (txqe->tx_entry->cstat.flags & ZHPE_CS_FLAG_KEY_WAIT)
-			return;
+			return 0;
 		txqe->tx_entry->cstat.flags &= ~ZHPE_CS_FLAG_FENCE;
 		conn->tx_fences--;
 		assert_always(conn->tx_fences >= 0);
-		if (OFI_LIKELY(!conn->tx_fences))
-			conn->tx_dequeue = conn_dequeue;
 	}
 
 	/* Handle RMA retry. */
-	if (OFI_UNLIKELY(txqe->tx_entry->cstat.flags & ZHPE_CS_FLAG_RMA)) {
-		conn_dequeue_rma(conn, txqe);
-		return;
-	}
+	if (OFI_UNLIKELY(txqe->tx_entry->cstat.flags & ZHPE_CS_FLAG_RMA))
+		return conn_dequeue_rma(conn, txqe);
 
 	/* Assume flow control isn't the reason we're here. */
 	if (OFI_UNLIKELY(conn->flags & ZHPE_CONN_FLAG_FLOWCTL))
-		conn_dequeue_wqe_throttled(conn, txqe);
+		return conn_dequeue_wqe_throttled(conn, txqe);
 	else
-		conn_dequeue_wqe(conn, txqe, 0);
+		return conn_dequeue_wqe(conn, txqe, 0);
 }
 
-static void conn_dequeue_connect(struct zhpe_conn *conn)
+static int conn_dequeue_connect(struct zhpe_conn *conn)
 {
 	struct zhpe_tx_queue_entry *txqe;
 	struct zhpe_msg		*msg;
 
 	if (!(conn->flags & ZHPE_CONN_FLAG_CONNECT_MASK)) {
-		if (conn->tx_fences)
-			conn->tx_dequeue = zhpe_conn_dequeue_fence;
-		else
-			conn->tx_dequeue = conn_dequeue;
-		conn->tx_dequeue(conn);
-		return;
+		conn->tx_dequeue = conn_dequeue;
+		return conn_dequeue(conn);
 	}
 	if (dlist_empty(&conn->tx_queue))
-		return;
+		return 0;
 
 	/* One at a time: round-robin tx queue amongst conns. */
 	txqe = container_of(conn->tx_queue.next, struct zhpe_tx_queue_entry,
@@ -300,14 +274,10 @@ static void conn_dequeue_connect(struct zhpe_conn *conn)
 		break;
 
 	default:
-		return;
+		return 0;
 	}
 
-	/* Assume flow control isn't the reason we're here. */
-	if (OFI_UNLIKELY(conn->flags & ZHPE_CONN_FLAG_FLOWCTL))
-		conn_dequeue_wqe_throttled(conn, txqe);
-	else
-		conn_dequeue_wqe(conn, txqe, 0);
+	return conn_dequeue(conn);
 }
 
 struct zhpe_conn *zhpe_conn_alloc(struct zhpe_ctx *zctx)
@@ -921,8 +891,9 @@ void zhpe_conn_cleanup(struct zhpe_ctx *zctx)
 	for (i = zctx->conn_pool.max_index; i > 1;) {
 		i--;
 		conn = zhpe_ibuf_get(&zctx->conn_pool, i);
-		if (!conn)
-			continue;
+		zhpe_stats_stamp_dbg(__func__, __LINE__,
+				     (uintptr_t)conn, conn->rx_zseq.rx_oos_cnt,
+				     conn->tx_flowctl_retry_cnt, 0);
 		assert_always(conn->zctx);
 		zhpeq_qkdata_free(conn->qkdata);
 		conn->qkdata = NULL;
@@ -930,6 +901,21 @@ void zhpe_conn_cleanup(struct zhpe_ctx *zctx)
 		zhpe_ibuf_free(&zctx->conn_pool, conn);
 	}
 	zctx->conn_pool.max_index = i;
+}
+
+void zhpe_conn_counters(struct zhpe_ctx *zctx,
+			struct fi_zhpe_ep_counters *counters)
+{
+	struct zhpe_conn	*conn;
+	size_t			i;
+
+	for (i = zctx->conn_pool.max_index; i > 1;) {
+		i--;
+		conn = zhpe_ibuf_get(&zctx->conn_pool, i);
+		assert_always(conn->zctx);
+		counters->rx_oos += conn->rx_zseq.rx_oos_cnt;
+		counters->tx_retry += conn->tx_flowctl_retry_cnt;
+	}
 }
 
 int zhpe_conn_eflags_error(uint8_t eflags)

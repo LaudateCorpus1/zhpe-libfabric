@@ -1361,24 +1361,29 @@ static int ctx_progress_tx(struct zhpe_ctx *zctx)
 	struct zhpe_conn	*conn;
 	struct dlist_entry	*first;
 	struct dlist_entry	*next;
+	int			progress;
 
 	ctx_progress_ztq(zctx, zctx->ztq_hi);
 	for (i = 0; i < zctx->tx_ztq_slices; i++)
 		ctx_progress_ztq(zctx, zctx->ztq_lo[i]);
 	if (OFI_UNLIKELY(!dlist_empty(&zctx->tx_dequeue_list))) {
-		first = zctx->tx_dequeue_list.next;
- 		dlist_foreach_container_safe(&zctx->tx_dequeue_list,
- 					     struct zhpe_conn, conn,
-					     tx_dequeue_dentry, next)
-			conn->tx_dequeue(conn);
-		/*
-		 * To try to avoid corner cases, if the first conn is
-		 * still at the head of the list, move it to back.
-		 */
-		if (zctx->tx_dequeue_list.next == first) {
-			dlist_remove(first);
-			dlist_insert_tail(first, &zctx->tx_dequeue_list);
-		}
+		do {
+			progress = 0;
+			first = zctx->tx_dequeue_list.next;
+			dlist_foreach_container_safe(&zctx->tx_dequeue_list,
+						     struct zhpe_conn, conn,
+						     tx_dequeue_dentry, next)
+				progress |= conn->tx_dequeue(conn);
+			/*
+			 * To try to avoid corner cases, if the first conn is
+			 * still at the head of the list, move it to back.
+			 */
+			if (zctx->tx_dequeue_list.next == first) {
+				dlist_remove(first);
+				dlist_insert_tail(first,
+						  &zctx->tx_dequeue_list);
+			}
+		} while (progress);
  	}
 
 	return (zctx->tx_queued != 0);
