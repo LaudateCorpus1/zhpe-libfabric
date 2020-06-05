@@ -549,37 +549,38 @@ static void zhpe_rx_entry_report_complete(const struct zhpe_rx_entry *rx_entry,
 					  int err)
 {
 	struct util_ep		*ep = &rx_entry->zctx->util_ep;
-	uint64_t		rem;
+	uint64_t		len = rx_entry->total_wire;
+	uint64_t		olen;
 
 	zhpe_stats_stamp_dbg(__func__, __LINE__,
 			     (uintptr_t)rx_entry, err, 0, 0);
 
-	if (OFI_UNLIKELY(rx_entry->total_wire > rx_entry->total_user)) {
-		if (OFI_LIKELY(err >= 0)) {
-			err = -FI_ETRUNC;
-			rem = rx_entry->total_wire - rx_entry->total_user;
-		}
-	} else
-		rem = 0;
-
 	if (OFI_LIKELY(err >= 0)) {
-		ep->rx_cntr_inc(ep->rx_cntr);
-		if (!zhpe_cq_report_needed(ep->rx_cq, rx_entry->op_flags))
+		if (OFI_LIKELY(len <= rx_entry->total_user)) {
+			ep->rx_cntr_inc(ep->rx_cntr);
+			if (!zhpe_cq_report_needed(ep->rx_cq,
+						   rx_entry->op_flags))
+				return;
+			zhpe_cq_report_success(ep->rx_cq, rx_entry->op_flags,
+					       rx_entry->op_context, len, NULL,
+					       rx_entry->cq_data,
+					       rx_entry->match_info.tag);
 			return;
-		zhpe_cq_report_success(ep->rx_cq, rx_entry->op_flags,
-				       rx_entry->op_context,
-				       rx_entry->total_user, NULL,
-				       rx_entry->cq_data,
-				       rx_entry->match_info.tag);
-		return;
+		}
+		err = -FI_ETRUNC;
+		olen = len - rx_entry->total_user;
+		len = rx_entry->total_user;
+	} else {
+		olen = len;
+		len = 0;
 	}
 
 	cntr_adderr(ep->rx_cntr);
 	if (!zhpe_cq_report_needed(ep->rx_cq, rx_entry->op_flags))
 		return;
 	zhpe_cq_report_error(ep->rx_cq, rx_entry->op_flags,
-			     rx_entry->op_context, rx_entry->total_user, NULL,
-			     rx_entry->cq_data, rx_entry->match_info.tag, rem,
+			     rx_entry->op_context, len, NULL,
+			     rx_entry->cq_data, rx_entry->match_info.tag, olen,
 			     err, 0);
 }
 
