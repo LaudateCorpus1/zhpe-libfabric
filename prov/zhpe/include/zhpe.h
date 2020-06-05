@@ -1696,11 +1696,17 @@ static inline void zhpe_get_uiov_lstate(const struct iovec *uiov,
 		return;
 	liov[0].iov_base = (uintptr_t)uiov[0].iov_base;
 	liov[0].iov_len = uiov[0].iov_len;
-	liov[0].iov_desc = udesc[0];
+	if (udesc)
+		liov[0].iov_desc = udesc[0];
+	else
+		liov[0].iov_desc = NULL;
 	if (OFI_UNLIKELY(uiov_cnt > 1)) {
 		liov[1].iov_base = (uintptr_t)uiov[1].iov_base;
 		liov[1].iov_len = uiov[1].iov_len;
-		liov[1].iov_desc = udesc[1];
+		if (udesc)
+			liov[1].iov_desc = udesc[1];
+		else
+			liov[1].iov_desc = NULL;
 	}
 }
 
