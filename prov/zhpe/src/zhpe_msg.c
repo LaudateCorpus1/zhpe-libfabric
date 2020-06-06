@@ -209,7 +209,7 @@ static int recv_peek_claim(struct zhpe_ctx *zctx,
 	struct zhpe_rx_entry	*rx_wire;
 	struct zhpe_rx_match_info user_info;
 
-	if (OFI_UNLIKELY(zctx->zep->disabled))
+	if (OFI_UNLIKELY(!(zctx->enabled & ZHPE_CTX_ENABLED_RX)))
 		return -FI_EOPBADSTATE;
 
 	op_flags |= FI_RECV | FI_TAGGED;
@@ -283,7 +283,7 @@ static int recv_iov(struct zhpe_ctx *zctx, const struct iovec *uiov,
 	struct zhpe_rx_match_lists *match_lists;
 	uint64_t		total_user;
 
-	if (OFI_UNLIKELY(zctx->zep->disabled))
+	if (OFI_UNLIKELY(!(zctx->enabled & ZHPE_CTX_ENABLED_RX)))
 		return -FI_EOPBADSTATE;
 
 	rc = zhpe_get_uiov_len(uiov, uiov_cnt, &total_user);
@@ -507,7 +507,7 @@ static int send_inline(struct zhpe_ctx *zctx, void *op_context, uint64_t tag,
 	union zhpe_hw_wq_entry	*wqe[2];
 	int			rc;
 
-	if (OFI_UNLIKELY(zctx->zep->disabled))
+	if (OFI_UNLIKELY(!(zctx->enabled & ZHPE_CTX_ENABLED_TX)))
 		return -FI_EOPBADSTATE;
 
 	zctx_lock(zctx);
@@ -674,7 +674,7 @@ static int send_iov(struct zhpe_ctx *zctx, void *op_context, uint64_t tag,
 	char			*bptr;
 	char			buf[ZHPE_EP_MAX_INLINE_MSG] INT64_ALIGNED;
 
-	if (OFI_UNLIKELY(zctx->zep->disabled))
+	if (OFI_UNLIKELY(!(zctx->enabled & ZHPE_CTX_ENABLED_TX)))
 		return -FI_EOPBADSTATE;
 
 	rc = zhpe_get_uiov_len(uiov, uiov_cnt, &total_user);

@@ -310,6 +310,8 @@ int ofi_endpoint_init(struct fid_domain *domain, const struct util_prov *util_pr
 		      ofi_ep_progress_func progress);
 
 int ofi_endpoint_close(struct util_ep *util_ep);
+void ofi_endpoint_unbind_rx(struct util_ep *util_ep);
+void ofi_endpoint_unbind_tx(struct util_ep *util_ep);
 
 static inline int
 ofi_ep_fid_bind(struct fid *ep_fid, struct fid *bfid, uint64_t flags)

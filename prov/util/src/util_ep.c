@@ -267,20 +267,14 @@ int ofi_endpoint_init(struct fid_domain *domain, const struct util_prov *util_pr
 	return 0;
 }
 
-int ofi_endpoint_close(struct util_ep *util_ep)
+void ofi_endpoint_unbind_rx(struct util_ep *util_ep)
 {
-	if (util_ep->tx_cq) {
-		fid_list_remove(&util_ep->tx_cq->ep_list,
-				&util_ep->tx_cq->ep_list_lock,
-				&util_ep->ep_fid.fid);
-		ofi_atomic_dec32(&util_ep->tx_cq->ref);
-	}
-
 	if (util_ep->rx_cq) {
 		fid_list_remove(&util_ep->rx_cq->ep_list,
 				&util_ep->rx_cq->ep_list_lock,
 				&util_ep->ep_fid.fid);
 		ofi_atomic_dec32(&util_ep->rx_cq->ref);
+		util_ep->rx_cq = NULL;
 	}
 
 	if (util_ep->rx_cntr) {
@@ -288,27 +282,7 @@ int ofi_endpoint_close(struct util_ep *util_ep)
 				&util_ep->rx_cntr->ep_list_lock,
 				&util_ep->ep_fid.fid);
 		ofi_atomic_dec32(&util_ep->rx_cntr->ref);
-	}
-
-	if (util_ep->tx_cntr) {
-		fid_list_remove(&util_ep->tx_cntr->ep_list,
-				&util_ep->tx_cntr->ep_list_lock,
-				&util_ep->ep_fid.fid);
-		ofi_atomic_dec32(&util_ep->tx_cntr->ref);
-	}
-
-	if (util_ep->rd_cntr) {
-		fid_list_remove(&util_ep->rd_cntr->ep_list,
-				&util_ep->rd_cntr->ep_list_lock,
-				&util_ep->ep_fid.fid);
-		ofi_atomic_dec32(&util_ep->rd_cntr->ref);
-	}
-
-	if (util_ep->wr_cntr) {
-		fid_list_remove(&util_ep->wr_cntr->ep_list,
-				&util_ep->wr_cntr->ep_list_lock,
-				&util_ep->ep_fid.fid);
-		ofi_atomic_dec32(&util_ep->wr_cntr->ref);
+		util_ep->rx_cntr = NULL;
 	}
 
 	if (util_ep->rem_rd_cntr) {
@@ -316,6 +290,7 @@ int ofi_endpoint_close(struct util_ep *util_ep)
 				&util_ep->rem_rd_cntr->ep_list_lock,
 				&util_ep->ep_fid.fid);
 		ofi_atomic_dec32(&util_ep->rem_rd_cntr->ref);
+		util_ep->rem_rd_cntr = NULL;
 	}
 
 	if (util_ep->rem_wr_cntr) {
@@ -323,7 +298,49 @@ int ofi_endpoint_close(struct util_ep *util_ep)
 				&util_ep->rem_wr_cntr->ep_list_lock,
 				&util_ep->ep_fid.fid);
 		ofi_atomic_dec32(&util_ep->rem_wr_cntr->ref);
+		util_ep->rem_wr_cntr = NULL;
 	}
+}
+
+void ofi_endpoint_unbind_tx(struct util_ep *util_ep)
+{
+	if (util_ep->tx_cq) {
+		fid_list_remove(&util_ep->tx_cq->ep_list,
+				&util_ep->tx_cq->ep_list_lock,
+				&util_ep->ep_fid.fid);
+		ofi_atomic_dec32(&util_ep->tx_cq->ref);
+		util_ep->tx_cq = NULL;
+	}
+
+	if (util_ep->tx_cntr) {
+		fid_list_remove(&util_ep->tx_cntr->ep_list,
+				&util_ep->tx_cntr->ep_list_lock,
+				&util_ep->ep_fid.fid);
+		ofi_atomic_dec32(&util_ep->tx_cntr->ref);
+		util_ep->tx_cntr = NULL;
+	}
+
+	if (util_ep->rd_cntr) {
+		fid_list_remove(&util_ep->rd_cntr->ep_list,
+				&util_ep->rd_cntr->ep_list_lock,
+				&util_ep->ep_fid.fid);
+		ofi_atomic_dec32(&util_ep->rd_cntr->ref);
+		util_ep->rd_cntr = NULL;
+	}
+
+	if (util_ep->wr_cntr) {
+		fid_list_remove(&util_ep->wr_cntr->ep_list,
+				&util_ep->wr_cntr->ep_list_lock,
+				&util_ep->ep_fid.fid);
+		ofi_atomic_dec32(&util_ep->wr_cntr->ref);
+		util_ep->wr_cntr = NULL;
+	}
+}
+
+int ofi_endpoint_close(struct util_ep *util_ep)
+{
+	ofi_endpoint_unbind_rx(util_ep);
+	ofi_endpoint_unbind_tx(util_ep);
 
 	if (util_ep->av) {
 		fastlock_acquire(&util_ep->av->ep_list_lock);

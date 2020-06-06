@@ -343,7 +343,7 @@ static int rma_iov_op(struct zhpe_ctx *zctx, void *op_context, uint64_t cq_data,
 	struct zhpe_conn	*conn;
 	struct zhpe_rma_entry	*rma_entry;
 
-	if (OFI_UNLIKELY(zctx->zep->disabled))
+	if (OFI_UNLIKELY(!(zctx->enabled & ZHPE_CTX_ENABLED_TX)))
 		return -FI_EOPBADSTATE;
 
 	zhpe_stats_stamp_dbg(__func__, __LINE__, 0, 0, 0, 0);

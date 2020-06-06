@@ -482,7 +482,7 @@ static int atomic_op(struct zhpe_ctx *zctx,  struct atomic_op *aop,
 	struct zhpe_conn	*conn;
 	int			rc;
 
-	if (OFI_UNLIKELY(zctx->zep->disabled))
+	if (OFI_UNLIKELY(!(zctx->enabled & ZHPE_CTX_ENABLED_TX)))
 		return -FI_EOPBADSTATE;
 
 	zctx_lock(zctx);

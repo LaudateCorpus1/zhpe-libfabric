@@ -911,9 +911,11 @@ extern struct zhpe_pe_ctx_ops zhpe_pe_ctx_ops_auto_tx_idle;
 extern struct zhpe_pe_ctx_ops zhpe_pe_ctx_ops_manual;
 
 enum {
-	ZHPE_CTX_CLOSE_RX	= 0x1,
-	ZHPE_CTX_CLOSE_TX	= 0x2,
-	ZHPE_CTX_CLOSE_ALL	= 0x3,
+	ZHPE_CTX_ENABLED_RX	= 0x01,
+	ZHPE_CTX_ENABLED_TX	= 0x02,
+	ZHPE_CTX_ENABLED_ALL	= 0x03,
+	ZHPE_CTX_ENABLED_RX_CLOSED = 0x04,
+	ZHPE_CTX_ENABLED_TX_CLOSED = 0x08,
 };
 
 struct zhpe_ctx {
@@ -957,7 +959,7 @@ struct zhpe_ctx {
 
 	uint8_t		        ctx_idx;
 	uint8_t			shutdown;
-	uint8_t			close;
+	uint8_t			enabled;
 
 	struct zhpe_bufpool	rx_entry_pool;
 	struct zhpe_bufpool	rx_oos_pool;
@@ -1024,9 +1026,8 @@ static inline void zhpe_tx_entry_slot_free(struct zhpe_tx_entry *tx_entry,
 }
 
 enum {
-	ZHPE_EP_DISABLED = 2,
-	ZHPE_EP_DISABLED_ENABLE_IN_PROGRESS = 1,
-	ZHPE_EP_DISABLED_ENABLED = 0,
+	ZHPE_EP_ENABLED		= 0x1,
+	ZHPE_EP_ENABLED_QALLOC	= 0x2,
 };
 
 struct zhpe_ep {
@@ -1038,11 +1039,10 @@ struct zhpe_ep {
 
 	uuid_t			uuid;
 
-	ofi_atomic32_t		num_ctx_open;
 	uint8_t			num_ctx;
 	uint8_t			num_tx_ctx;
 	uint8_t			num_rx_ctx;
-	uint8_t			disabled;
+	uint8_t			enabled;
 
 	struct zhpe_ctx		*zctx[];
 };
