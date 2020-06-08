@@ -661,7 +661,10 @@ void zhpe_rx_peek_recv(struct zhpe_ctx *zctx,
 				struct zhpe_rx_entry, rx_wire, dentry) {
 		if (!user_info->match_fn(user_info, &rx_wire->match_info))
 			continue;
-		goto found;
+		if (OFI_LIKELY(rx_wire->rx_state != ZHPE_RX_STATE_INLINE_M &&
+				rx_wire->rx_state != ZHPE_RX_STATE_RND_M))
+		    goto found;
+		break;
 	}
 	if (!zhpe_cq_report_needed(ep->rx_cq, flags))
 		return;
