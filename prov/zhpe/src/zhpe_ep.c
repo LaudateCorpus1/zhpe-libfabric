@@ -972,6 +972,12 @@ static void set_fid_ep(struct zhpe_ep *zep, struct fid_ep *fid_ep,
 		fid_ep->ops = &zhpe_ep_ops;
 		fid_ep->cm = &zhpe_ep_cm_ops;
 
+		/*
+		 * Technically, according to the API, we should be
+		 * supporting various restrictions like send-only
+		 * EPs. Looks like a waste of time.
+		 */
+
 		switch (op_idx) {
 
 		case 0:
