@@ -373,17 +373,21 @@ static void tx_handle_rx_get_rnd(struct zhpe_tx_entry *tx_entry,
 
 	rx_entry = container_of(tx_entry, struct zhpe_rx_entry, tx_entry);
 
-	zhpe_stats_stamp_dbg(__func__, __LINE__, (uintptr_t)rx_entry, 0, 0, 0);
+	zhpe_stats_stamp_dbg(__func__, __LINE__,
+			     (uintptr_t)rx_entry, tx_entry->cstat.status,
+			     tx_entry->cstat.flags, 0);
 
 	if (OFI_LIKELY(!tx_entry->cstat.status)) {
 		if (!(tx_entry->cstat.flags & ZHPE_CS_FLAG_RMA_DONE)) {
 			if (OFI_LIKELY(!conn->eflags)) {
 				zhpe_iov_rma(tx_entry, ZHPE_SEG_MAX_BYTES,
 					     ZHPE_SEG_MAX_OPS);
-				return;
-			}
-			tx_entry->cstat.status =
-				zhpe_conn_eflags_error(conn->eflags);
+				if (OFI_LIKELY(!(tx_entry->cstat.flags &
+						 ZHPE_CS_FLAG_RMA_DONE)))
+				    return;
+			} else
+				tx_entry->cstat.status =
+					zhpe_conn_eflags_error(conn->eflags);
 		}
 	}
 

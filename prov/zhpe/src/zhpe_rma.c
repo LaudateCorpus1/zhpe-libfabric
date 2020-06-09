@@ -274,25 +274,28 @@ void zhpe_rma_tx_start(struct zhpe_rma_entry *rma_entry)
 	struct zhpe_tx_entry	*tx_entry = &rma_entry->tx_entry;
 	struct zhpe_conn	*conn = tx_entry->conn;
 
+	zhpe_stats_stamp_dbg(__func__, __LINE__,
+			     (uintptr_t)rma_entry, tx_entry->cstat.status,
+			     tx_entry->cstat.flags, 0);
+
 	/* conn->zctx lock must be held. */
 	if (OFI_LIKELY(!tx_entry->cstat.status)) {
 		if (!(tx_entry->cstat.flags & ZHPE_CS_FLAG_RMA_DONE)) {
 			if (OFI_LIKELY(!conn->eflags)) {
 				zhpe_iov_rma(tx_entry, ZHPE_SEG_MAX_BYTES,
 					     ZHPE_SEG_MAX_OPS);
-				return;
-			}
-			tx_entry->cstat.status =
-				zhpe_conn_eflags_error(conn->eflags);
+				if (OFI_LIKELY(!(tx_entry->cstat.flags &
+						 ZHPE_CS_FLAG_RMA_DONE)))
+					return;
+			} else
+				tx_entry->cstat.status =
+					zhpe_conn_eflags_error(conn->eflags);
 		}
 		if (OFI_UNLIKELY(conn->rem_rma_flags & rma_entry->op_flags))
 			zhpe_send_writedata(conn, rma_entry->op_flags,
 					    rma_entry->cq_data);
 	}
 
-	zhpe_stats_stamp_dbg(__func__, __LINE__,
-			     (uintptr_t)tx_entry, tx_entry->cstat.status,
-			     0, 0);
 	zhpe_rma_complete(rma_entry);
 }
 
