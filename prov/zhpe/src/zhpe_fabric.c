@@ -495,13 +495,15 @@ int zhpe_getinfo(uint32_t api_version, const char *node, const char *service,
 						 ZHPE_EP_MODE_SUPPORTED);
 			if (!hints->rx_attr->size)
 				info1->rx_attr->size = ZHPE_EP_DEF_RX_SZ;
-		}
+		} else
+			  info1->rx_attr->size = ZHPE_EP_DEF_RX_SZ;
 		if (hints->tx_attr) {
 			info1->tx_attr->mode |= (hints->tx_attr->mode &
 						 ZHPE_EP_MODE_SUPPORTED);
 			if (!hints->tx_attr->size)
 				info1->tx_attr->size = ZHPE_EP_DEF_TX_SZ;
-		}
+		} else
+			info1->tx_attr->size = ZHPE_EP_DEF_TX_SZ;
 	}
 	for (info = info1->next; info; info = info->next) {
 		info->mode = info1->mode;
