@@ -280,20 +280,25 @@ void zhpe_rma_tx_start(struct zhpe_rma_entry *rma_entry)
 
 	/* conn->zctx lock must be held. */
 	if (OFI_LIKELY(!tx_entry->cstat.status)) {
-		if (!(tx_entry->cstat.flags & ZHPE_CS_FLAG_RMA_DONE)) {
-			if (OFI_LIKELY(!conn->eflags)) {
+		if (OFI_LIKELY(!conn->eflags)) {
+			/* Optimize for short ops. */
+			if (OFI_UNLIKELY(!(tx_entry->cstat.flags &
+					   ZHPE_CS_FLAG_RMA_DONE))) {
 				zhpe_iov_rma(tx_entry, ZHPE_SEG_MAX_BYTES,
 					     ZHPE_SEG_MAX_OPS);
-				if (OFI_LIKELY(!(tx_entry->cstat.flags &
-						 ZHPE_CS_FLAG_RMA_DONE)))
+				if (OFI_LIKELY(tx_entry->cstat.completions))
 					return;
-			} else
-				tx_entry->cstat.status =
-					zhpe_conn_eflags_error(conn->eflags);
-		}
-		if (OFI_UNLIKELY(conn->rem_rma_flags & rma_entry->op_flags))
-			zhpe_send_writedata(conn, rma_entry->op_flags,
-					    rma_entry->cq_data);
+				if (OFI_UNLIKELY(!(tx_entry->cstat.flags &
+						   ZHPE_CS_FLAG_RMA_DONE)))
+					return;
+			}
+			if (OFI_UNLIKELY(conn->rem_rma_flags &
+					 rma_entry->op_flags))
+				zhpe_send_writedata(conn, rma_entry->op_flags,
+						    rma_entry->cq_data);
+		} else
+			tx_entry->cstat.status =
+				zhpe_conn_eflags_error(conn->eflags);
 	}
 
 	zhpe_rma_complete(rma_entry);
