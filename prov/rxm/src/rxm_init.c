@@ -53,7 +53,7 @@ size_t rxm_msg_tx_size		= 128;
 size_t rxm_msg_rx_size		= 128;
 size_t rxm_eager_limit		= RXM_BUF_SIZE - sizeof(struct rxm_pkt);
 int force_auto_progress		= 0;
-enum fi_wait_obj def_wait_obj	= FI_WAIT_FD;
+enum fi_wait_obj def_wait_obj = FI_WAIT_FD, def_tcp_wait_obj = FI_WAIT_UNSPEC;
 
 char *rxm_proto_state_str[] = {
 	RXM_PROTO_STATES(OFI_STR)
@@ -92,7 +92,7 @@ void rxm_info_to_core_mr_modes(uint32_t version, const struct fi_info *hints,
 int rxm_info_to_core(uint32_t version, const struct fi_info *hints,
 		     const struct fi_info *base_info, struct fi_info *core_info)
 {
-	int use_srx = 0;
+	int ret, use_srx = 0;
 
 	rxm_info_to_core_mr_modes(version, hints, core_info);
 
@@ -124,8 +124,13 @@ int rxm_info_to_core(uint32_t version, const struct fi_info *hints,
 			core_info->rx_attr->comp_order = hints->rx_attr->comp_order;
 		}
 	}
+
 	core_info->ep_attr->type = FI_EP_MSG;
-	if (!fi_param_get_bool(&rxm_prov, "use_srx", &use_srx) && use_srx) {
+
+	ret = fi_param_get_bool(&rxm_prov, "use_srx", &use_srx);
+	if (use_srx || ((ret == -FI_ENODATA) && base_info &&
+	    base_info->fabric_attr->prov_name &&
+	    !strcmp(base_info->fabric_attr->prov_name, "tcp"))) {
 		FI_DBG(&rxm_prov, FI_LOG_FABRIC,
 		       "Requesting shared receive context from core provider\n");
 		core_info->ep_attr->rx_ctx_cnt = FI_SHARED_CONTEXT;
@@ -187,23 +192,33 @@ int rxm_info_to_rxm(uint32_t version, const struct fi_info *core_info,
 	return 0;
 }
 
-static int rxm_init_info(void)
+static void rxm_init_infos(void)
 {
-	size_t param;
+	struct fi_info *cur;
+	size_t buf_size, tx_size = 0, rx_size = 0;
 
-	if (!fi_param_get_size_t(&rxm_prov, "buffer_size", &param)) {
-		if (param < sizeof(struct rxm_pkt) + sizeof(struct rxm_rndv_hdr)) {
+	if (!fi_param_get_size_t(&rxm_prov, "buffer_size", &buf_size)) {
+		if (buf_size <
+		    sizeof(struct rxm_pkt) + sizeof(struct rxm_rndv_hdr)) {
 			FI_WARN(&rxm_prov, FI_LOG_CORE,
 				"Requested buffer size too small\n");
-			return -FI_EINVAL;
+			buf_size = sizeof(struct rxm_pkt) +
+				   sizeof(struct rxm_rndv_hdr);
 		}
 
-		rxm_eager_limit = param - sizeof(struct rxm_pkt);
+		rxm_eager_limit = buf_size - sizeof(struct rxm_pkt);
 	}
-	rxm_info.tx_attr->inject_size = rxm_eager_limit;
-	rxm_info_coll.tx_attr->inject_size = rxm_eager_limit;
-	rxm_util_prov.info = &rxm_info;
-	return 0;
+
+	fi_param_get_size_t(&rxm_prov, "tx_size", &tx_size);
+	fi_param_get_size_t(&rxm_prov, "rx_size", &rx_size);
+
+	for (cur = (struct fi_info *) rxm_util_prov.info; cur; cur = cur->next) {
+		cur->tx_attr->inject_size = rxm_eager_limit;
+		if (tx_size)
+			cur->tx_attr->size = tx_size;
+		if (rx_size)
+			cur->rx_attr->size = rx_size;
+	}
 }
 
 static void rxm_alter_info(const struct fi_info *hints, struct fi_info *info)
@@ -363,13 +378,30 @@ struct fi_provider rxm_prov = {
 	.cleanup = rxm_fini
 };
 
-static void rxm_param_get_def_wait(void)
+static void rxm_get_def_wait(void)
 {
 	char *wait_str = NULL;
+
+	fi_param_define(&rxm_prov, "def_wait_obj", FI_PARAM_STRING,
+			"Specifies the default wait object used for blocking "
+			"operations (e.g. fi_cq_sread).  Supported values "
+			"are: fd and pollfd (default: fd).");
+
+	fi_param_define(&rxm_prov, "def_tcp_wait_obj", FI_PARAM_STRING,
+			"See def_wait_obj for description.  If set, this "
+			"overrides the def_wait_obj when running over the "
+			"tcp provider.");
 
 	fi_param_get_str(&rxm_prov, "def_wait_obj", &wait_str);
 	if (wait_str && !strcasecmp(wait_str, "pollfd"))
 		def_wait_obj = FI_WAIT_POLLFD;
+
+	wait_str = NULL;
+	fi_param_get_str(&rxm_prov, "def_tcp_wait_obj", &wait_str);
+	if (wait_str) {
+		def_tcp_wait_obj = (!strcasecmp(wait_str, "pollfd")) ?
+				   FI_WAIT_POLLFD : FI_WAIT_FD;
+	}
 }
 
 RXM_INI
@@ -440,13 +472,7 @@ RXM_INI
 			"Force auto-progress for data transfers even if app "
 			"requested manual progress (default: false/no).");
 
-	fi_param_define(&rxm_prov, "def_wait_obj", FI_PARAM_STRING,
-			"Specifies the default wait object used for blocking "
-			"operations (e.g. fi_cq_sread).  Supported values "
-			"are: fd and pollfd (default: fd).");
-
-	fi_param_get_size_t(&rxm_prov, "tx_size", &rxm_info.tx_attr->size);
-	fi_param_get_size_t(&rxm_prov, "rx_size", &rxm_info.rx_attr->size);
+	rxm_init_infos();
 	fi_param_get_size_t(&rxm_prov, "msg_tx_size", &rxm_msg_tx_size);
 	fi_param_get_size_t(&rxm_prov, "msg_rx_size", &rxm_msg_rx_size);
 	if (fi_param_get_int(&rxm_prov, "cm_progress_interval",
@@ -456,17 +482,12 @@ RXM_INI
 				(int *) &rxm_cq_eq_fairness))
 		rxm_cq_eq_fairness = 128;
 	fi_param_get_bool(&rxm_prov, "data_auto_progress", &force_auto_progress);
-	rxm_param_get_def_wait();
+	rxm_get_def_wait();
 
 	if (force_auto_progress)
 		FI_INFO(&rxm_prov, FI_LOG_CORE, "auto-progress for data requested "
 			"(FI_OFI_RXM_DATA_AUTO_PROGRESS = 1), domain threading "
 			"level would be set to FI_THREAD_SAFE\n");
-
-	if (rxm_init_info()) {
-		FI_WARN(&rxm_prov, FI_LOG_CORE, "Unable to initialize rxm_info\n");
-		return NULL;
-	}
 
 	return &rxm_prov;
 }

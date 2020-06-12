@@ -129,7 +129,7 @@ extern size_t rxm_msg_rx_size;
 extern size_t rxm_cm_progress_interval;
 extern size_t rxm_cq_eq_fairness;
 extern int force_auto_progress;
-extern enum fi_wait_obj def_wait_obj;
+extern enum fi_wait_obj def_wait_obj, def_tcp_wait_obj;
 
 struct rxm_ep;
 
@@ -277,6 +277,7 @@ struct rxm_domain {
 	size_t max_atomic_size;
 	uint64_t mr_key;
 	uint8_t mr_local;
+	struct ofi_ops_flow_ctrl *flow_ctrl_ops;
 };
 
 int rxm_av_open(struct fid_domain *domain_fid, struct fi_av_attr *attr,
@@ -643,12 +644,10 @@ struct rxm_msg_eq_entry {
 #define RXM_CM_ENTRY_SZ (sizeof(struct fi_eq_cm_entry) + \
 			 sizeof(union rxm_cm_data))
 
-struct rxm_handle_txrx_ops {
-	int (*comp_eager_tx)(struct rxm_ep *rxm_ep,
-				    struct rxm_tx_eager_buf *tx_eager_buf);
-	ssize_t (*handle_eager_rx)(struct rxm_rx_buf *rx_buf);
-	ssize_t (*handle_rndv_rx)(struct rxm_rx_buf *rx_buf);
-	ssize_t (*handle_seg_data_rx)(struct rxm_rx_buf *rx_buf);
+struct rxm_eager_ops {
+	int (*comp_tx)(struct rxm_ep *rxm_ep,
+		       struct rxm_tx_eager_buf *tx_eager_buf);
+	ssize_t (*handle_rx)(struct rxm_rx_buf *rx_buf);
 };
 
 struct rxm_ep {
@@ -684,8 +683,7 @@ struct rxm_ep {
 	struct rxm_recv_queue	recv_queue;
 	struct rxm_recv_queue	trecv_queue;
 
-	struct rxm_handle_txrx_ops	*txrx_ops;
-	struct ofi_ops_flow_ctrl	*flow_ctrl_ops;
+	struct rxm_eager_ops	*eager_ops;
 };
 
 struct rxm_conn {
@@ -709,8 +707,6 @@ struct rxm_conn {
 };
 
 extern struct fi_provider rxm_prov;
-extern struct fi_info rxm_info;
-extern struct fi_info rxm_info_coll;
 extern struct fi_fabric_attr rxm_fabric_attr;
 extern struct fi_domain_attr rxm_domain_attr;
 extern struct fi_tx_attr rxm_tx_attr;
@@ -726,7 +722,7 @@ int rxm_domain_open(struct fid_fabric *fabric, struct fi_info *info,
 			     struct fid_domain **dom, void *context);
 int rxm_cq_open(struct fid_domain *domain, struct fi_cq_attr *attr,
 			 struct fid_cq **cq_fid, void *context);
-ssize_t rxm_cq_handle_rx_buf(struct rxm_rx_buf *rx_buf);
+ssize_t rxm_handle_rx_buf(struct rxm_rx_buf *rx_buf);
 
 int rxm_endpoint(struct fid_domain *domain, struct fi_info *info,
 			  struct fid_ep **ep, void *context);
@@ -735,16 +731,14 @@ int rxm_conn_cmap_alloc(struct rxm_ep *rxm_ep);
 void rxm_cq_write_error(struct util_cq *cq, struct util_cntr *cntr,
 			void *op_context, int err);
 void rxm_cq_write_error_all(struct rxm_ep *rxm_ep, int err);
-void rxm_cq_read_write_error(struct rxm_ep *rxm_ep);
-ssize_t rxm_cq_handle_comp(struct rxm_ep *rxm_ep, struct fi_cq_data_entry *comp);
+void rxm_handle_comp_error(struct rxm_ep *rxm_ep);
+ssize_t rxm_handle_comp(struct rxm_ep *rxm_ep, struct fi_cq_data_entry *comp);
 void rxm_ep_progress(struct util_ep *util_ep);
 void rxm_ep_progress_coll(struct util_ep *util_ep);
 void rxm_ep_do_progress(struct util_ep *util_ep);
 
-ssize_t rxm_cq_handle_eager(struct rxm_rx_buf *rx_buf);
-ssize_t rxm_cq_handle_coll_eager(struct rxm_rx_buf *rx_buf);
-ssize_t rxm_cq_handle_rndv(struct rxm_rx_buf *rx_buf);
-ssize_t rxm_cq_handle_seg_data(struct rxm_rx_buf *rx_buf);
+ssize_t rxm_handle_eager(struct rxm_rx_buf *rx_buf);
+ssize_t rxm_handle_coll_eager(struct rxm_rx_buf *rx_buf);
 int rxm_finish_eager_send(struct rxm_ep *rxm_ep, struct rxm_tx_eager_buf *tx_eager_buf);
 int rxm_finish_coll_eager_send(struct rxm_ep *rxm_ep, struct rxm_tx_eager_buf *tx_eager_buf);
 

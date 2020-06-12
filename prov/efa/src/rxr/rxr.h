@@ -61,6 +61,7 @@
 #include <uthash.h>
 #include <ofi_recvwin.h>
 #include <ofi_perf.h>
+#include <ofi_hmem.h>
 
 #include "rxr_pkt_entry.h"
 #include "rxr_pkt_type.h"
@@ -514,6 +515,7 @@ struct rxr_ep {
 	struct fid_cq *rdm_cq;
 
 	/* shm provider fid */
+	bool use_shm;
 	struct fid_ep *shm_ep;
 	struct fid_cq *shm_cq;
 

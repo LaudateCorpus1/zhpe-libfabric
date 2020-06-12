@@ -42,11 +42,15 @@
 
 #include <ofi_mr.h>
 
-struct ofi_memhooks memhooks;
+struct ofi_memhooks memhooks = {
+	.monitor.init = ofi_monitor_init,
+	.monitor.cleanup = ofi_monitor_cleanup
+};
 struct ofi_mem_monitor *memhooks_monitor = &memhooks.monitor;
 
 
-#if defined(__linux__) && defined(HAVE_ELF_H) && defined(HAVE_SYS_AUXV_H)
+/* memhook support checks */
+#if HAVE_MEMHOOKS_MONITOR
 
 #include <elf.h>
 #include <sys/auxv.h>
@@ -252,12 +256,12 @@ static void *ofi_intercept_dlopen(const char *filename, int flag)
 	if (!handle)
 		return NULL;
 
-	pthread_mutex_lock(&memhooks_monitor->lock);
+	pthread_mutex_lock(&mm_lock);
 	dlist_foreach_container(&memhooks.intercept_list, struct ofi_intercept,
 		intercept, entry) {
 		dl_iterate_phdr(ofi_intercept_phdr_handler, intercept);
 	}
-	pthread_mutex_unlock(&memhooks_monitor->lock);
+	pthread_mutex_unlock(&mm_lock);
 	return handle;
 }
 
@@ -356,9 +360,9 @@ static int ofi_intercept_symbol(struct ofi_intercept *intercept, void **real_fun
 
 void ofi_intercept_handler(const void *addr, size_t len)
 {
-	pthread_mutex_lock(&memhooks_monitor->lock);
+	pthread_mutex_lock(&mm_lock);
 	ofi_monitor_notify(memhooks_monitor, addr, len);
-	pthread_mutex_unlock(&memhooks_monitor->lock);
+	pthread_mutex_unlock(&mm_lock);
 }
 
 static void *ofi_intercept_mmap(void *start, size_t length,
@@ -468,7 +472,7 @@ static void ofi_memhooks_unsubscribe(struct ofi_mem_monitor *monitor,
 	/* no-op */
 }
 
-int ofi_memhooks_init(void)
+int ofi_memhooks_start(void)
 {
 	int i, ret;
 
@@ -549,7 +553,7 @@ int ofi_memhooks_init(void)
 	return 0;
 }
 
-void ofi_memhooks_cleanup(void)
+void ofi_memhooks_stop(void)
 {
 	ofi_restore_intercepts();
 	memhooks_monitor->subscribe = NULL;
@@ -558,13 +562,13 @@ void ofi_memhooks_cleanup(void)
 
 #else
 
-int ofi_memhooks_init(void)
+int ofi_memhooks_start(void)
 {
 	return -FI_ENOSYS;
 }
 
-void ofi_memhooks_cleanup(void)
+void ofi_memhooks_stop(void)
 {
 }
 
-#endif
+#endif /* memhook support checks */

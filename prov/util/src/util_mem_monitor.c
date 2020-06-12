@@ -35,7 +35,12 @@
 #include <ofi_mr.h>
 #include <unistd.h>
 
-static struct ofi_uffd uffd;
+pthread_mutex_t mm_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static struct ofi_uffd uffd = {
+	.monitor.init = ofi_monitor_init,
+	.monitor.cleanup = ofi_monitor_cleanup
+};
 struct ofi_mem_monitor *uffd_monitor = &uffd.monitor;
 
 struct ofi_mem_monitor *default_monitor;
@@ -57,20 +62,28 @@ static size_t ofi_default_cache_size(void)
 	return cache_size;
 }
 
+
+void ofi_monitor_init(struct ofi_mem_monitor *monitor)
+{
+	dlist_init(&monitor->list);
+}
+
+void ofi_monitor_cleanup(struct ofi_mem_monitor *monitor)
+{
+	assert(dlist_empty(&monitor->list));
+}
+
 /*
  * Initialize all available memory monitors
  */
-void ofi_monitor_init(void)
+void ofi_monitors_init(void)
 {
-	pthread_mutex_init(&uffd_monitor->lock, NULL);
-	dlist_init(&uffd_monitor->list);
+	uffd_monitor->init(uffd_monitor);
+	memhooks_monitor->init(memhooks_monitor);
 
-	pthread_mutex_init(&memhooks_monitor->lock, NULL);
-	dlist_init(&memhooks_monitor->list);
-
-#if defined(HAVE_ELF_H) && defined(HAVE_SYS_AUXV_H)
+#if HAVE_MEMHOOKS_MONITOR
         default_monitor = memhooks_monitor;
-#elif HAVE_UFFD_UNMAP
+#elif HAVE_UFFD_MONITOR
         default_monitor = uffd_monitor;
 #else
         default_monitor = NULL;
@@ -106,23 +119,30 @@ void ofi_monitor_init(void)
 		cache_params.max_size = ofi_default_cache_size();
 
 	if (cache_params.monitor != NULL) {
-		if (!strcmp(cache_params.monitor, "userfaultfd") &&
-		    default_monitor == uffd_monitor)
+		if (!strcmp(cache_params.monitor, "userfaultfd")) {
+#if HAVE_UFFD_MONITOR
 			default_monitor = uffd_monitor;
-		else if (!strcmp(cache_params.monitor, "memhooks"))
-			default_monitor = memhooks_monitor;
-		else if (!strcmp(cache_params.monitor, "disabled"))
+#else
+			FI_WARN(&core_prov, FI_LOG_MR, "userfaultfd monitor not available\n");
 			default_monitor = NULL;
+#endif
+		} else if (!strcmp(cache_params.monitor, "memhooks")) {
+#if HAVE_MEMHOOKS_MONITOR
+			default_monitor = memhooks_monitor;
+#else
+			FI_WARN(&core_prov, FI_LOG_MR, "memhooks monitor not available\n");
+			default_monitor = NULL;
+#endif
+		} else if (!strcmp(cache_params.monitor, "disabled")) {
+			default_monitor = NULL;
+		}
 	}
 }
 
-void ofi_monitor_cleanup(void)
+void ofi_monitors_cleanup(void)
 {
-	assert(dlist_empty(&uffd_monitor->list));
-	pthread_mutex_destroy(&uffd_monitor->lock);
-
-	assert(dlist_empty(&memhooks_monitor->list));
-	pthread_mutex_destroy(&memhooks_monitor->lock);
+	uffd_monitor->cleanup(uffd_monitor);
+	memhooks_monitor->cleanup(memhooks_monitor);
 }
 
 int ofi_monitor_add_cache(struct ofi_mem_monitor *monitor,
@@ -133,12 +153,12 @@ int ofi_monitor_add_cache(struct ofi_mem_monitor *monitor,
 	if (!monitor)
 		return -FI_ENOSYS;
 
-	pthread_mutex_lock(&monitor->lock);
+	pthread_mutex_lock(&mm_lock);
 	if (dlist_empty(&monitor->list)) {
 		if (monitor == uffd_monitor)
-			ret = ofi_uffd_init();
+			ret = ofi_uffd_start();
 		else if (monitor == memhooks_monitor)
-			ret = ofi_memhooks_init();
+			ret = ofi_memhooks_start();
 		else
 			ret = -FI_ENOSYS;
 
@@ -148,7 +168,7 @@ int ofi_monitor_add_cache(struct ofi_mem_monitor *monitor,
 	cache->monitor = monitor;
 	dlist_insert_tail(&cache->notify_entry, &monitor->list);
 out:
-	pthread_mutex_unlock(&monitor->lock);
+	pthread_mutex_unlock(&mm_lock);
 	return ret;
 }
 
@@ -157,17 +177,17 @@ void ofi_monitor_del_cache(struct ofi_mr_cache *cache)
 	struct ofi_mem_monitor *monitor = cache->monitor;
 
 	assert(monitor);
-	pthread_mutex_lock(&monitor->lock);
+	pthread_mutex_lock(&mm_lock);
 	dlist_remove(&cache->notify_entry);
 
 	if (dlist_empty(&monitor->list)) {
 		if (monitor == uffd_monitor)
-			ofi_uffd_cleanup();
+			ofi_uffd_stop();
 		else if (monitor == memhooks_monitor)
-			ofi_memhooks_cleanup();
+			ofi_memhooks_stop();
 	}
 
-	pthread_mutex_unlock(&monitor->lock);
+	pthread_mutex_unlock(&mm_lock);
 }
 
 /* Must be called holding monitor lock */
@@ -207,7 +227,7 @@ void ofi_monitor_unsubscribe(struct ofi_mem_monitor *monitor,
 	monitor->unsubscribe(monitor, addr, len);
 }
 
-#if HAVE_UFFD_UNMAP
+#if HAVE_UFFD_MONITOR
 
 #include <poll.h>
 #include <sys/syscall.h>
@@ -228,10 +248,10 @@ static void *ofi_uffd_handler(void *arg)
 		if (ret != 1)
 			break;
 
-		pthread_mutex_lock(&uffd.monitor.lock);
+		pthread_mutex_lock(&mm_lock);
 		ret = read(uffd.fd, &msg, sizeof(msg));
 		if (ret != sizeof(msg)) {
-			pthread_mutex_unlock(&uffd.monitor.lock);
+			pthread_mutex_unlock(&mm_lock);
 			if (errno != EAGAIN)
 				break;
 			continue;
@@ -260,7 +280,7 @@ static void *ofi_uffd_handler(void *arg)
 				"Unhandled uffd event %d\n", msg.event);
 			break;
 		}
-		pthread_mutex_unlock(&uffd.monitor.lock);
+		pthread_mutex_unlock(&mm_lock);
 	}
 	return NULL;
 }
@@ -330,7 +350,7 @@ static void ofi_uffd_unsubscribe(struct ofi_mem_monitor *monitor,
 	}
 }
 
-int ofi_uffd_init(void)
+int ofi_uffd_start(void)
 {
 	struct uffdio_api api;
 	int ret;
@@ -379,22 +399,22 @@ closefd:
 	return ret;
 }
 
-void ofi_uffd_cleanup(void)
+void ofi_uffd_stop(void)
 {
 	pthread_cancel(uffd.thread);
 	pthread_join(uffd.thread, NULL);
 	close(uffd.fd);
 }
 
-#else /* HAVE_UFFD_UNMAP */
+#else /* HAVE_UFFD_MONITOR */
 
-int ofi_uffd_init(void)
+int ofi_uffd_start(void)
 {
 	return -FI_ENOSYS;
 }
 
-void ofi_uffd_cleanup(void)
+void ofi_uffd_stop(void)
 {
 }
 
-#endif /* HAVE_UFFD_UNMAP */
+#endif /* HAVE_UFFD_MONITOR */

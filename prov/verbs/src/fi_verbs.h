@@ -1,6 +1,8 @@
 /*
  * Copyright (c) 2013-2018 Intel Corporation, Inc.  All rights reserved.
  * Copyright (c) 2016 Cisco Systems, Inc. All rights reserved.
+ * Copyright (c) 2018-2019 Cray Inc. All rights reserved.
+ * Copyright (c) 2018-2019 System Fabric Works, Inc. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -353,7 +355,6 @@ struct vrb_domain {
 	struct vrb_eq			*eq;
 	uint64_t			eq_flags;
 
-	uint64_t	threshold;
 	ssize_t		(*send_credits)(struct fid_ep *ep, uint64_t credits);
 
 	/* Indicates that MSG endpoints should use the XRC transport.
@@ -569,6 +570,7 @@ struct vrb_ep {
 	uint64_t			peer_rq_credits;
 	/* Protected by recv CQ lock */
 	uint64_t			rq_credits_avail;
+	uint64_t			threshold;
 
 	union {
 		struct rdma_cm_id	*id;

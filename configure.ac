@@ -2,6 +2,7 @@ dnl
 dnl Copyright (c) 2016 Cisco Systems, Inc.  All rights reserved.
 dnl Copyright (c) 2019 Intel, Inc.  All rights reserved.
 dnl Copyright (c) 2019-2020 Amazon.com, Inc. or its affiliates. All rights reserved.
+dnl (C) Copyright 2020 Hewlett Packard Enterprise Development LP
 dnl
 dnl Process this file with autoconf to produce a configure script.
 
@@ -485,6 +486,19 @@ AC_ARG_WITH([cuda],
 			    and runtime libraries are installed.])],
 	    [], [])
 
+AC_ARG_ENABLE([cuda-dlopen],
+    [AS_HELP_STRING([--enable-cuda-dlopen],
+        [Enable dlopen of CUDA libraries @<:@default=no@:>@])
+    ],
+    [
+        AS_IF([test "$freebsd" == "0"], [
+            AC_CHECK_LIB(dl, dlopen, [],
+                [AC_MSG_ERROR([dlopen not found.  libfabric requires libdl.])])
+        ])
+        AC_DEFINE([ENABLE_CUDA_DLOPEN], [1], [dlopen CUDA libraries])
+    ],
+    [enable_cuda_dlopen=no])
+
 FI_CHECK_PACKAGE([cuda],
 		 [cuda_runtime.h],
 		 [cudart],
@@ -495,9 +509,46 @@ FI_CHECK_PACKAGE([cuda],
 		 [AC_DEFINE([HAVE_LIBCUDA], [1],[CUDA support])],
 		 [], [])
 
+
+enable_memhooks=1
+AC_ARG_ENABLE([memhooks-monitor],
+              [AC_HELP_STRING([--disable-memhooks-monitor],
+                              [Determine whether memhooks memory monitor is disabled.])],
+              [enable_memhooks=0],
+              [])
+
+AC_DEFINE_UNQUOTED(ENABLE_MEMHOOKS_MONITOR, [$enable_memhooks],
+	[Define to 1 to enable memhooks memory monitor])
+
+enable_uffd=1
+AC_ARG_ENABLE([uffd-monitor],
+              [AC_HELP_STRING([--disable-uffd-monitor],
+                              [Determine whether uffd memory monitor is disabled.])],
+              [enable_uffd=0],
+              [])
+
+AC_DEFINE_UNQUOTED(ENABLE_UFFD_MONITOR, [$enable_uffd],
+	[Define to 1 to enable uffd memory monitor])
+
+
+AH_BOTTOM([
+#if defined(__linux__) && defined(HAVE_ELF_H) && defined(HAVE_SYS_AUXV_H) && ENABLE_MEMHOOKS_MONITOR
+#define HAVE_MEMHOOKS_MONITOR 1
+#else
+#define HAVE_MEMHOOKS_MONITOR 0
+#endif
+
+#if HAVE_UFFD_UNMAP && ENABLE_UFFD_MONITOR
+#define HAVE_UFFD_MONITOR 1
+#else
+#define HAVE_UFFD_MONITOR 0
+#endif
+])
+
 CPPFLAGS="$CPPFLAGS $cuda_CPPFLAGS"
 LDFLAGS="$LDFLAGS $cuda_LDFLAGS"
-LIBS="$LIBS $cuda_LIBS"
+
+AS_IF([test x"$enable_cuda_dlopen" != x"yes"], [LIBS="$LIBS $cuda_LIBS"])
 
 dnl Provider-specific checks
 FI_PROVIDER_INIT

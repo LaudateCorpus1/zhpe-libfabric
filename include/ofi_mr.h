@@ -96,6 +96,9 @@ static inline uint64_t ofi_mr_get_prov_mode(uint32_t version,
 }
 
 
+/* Single lock used by all memory monitors and MR caches. */
+extern pthread_mutex_t mm_lock;
+
 /*
  * Memory notifier - Report memory mapping changes to address ranges
  */
@@ -103,17 +106,20 @@ static inline uint64_t ofi_mr_get_prov_mode(uint32_t version,
 struct ofi_mr_cache;
 
 struct ofi_mem_monitor {
-	pthread_mutex_t 		lock;
 	struct dlist_entry		list;
 
+	void (*init)(struct ofi_mem_monitor *monitor);
+	void (*cleanup)(struct ofi_mem_monitor *monitor);
 	int (*subscribe)(struct ofi_mem_monitor *notifier,
 			 const void *addr, size_t len);
 	void (*unsubscribe)(struct ofi_mem_monitor *notifier,
 			    const void *addr, size_t len);
 };
 
-void ofi_monitor_init(void);
-void ofi_monitor_cleanup(void);
+void ofi_monitor_init(struct ofi_mem_monitor *monitor);
+void ofi_monitor_cleanup(struct ofi_mem_monitor *monitor);
+void ofi_monitors_init(void);
+void ofi_monitors_cleanup(void);
 int ofi_monitor_add_cache(struct ofi_mem_monitor *monitor,
 			   struct ofi_mr_cache *cache);
 void ofi_monitor_del_cache(struct ofi_mr_cache *cache);
@@ -136,8 +142,8 @@ struct ofi_uffd {
 	int				fd;
 };
 
-int ofi_uffd_init(void);
-void ofi_uffd_cleanup(void);
+int ofi_uffd_start(void);
+void ofi_uffd_stop(void);
 
 extern struct ofi_mem_monitor *uffd_monitor;
 
@@ -149,8 +155,8 @@ struct ofi_memhooks {
 	struct dlist_entry		intercept_list;
 };
 
-int ofi_memhooks_init(void);
-void ofi_memhooks_cleanup(void);
+int ofi_memhooks_start(void);
+void ofi_memhooks_stop(void);
 
 extern struct ofi_mem_monitor *memhooks_monitor;
 
@@ -284,7 +290,8 @@ void ofi_mr_cache_cleanup(struct ofi_mr_cache *cache);
 
 void ofi_mr_cache_notify(struct ofi_mr_cache *cache, const void *addr, size_t len);
 
-bool ofi_mr_cache_flush(struct ofi_mr_cache *cache);
+bool ofi_mr_cache_flush(struct ofi_mr_cache *cache, bool flush_lru);
+
 int ofi_mr_cache_search(struct ofi_mr_cache *cache, const struct fi_mr_attr *attr,
 			struct ofi_mr_entry **entry);
 /**

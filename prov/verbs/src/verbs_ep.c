@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2013-2018 Intel Corporation, Inc.  All rights reserved.
+ * Copyright (c) 2019 System Fabric Works, Inc. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -78,7 +79,7 @@ ssize_t vrb_post_recv(struct vrb_ep *ep, struct ibv_recv_wr *wr)
 	if (ret)
 		goto freebuf;
 
-	if (++ep->rq_credits_avail >= domain->threshold) {
+	if (++ep->rq_credits_avail >= ep->threshold) {
 		credits_to_give = ep->rq_credits_avail;
 		ep->rq_credits_avail = 0;
 	} else {
@@ -167,7 +168,7 @@ unlock:
 	cq->util_cq.cq_fastlock_release(&cq->util_cq.cq_lock);
 	cq_rx = container_of(ep->util_ep.rx_cq, struct vrb_cq, util_cq);
 	cq_rx->util_cq.cq_fastlock_acquire(&cq_rx->util_cq.cq_lock);
-	if (ep->rq_credits_avail >= domain->threshold) {
+	if (ep->rq_credits_avail >= ep->threshold) {
 		credits_to_give = ep->rq_credits_avail;
 		ep->rq_credits_avail = 0;
 	}
@@ -686,6 +687,14 @@ static int vrb_ep_enable_xrc(struct vrb_ep *ep)
 		goto done;
 	}
 
+	if (cq->credits < srq_ep->xrc.max_recv_wr) {
+		VERBS_WARN(FI_LOG_EP_CTRL,
+			   "CQ credits %" PRId64 " insufficient\n",
+			   cq->credits);
+		ret = -FI_EINVAL;
+		goto done;
+	}
+
 	memset(&attr, 0, sizeof(attr));
 	attr.attr.max_wr = srq_ep->xrc.max_recv_wr;
 	attr.attr.max_sge = srq_ep->xrc.max_sge;
@@ -707,6 +716,7 @@ static int vrb_ep_enable_xrc(struct vrb_ep *ep)
 	cq->util_cq.cq_fastlock_acquire(&cq->xrc.srq_list_lock);
 	dlist_insert_tail(&srq_ep->xrc.srq_entry, &cq->xrc.srq_list);
 	srq_ep->xrc.cq = cq;
+	cq->credits -= srq_ep->xrc.max_recv_wr;
 	cq->util_cq.cq_fastlock_release(&cq->xrc.srq_list_lock);
 
 	ibv_get_srq_num(srq_ep->srq, &xrc_ep->srqn);
@@ -1007,6 +1017,7 @@ int vrb_open_ep(struct fid_domain *domain, struct fi_info *info,
 
 	ep->inject_limit = ep->info->tx_attr->inject_size;
 	ep->peer_rq_credits = UINT64_MAX;
+	ep->threshold = UINT64_MAX; /* disables RQ flow control */
 
 	switch (info->ep_attr->type) {
 	case FI_EP_MSG:
@@ -1530,6 +1541,7 @@ int vrb_xrc_close_srq(struct vrb_srq_ep *srq_ep)
 		VERBS_WARN(FI_LOG_EP_CTRL, "Cannot destroy SRQ rc=%d\n", ret);
 		return -ret;
 	}
+	srq_ep->xrc.cq->credits += srq_ep->xrc.max_recv_wr;
 	srq_ep->srq = NULL;
 	srq_ep->xrc.cq = NULL;
 	dlist_remove(&srq_ep->xrc.srq_entry);
@@ -1542,13 +1554,14 @@ static int vrb_srq_close(fid_t fid)
 {
 	struct vrb_srq_ep *srq_ep = container_of(fid, struct vrb_srq_ep,
 						 ep_fid.fid);
+	struct vrb_cq *cq = srq_ep->xrc.cq;
 	int ret;
 
 	if (srq_ep->domain->flags & VRB_USE_XRC) {
-		if (srq_ep->xrc.cq) {
-			fastlock_acquire(&srq_ep->xrc.cq->xrc.srq_list_lock);
+		if (cq) {
+			fastlock_acquire(&cq->xrc.srq_list_lock);
 			ret = vrb_xrc_close_srq(srq_ep);
-			fastlock_release(&srq_ep->xrc.cq->xrc.srq_list_lock);
+			fastlock_release(&cq->xrc.srq_list_lock);
 			if (ret)
 				goto err;
 		}

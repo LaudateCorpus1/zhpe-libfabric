@@ -36,6 +36,7 @@
 #include <ofi_prov.h>
 #include "rxr.h"
 #include "efa.h"
+#include "ofi_hmem.h"
 
 struct fi_info *shm_info;
 
@@ -538,20 +539,6 @@ static int rxr_getinfo(uint32_t version, const char *node,
 	if (hints && hints->ep_attr && hints->ep_attr->type == FI_EP_DGRAM)
 		goto dgram_info;
 
-	/*
-	 * Using the shm provider comes with some overheads, particularly in the
-	 * progress engine when polling an empty completion queue, so avoid
-	 * initializing the provider if the app provides a hint that it does not
-	 * require node-local communication. We can still loopback over the EFA
-	 * device in cases where the app violates the hint and continues
-	 * communicating with node-local peers.
-	 */
-	if (hints
-	    /* If the app requires explicitly remote communication */
-	    && (hints->caps & FI_REMOTE_COMM)
-	    /* but not local communication */
-	    && !(hints->caps & FI_LOCAL_COMM))
-		rxr_env.enable_shm_transfer = 0;
 
 	ret = rxr_get_lower_rdm_info(version, node, service, flags,
 				     &rxr_util_prov, hints, &core_info);
@@ -578,6 +565,15 @@ static int rxr_getinfo(uint32_t version, const char *node,
 			goto free_info;
 
 		ofi_alter_info(util_info, hints, version);
+
+		/* If application asked for FI_REMOTE_COMM but not FI_LOCAL_COMM, it
+		 * does not want to use shm. In this case, we honor the request by
+		 * unsetting the FI_LOCAL_COMM flag in info. This way rxr_endpoint()
+		 * should disable shm transfer for the endpoint
+		 */
+		if (hints && hints->caps & FI_REMOTE_COMM && !(hints->caps & FI_LOCAL_COMM))
+			util_info->caps &= ~FI_LOCAL_COMM;
+
 		if (!*info)
 			*info = util_info;
 		else
@@ -595,7 +591,7 @@ dgram_info:
 		ret = 0;
 
 	if (!ret && rxr_env.enable_shm_transfer && !shm_info) {
-		shm_info = fi_allocinfo();
+		shm_info = NULL;
 		shm_hints = fi_allocinfo();
 		rxr_set_shm_hints(shm_hints);
 		ret = fi_getinfo(FI_VERSION(1, 8), NULL, NULL,
@@ -640,7 +636,8 @@ static void rxr_fini(void)
 	}
 
 #if HAVE_EFA_DL
-	ofi_monitor_cleanup();
+	ofi_monitors_cleanup();
+	ofi_hmem_cleanup();
 	ofi_mem_fini();
 #endif
 }
@@ -716,7 +713,8 @@ EFA_INI
 
 #if HAVE_EFA_DL
 	ofi_mem_init();
-	ofi_monitor_init();
+	ofi_hmem_init();
+	ofi_monitors_init();
 #endif
 
 	lower_efa_prov = init_lower_efa_prov();

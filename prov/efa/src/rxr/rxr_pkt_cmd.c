@@ -34,7 +34,6 @@
 #include "efa.h"
 #include "rxr.h"
 #include "rxr_cntr.h"
-#include "efa_cuda.h"
 
 /* This file implements 4 actions that can be applied to a packet:
  *          posting,
@@ -80,7 +79,7 @@ ssize_t rxr_pkt_post_data(struct rxr_ep *rxr_ep,
 	 * For now, always send CUDA buffers through
 	 * rxr_pkt_send_data_desc().
 	 */
-	if (efa_mr_cache_enable || rxr_ep_is_cuda_mr(tx_entry->desc[0]))
+	if (efa_mr_cache_enable || efa_ep_is_cuda_mr(tx_entry->desc[0]))
 		ret = rxr_pkt_send_data_desc(rxr_ep, tx_entry, pkt_entry);
 	else
 		ret = rxr_pkt_send_data(rxr_ep, tx_entry, pkt_entry);
@@ -241,6 +240,7 @@ void rxr_pkt_handle_ctrl_sent(struct rxr_ep *rxr_ep, struct rxr_pkt_entry *pkt_e
 ssize_t rxr_pkt_post_ctrl_once(struct rxr_ep *rxr_ep, int entry_type, void *x_entry,
 			       int ctrl_type, bool inject)
 {
+	struct rxr_pkt_sendv send;
 	struct rxr_pkt_entry *pkt_entry;
 	struct rxr_tx_entry *tx_entry;
 	struct rxr_rx_entry *rx_entry;
@@ -257,14 +257,22 @@ ssize_t rxr_pkt_post_ctrl_once(struct rxr_ep *rxr_ep, int entry_type, void *x_en
 	}
 
 	peer = rxr_ep_get_peer(rxr_ep, addr);
-	if (peer->is_local)
+	if (peer->is_local) {
+		assert(rxr_ep->use_shm);
 		pkt_entry = rxr_pkt_entry_alloc(rxr_ep, rxr_ep->tx_pkt_shm_pool);
-	else
+	} else {
 		pkt_entry = rxr_pkt_entry_alloc(rxr_ep, rxr_ep->tx_pkt_efa_pool);
+	}
 
 	if (!pkt_entry)
 		return -FI_EAGAIN;
 
+	send.iov_count = 0;
+	pkt_entry->send = &send;
+
+	/*
+	 * rxr_pkt_init_ctrl will set pkt_entry->send if it want to use multi iov
+	 */
 	err = rxr_pkt_init_ctrl(rxr_ep, entry_type, x_entry, ctrl_type, pkt_entry);
 	if (OFI_UNLIKELY(err)) {
 		rxr_pkt_entry_release_tx(rxr_ep, pkt_entry);
@@ -277,13 +285,14 @@ ssize_t rxr_pkt_post_ctrl_once(struct rxr_ep *rxr_ep, int entry_type, void *x_en
 	 */
 	if (inject)
 		err = rxr_pkt_entry_inject(rxr_ep, pkt_entry, addr);
-	else if (pkt_entry->iov_count > 0)
+	else if (pkt_entry->send->iov_count > 0)
 		err = rxr_pkt_entry_sendv(rxr_ep, pkt_entry, addr,
-					  pkt_entry->iov, pkt_entry->desc,
-					  pkt_entry->iov_count, 0);
+					  pkt_entry->send->iov, pkt_entry->send->desc,
+					  pkt_entry->send->iov_count, 0);
 	else
 		err = rxr_pkt_entry_send(rxr_ep, pkt_entry, addr);
 
+	pkt_entry->send = NULL;
 	if (OFI_UNLIKELY(err)) {
 		rxr_pkt_entry_release_tx(rxr_ep, pkt_entry);
 		return err;
@@ -438,10 +447,9 @@ void rxr_pkt_handle_send_completion(struct rxr_ep *ep, struct fi_cq_data_entry *
  *  Functions used to handle packet receive completion
  */
 static
-fi_addr_t rxr_pkt_insert_addr(struct rxr_ep *ep, struct rxr_pkt_entry *pkt_entry)
+fi_addr_t rxr_pkt_insert_addr(struct rxr_ep *ep, struct rxr_pkt_entry *pkt_entry, void *raw_addr)
 {
 	int i, ret;
-	void *raw_addr;
 	fi_addr_t rdm_addr;
 	struct efa_ep *efa_ep;
 	struct rxr_base_hdr *base_hdr;
@@ -466,7 +474,6 @@ fi_addr_t rxr_pkt_insert_addr(struct rxr_ep *ep, struct rxr_pkt_entry *pkt_entry
 	}
 
 	assert(base_hdr->type >= RXR_REQ_PKT_BEGIN);
-	raw_addr = pkt_entry->raw_addr;
 
 	efa_ep = container_of(ep->rdm_ep, struct efa_ep, util_ep.ep_fid);
 	ret = efa_av_insert_addr(efa_ep->av, (struct efa_ep_addr *)raw_addr,
@@ -492,16 +499,27 @@ void rxr_pkt_handle_recv_completion(struct rxr_ep *ep,
 	assert(pkt_entry->pkt_size > 0);
 
 	base_hdr = rxr_get_base_hdr(pkt_entry->pkt);
+	if (base_hdr->type >= RXR_EXTRA_REQ_PKT_END) {
+		FI_WARN(&rxr_prov, FI_LOG_CQ,
+			"Peer %d is requesting feature %d, which this EP does not support.\n",
+			(int)src_addr, base_hdr->type);
+
+		assert(0 && "invalid REQ packe type");
+		rxr_cq_handle_cq_error(ep, -FI_EIO);
+		return;
+	}
+
 	if (base_hdr->type >= RXR_REQ_PKT_BEGIN) {
-		rxr_pkt_proc_req_common_hdr(pkt_entry);
-		assert(pkt_entry->hdr_size > 0);
 		/*
 		 * as long as the REQ packet contain raw address
 		 * we will need to call insert because it might be a new
 		 * EP with new Q-Key.
 		 */
-		if (OFI_UNLIKELY(pkt_entry->raw_addr != NULL))
-			pkt_entry->addr = rxr_pkt_insert_addr(ep, pkt_entry);
+		void *raw_addr;
+
+		raw_addr = rxr_pkt_req_raw_addr(pkt_entry);
+		if (OFI_UNLIKELY(raw_addr != NULL))
+			pkt_entry->addr = rxr_pkt_insert_addr(ep, pkt_entry, raw_addr);
 		else
 			pkt_entry->addr = src_addr;
 	} else {
@@ -520,10 +538,12 @@ void rxr_pkt_handle_recv_completion(struct rxr_ep *ep,
 	if (!(peer->flags & RXR_PEER_HANDSHAKE_SENT))
 		rxr_pkt_post_handshake(ep, peer, pkt_entry->addr);
 
-	if (rxr_env.enable_shm_transfer && peer->is_local)
+	if (peer->is_local) {
+		assert(ep->use_shm);
 		ep->posted_bufs_shm--;
-	else
+	} else {
 		ep->posted_bufs_efa--;
+	}
 
 	switch (base_hdr->type) {
 	case RXR_RETIRED_RTS_PKT:
@@ -583,19 +603,11 @@ void rxr_pkt_handle_recv_completion(struct rxr_ep *ep,
 		rxr_pkt_handle_rtr_recv(ep, pkt_entry);
 		return;
 	default:
-		if (base_hdr->type >= RXR_EXTRA_REQ_PKT_END) {
-			FI_WARN(&rxr_prov, FI_LOG_CQ,
-				"Peer %d is requesting feature %d, which this EP does not support.\n"
-				"The EP informed the peer about this issue via a handshake packet.\n"
-				"This packet is therefore ignored\n", (int)pkt_entry->addr, base_hdr->type);
-		} else {
-			FI_WARN(&rxr_prov, FI_LOG_CQ,
-				"invalid control pkt type %d\n",
-				rxr_get_base_hdr(pkt_entry->pkt)->type);
-			assert(0 && "invalid control pkt type");
-			rxr_cq_handle_cq_error(ep, -FI_EIO);
-		}
-
+		FI_WARN(&rxr_prov, FI_LOG_CQ,
+			"invalid control pkt type %d\n",
+			rxr_get_base_hdr(pkt_entry->pkt)->type);
+		assert(0 && "invalid control pkt type");
+		rxr_cq_handle_cq_error(ep, -FI_EIO);
 		return;
 	}
 }
