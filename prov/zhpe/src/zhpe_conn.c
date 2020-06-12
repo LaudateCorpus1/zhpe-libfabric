@@ -457,8 +457,8 @@ static void conn_connect1_tx(struct zhpe_conn *conn, uuid_t uuid)
 	connect1.src_conn_idxn = htons(zhpe_ibuf_index(&zctx->conn_pool, conn));
 	connect1.src_rspctxid0n = htonl(zctx->zep->zctx[0]->lcl_rspctxid);
 	connect1.src_rspctxidn = htonl(zctx->lcl_rspctxid);
-	connect1.src_ctx_idx = htons(zctx->ctx_idx);
-	connect1.dst_ctx_idx = htons(conn->tkey.rem_ctx_idx);
+	connect1.src_ctx_idx = zctx->ctx_idx;
+	connect1.dst_ctx_idx = conn->tkey.rem_ctx_idx;
 	connect1.src_rma_flags = conn_wire_rma_flags(zctx);
 	memcpy(connect1.dst_uuid, uuid, sizeof(connect1.dst_uuid));
 

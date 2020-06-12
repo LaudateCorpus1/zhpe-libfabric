@@ -37,14 +37,32 @@
 
 static int zhpe_ep_cm_getname(fid_t fid, void *addr, size_t *addrlen)
 {
-	int			ret;
-	struct zhpe_ctx		*zctx = fid2zctx(fid);
+	int			ret = -FI_EINVAL;
+	struct zhpe_ep		*zep = fid2zep(fid);
+	struct zhpe_ctx		*zctx = zep->ep.zctx;
 	size_t			oaddrlen;
 
-	if (zctx->zep->disabled)
-		return -FI_EOPBADSTATE;
+	zctx_lock(zctx);
+
 	if (!addrlen)
-		return -FI_EINVAL;
+		goto done;
+
+	switch (fid->fclass) {
+
+	case FI_CLASS_EP:
+	case FI_CLASS_SEP:
+	case FI_CLASS_RX_CTX:
+	case FI_CLASS_TX_CTX:
+		break;
+
+	default:
+		goto done;
+	}
+
+	if (!(zep->enabled & ZHPE_EP_ENABLED_QALLOC)) {
+		ret = -FI_EOPBADSTATE;
+		goto done;
+	}
 
 	/*
 	 * Quirky semantics: getting the semantics right required changes
@@ -58,6 +76,9 @@ static int zhpe_ep_cm_getname(fid_t fid, void *addr, size_t *addrlen)
 		if (*addrlen > oaddrlen)
 			ret = -FI_ETOOSMALL;
 	}
+
+ done:
+	zctx_unlock(zctx);
 
 	return ret;
 }

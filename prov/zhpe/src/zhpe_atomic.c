@@ -82,7 +82,7 @@ static int get_atomic_1op(struct atomic_op *aop, enum fi_datatype datatype,
 		aop->bytes = sizeof(uint32_t);
 		zhpeu_fab_atomic_load(aop->fi_type, op0, &aop->operands[0]);
 		aop->hw_type = ZHPEQ_ATOMIC_SIZE32;
-		aop->hw_handler = ZHPE_TX_HANDLE_ATM_HW_RES32;
+		aop->hw_handler = ZHPE_TX_HANDLE_ATM_HW_RD_RES32;
 		break;
 
 	case FI_INT64:
@@ -91,7 +91,7 @@ static int get_atomic_1op(struct atomic_op *aop, enum fi_datatype datatype,
 		aop->bytes = sizeof(uint64_t);
 		zhpeu_fab_atomic_load(aop->fi_type, op0, &aop->operands[0]);
 		aop->hw_type = ZHPEQ_ATOMIC_SIZE64;
-		aop->hw_handler = ZHPE_TX_HANDLE_ATM_HW_RES64;
+		aop->hw_handler = ZHPE_TX_HANDLE_ATM_HW_RD_RES64;
 		break;
 
 	case FI_FLOAT:
@@ -102,7 +102,7 @@ static int get_atomic_1op(struct atomic_op *aop, enum fi_datatype datatype,
 		aop->bytes = sizeof(float);
 		zhpeu_fab_atomic_load(FI_UINT32, op0, &aop->operands[0]);
 		aop->hw_type = ZHPEQ_ATOMIC_SIZE32;
-		aop->hw_handler = ZHPE_TX_HANDLE_ATM_HW_RES32;
+		aop->hw_handler = ZHPE_TX_HANDLE_ATM_HW_RD_RES32;
 		break;
 
 	case FI_DOUBLE:
@@ -113,7 +113,7 @@ static int get_atomic_1op(struct atomic_op *aop, enum fi_datatype datatype,
 		aop->bytes = sizeof(double);
 		zhpeu_fab_atomic_load(FI_UINT64, op0, &aop->operands[0]);
 		aop->hw_type = ZHPEQ_ATOMIC_SIZE64;
-		aop->hw_handler = ZHPE_TX_HANDLE_ATM_HW_RES64;
+		aop->hw_handler = ZHPE_TX_HANDLE_ATM_HW_RD_RES64;
 		break;
 
 	default:
@@ -195,7 +195,7 @@ static int get_atomic_2op(struct atomic_op *aop, enum fi_datatype datatype,
 		zhpeu_fab_atomic_load(aop->fi_type, op0, &aop->operands[0]);
 		zhpeu_fab_atomic_load(aop->fi_type, op1, &aop->operands[1]);
 		aop->hw_type = ZHPEQ_ATOMIC_SIZE32;
-		aop->hw_handler = ZHPE_TX_HANDLE_ATM_HW_RES32;
+		aop->hw_handler = ZHPE_TX_HANDLE_ATM_HW_RD_RES32;
 		break;
 
 	case FI_INT64:
@@ -205,7 +205,7 @@ static int get_atomic_2op(struct atomic_op *aop, enum fi_datatype datatype,
 		zhpeu_fab_atomic_load(aop->fi_type, op0, &aop->operands[0]);
 		zhpeu_fab_atomic_load(aop->fi_type, op1, &aop->operands[1]);
 		aop->hw_type = ZHPEQ_ATOMIC_SIZE64;
-		aop->hw_handler = ZHPE_TX_HANDLE_ATM_HW_RES64;
+		aop->hw_handler = ZHPE_TX_HANDLE_ATM_HW_RD_RES64;
 		break;
 
 	default:
@@ -256,12 +256,14 @@ static int get_atomic_2op(struct atomic_op *aop, enum fi_datatype datatype,
 }
 
 static struct zhpe_tx_entry *get_tx_entry(struct zhpe_conn *conn,
-					  uint64_t opt_flags, void *op_context,
-					  uint handler)
+					  uint64_t op_flags, uint64_t opt_flags,
+					  void *op_context, uint handler)
 {
 	struct zhpe_tx_entry	*tx_entry;
 	struct zhpe_tx_entry_ctx *tx_entry_ctx;
 
+	if (op_flags & FI_WRITE)
+		handler += 2;
 	if ((opt_flags & ZHPE_OPT_CONTEXT) && OFI_LIKELY(op_context != NULL)) {
 		tx_entry = op_context;
 		tx_entry->tx_handler = handler;
@@ -394,7 +396,8 @@ static void atomic_hw(struct zhpe_conn *conn, struct atomic_op *aop,
 	else
 		cs_flags = 0;
 	/* We need a real completion structure for rkey tracking. */
-	tx_entry = get_tx_entry(conn, opt_flags, op_context, aop->hw_handler);
+	tx_entry = get_tx_entry(conn, op_flags, opt_flags, op_context,
+				aop->hw_handler);
 	zhpe_cstat_init(&tx_entry->cstat, 1, cs_flags);
 	tx_entry->ptrs[1] = result;
 
@@ -443,8 +446,8 @@ static void atomic_em(struct zhpe_conn *conn, struct atomic_op *aop,
 	/* Do we need a real completion structure? */
 	if (OFI_LIKELY(result || cs_flags)) {
 		/* Yes. */
-		tx_entry = get_tx_entry(conn, opt_flags, op_context,
-					ZHPE_TX_HANDLE_ATM_EM);
+		tx_entry = get_tx_entry(conn, op_flags, opt_flags, op_context,
+					ZHPE_TX_HANDLE_ATM_EM_RD);
 		tx_entry->cmp_idx = 0;
 		op_zflags = ZHPE_OP_FLAG_DELIVERY_COMPLETE;
 		zhpe_cstat_init(&tx_entry->cstat, 2, cs_flags);
@@ -470,6 +473,7 @@ static void atomic_em(struct zhpe_conn *conn, struct atomic_op *aop,
 	areq->fi_op = aop->fi_op;
 	areq->fi_type = aop->fi_type;
 	areq->bytes = aop->bytes;
+	areq->cntr_flags = (op_flags & conn->rem_rma_flags) / FI_READ;
 
 	zhpeq_tq_insert(zctx->ztq_hi, reservation[0]);
 	zhpeq_tq_commit(zctx->ztq_hi);
@@ -482,7 +486,7 @@ static int atomic_op(struct zhpe_ctx *zctx,  struct atomic_op *aop,
 	struct zhpe_conn	*conn;
 	int			rc;
 
-	if (OFI_UNLIKELY(zctx->zep->disabled))
+	if (OFI_UNLIKELY(!(zctx->enabled & ZHPE_CTX_ENABLED_TX)))
 		return -FI_EOPBADSTATE;
 
 	zctx_lock(zctx);
@@ -497,7 +501,8 @@ static int atomic_op(struct zhpe_ctx *zctx,  struct atomic_op *aop,
 
 	if (OFI_LIKELY(aop->hw_op != ZHPEQ_ATOMIC_NONE &&
 		       aop->hw_type != ZHPEQ_ATOMIC_SIZE_NONE &&
-		       !(aop->hw_fam_only && !conn->fam)))
+		       !(aop->hw_fam_only && !conn->fam) &&
+		       !(op_flags & conn->rem_rma_flags)))
 		atomic_hw(conn, aop, op_flags, opt_flags, op_context, result);
 	else if (OFI_LIKELY(!conn->fam))
 		atomic_em(conn, aop, op_flags, opt_flags, op_context, result);
@@ -596,7 +601,7 @@ zhpe_atomic_writemsg##_name(struct fid_ep *fid_ep,			\
 	aop.rkey = msg->rma_iov[0].key;					\
 									\
 	zctx = fid2zctx(&fid_ep->fid);					\
-	op_flags = flags | zctx->util_ep.tx_msg_flags;			\
+	op_flags = flags | zctx->util_ep.tx_msg_flags | FI_WRITE;	\
 									\
 	ret = atomic_op(zctx, &aop, op_flags, opt_flags,		\
 			msg->context, NULL, msg->addr);			\
@@ -639,7 +644,7 @@ zhpe_atomic_writev##_name(struct fid_ep *fid_ep,			\
 	aop.rkey = rkey;						\
 									\
 	zctx = fid2zctx(&fid_ep->fid);					\
-	op_flags = zctx->util_ep.tx_msg_flags;				\
+	op_flags = zctx->util_ep.tx_op_flags | FI_WRITE;		\
 									\
 	ret = atomic_op(zctx, &aop, op_flags, opt_flags,		\
 			op_context, NULL, dst_addr);			\
@@ -680,7 +685,7 @@ zhpe_atomic_write##_name(struct fid_ep *fid_ep, const void *buf,	\
 	aop.rkey = rkey;						\
 									\
 	zctx = fid2zctx(&fid_ep->fid);					\
-	op_flags = zctx->util_ep.tx_msg_flags;				\
+	op_flags = zctx->util_ep.tx_op_flags | FI_WRITE;		\
 									\
 	ret = atomic_op(zctx, &aop, op_flags, opt_flags,		\
 			op_context, NULL, dst_addr);			\
@@ -720,7 +725,7 @@ zhpe_atomic_inject##_name(struct fid_ep *fid_ep, const void *buf,	\
 	aop.rkey = rkey;						\
 									\
 	zctx = fid2zctx(&fid_ep->fid);					\
-	op_flags = zctx->util_ep.tx_msg_flags;				\
+	op_flags = zctx->util_ep.inject_op_flags | FI_WRITE;		\
 									\
 	ret = atomic_op(zctx, &aop, op_flags, opt_flags,		\
 			NULL, NULL, dst_addr);				\
@@ -773,7 +778,7 @@ zhpe_atomic_fetchmsg##_name(struct fid_ep *fid_ep,			\
 	result = resultv[0].addr;					\
 									\
 	zctx = fid2zctx(&fid_ep->fid);					\
-	op_flags = flags | zctx->util_ep.tx_msg_flags;			\
+	op_flags = flags | zctx->util_ep.tx_msg_flags | FI_READ;	\
 									\
 	ret = atomic_op(zctx, &aop, op_flags, opt_flags,		\
 			msg->context, result, msg->addr);		\
@@ -822,7 +827,7 @@ zhpe_atomic_fetchv##_name(struct fid_ep *fid_ep,			\
 	result = resultv[0].addr;					\
 									\
 	zctx = fid2zctx(&fid_ep->fid);					\
-	op_flags = zctx->util_ep.tx_msg_flags;				\
+	op_flags = zctx->util_ep.tx_op_flags | FI_READ;			\
 									\
 	ret = atomic_op(zctx, &aop, op_flags, opt_flags,		\
 			op_context, result, dst_addr);			\
@@ -864,7 +869,7 @@ zhpe_atomic_fetch##_name(struct fid_ep *fid_ep, const void *buf,	\
 	aop.rkey = rkey;						\
 									\
 	zctx = fid2zctx(&fid_ep->fid);					\
-	op_flags = zctx->util_ep.tx_msg_flags;				\
+	op_flags = zctx->util_ep.tx_op_flags | FI_READ;			\
 									\
 	ret = atomic_op(zctx, &aop, op_flags, opt_flags,		\
 			op_context, result, dst_addr);			\
@@ -925,7 +930,7 @@ zhpe_atomic_comparemsg##_name(struct fid_ep *fid_ep,			\
 	result = resultv[0].addr;					\
 									\
 	zctx = fid2zctx(&fid_ep->fid);					\
-	op_flags = flags | zctx->util_ep.tx_msg_flags;			\
+	op_flags = flags | zctx->util_ep.tx_msg_flags | FI_READ;	\
 									\
 	ret = atomic_op(zctx, &aop, op_flags, opt_flags,		\
 			msg->context, result, msg->addr);		\
@@ -981,7 +986,7 @@ zhpe_atomic_comparev##_name(struct fid_ep *fid_ep,			\
 	result = resultv[0].addr;					\
 									\
 	zctx = fid2zctx(&fid_ep->fid);					\
-	op_flags = zctx->util_ep.tx_msg_flags;				\
+	op_flags = zctx->util_ep.tx_op_flags | FI_READ;			\
 									\
 	ret = atomic_op(zctx, &aop, op_flags, opt_flags,		\
 			op_context, result, dst_addr);			\
@@ -1026,7 +1031,7 @@ zhpe_atomic_compare##_name(struct fid_ep *fid_ep,			\
 	aop.rkey = rkey;						\
 									\
 	zctx = fid2zctx(&fid_ep->fid);					\
-	op_flags = zctx->util_ep.tx_msg_flags;				\
+	op_flags = zctx->util_ep.tx_op_flags | FI_READ;			\
 									\
 	ret = atomic_op(zctx, &aop, op_flags, opt_flags,		\
 			op_context, result, dst_addr);			\
@@ -1037,7 +1042,7 @@ zhpe_atomic_compare##_name(struct fid_ep *fid_ep,			\
 	return ret;							\
 }									\
 									\
- struct fi_ops_atomic zhpe_ep_atomic##_name##_ops = {			\
+struct fi_ops_atomic zhpe_ep_atomic##_name##_ops = {			\
 	.size			= sizeof(struct fi_ops_atomic),		\
 	.write			= zhpe_atomic_write##_name,		\
 	.writev			= zhpe_atomic_writev##_name,		\

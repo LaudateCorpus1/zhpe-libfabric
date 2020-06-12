@@ -373,18 +373,26 @@ static void tx_handle_rx_get_rnd(struct zhpe_tx_entry *tx_entry,
 
 	rx_entry = container_of(tx_entry, struct zhpe_rx_entry, tx_entry);
 
-	zhpe_stats_stamp_dbg(__func__, __LINE__, (uintptr_t)rx_entry, 0, 0, 0);
+	zhpe_stats_stamp_dbg(__func__, __LINE__,
+			     (uintptr_t)rx_entry, tx_entry->cstat.status,
+			     tx_entry->cstat.flags, 0);
 
 	if (OFI_LIKELY(!tx_entry->cstat.status)) {
-		if (!(tx_entry->cstat.flags & ZHPE_CS_FLAG_RMA_DONE)) {
-			if (OFI_LIKELY(!conn->eflags)) {
+		if (OFI_LIKELY(!conn->eflags)) {
+			/* Optimize for short ops. */
+			if (OFI_UNLIKELY(!(tx_entry->cstat.flags &
+					   ZHPE_CS_FLAG_RMA_DONE))) {
 				zhpe_iov_rma(tx_entry, ZHPE_SEG_MAX_BYTES,
 					     ZHPE_SEG_MAX_OPS);
-				return;
+				if (OFI_LIKELY(tx_entry->cstat.completions))
+					return;
+				if (OFI_UNLIKELY(!(tx_entry->cstat.flags &
+						   ZHPE_CS_FLAG_RMA_DONE)))
+					return;
 			}
+		} else
 			tx_entry->cstat.status =
 				zhpe_conn_eflags_error(conn->eflags);
-		}
 	}
 
 	zhpe_rx_complete(rx_entry, rx_entry->tx_entry.cstat.status);
@@ -405,19 +413,32 @@ static void tx_handle_rma(struct zhpe_tx_entry *tx_entry,
 	zhpe_rma_tx_start(rma_entry);
 }
 
-static void tx_handle_atm_em(struct zhpe_tx_entry *tx_entry,
-			     struct zhpe_cq_entry *cqe)
+static void tx_handle_atm_em_rd(struct zhpe_tx_entry *tx_entry,
+				struct zhpe_cq_entry *cqe)
 {
-	tx_handle_msg_cmn(tx_entry, cqe, FI_ATOMIC, false);
+	tx_handle_msg_cmn(tx_entry, cqe, FI_ATOMIC | FI_READ, false);
 }
 
-static void tx_handle_atm_em_free(struct zhpe_tx_entry *tx_entry,
-				  struct zhpe_cq_entry *cqe)
+static void tx_handle_atm_em_rd_free(struct zhpe_tx_entry *tx_entry,
+				     struct zhpe_cq_entry *cqe)
 {
-	tx_handle_msg_cmn(tx_entry, cqe, FI_ATOMIC, true);
+	tx_handle_msg_cmn(tx_entry, cqe, FI_ATOMIC | FI_READ, true);
 }
 
-static void tx_handle_atm_hw_cmn(struct zhpe_tx_entry *tx_entry, bool free)
+static void tx_handle_atm_em_wr(struct zhpe_tx_entry *tx_entry,
+				struct zhpe_cq_entry *cqe)
+{
+	tx_handle_msg_cmn(tx_entry, cqe, FI_ATOMIC | FI_WRITE, false);
+}
+
+static void tx_handle_atm_em_wr_free(struct zhpe_tx_entry *tx_entry,
+				     struct zhpe_cq_entry *cqe)
+{
+	tx_handle_msg_cmn(tx_entry, cqe, FI_ATOMIC | FI_WRITE, true);
+}
+
+static void tx_handle_atm_hw_cmn(struct zhpe_tx_entry *tx_entry,
+				 uint64_t flags, bool free)
 {
 	struct zhpe_conn	*conn = tx_entry->conn;
 	struct zhpe_ctx		*zctx = conn->zctx;
@@ -428,15 +449,16 @@ static void tx_handle_atm_hw_cmn(struct zhpe_tx_entry *tx_entry, bool free)
 	if (free) {
 		tx_entry_ctx = container_of(tx_entry, struct zhpe_tx_entry_ctx,
 					    tx_entry);
-		tx_entry_report_complete(tx_entry, FI_ATOMIC,
+		tx_entry_report_complete(tx_entry, flags,
 					 tx_entry_ctx->op_context);
 		zhpe_buf_free(&zctx->tx_ctx_pool, tx_entry_ctx);
 	} else
-		tx_entry_report_complete(tx_entry, FI_ATOMIC, tx_entry);
+		tx_entry_report_complete(tx_entry, flags, tx_entry);
 }
 
-static void tx_handle_atm_hw_res32(struct zhpe_tx_entry *tx_entry,
-				   struct zhpe_cq_entry *cqe)
+static void tx_handle_atm_hw_cmn32(struct zhpe_tx_entry *tx_entry,
+				   struct zhpe_cq_entry *cqe,
+				   uint64_t flags, bool free)
 {
 	int			completions;
 
@@ -446,14 +468,15 @@ static void tx_handle_atm_hw_res32(struct zhpe_tx_entry *tx_entry,
 	    return;
 
 	if (OFI_LIKELY(!tx_entry->cstat.status && tx_entry->ptrs[1]))
-		zhpeu_fab_atomic_store(FI_UINT32, (uint32_t *)tx_entry->ptrs[1],
+		zhpeu_fab_atomic_store(FI_UINT32, tx_entry->ptrs[1],
 				       cqe->result.atomic32);
 
-	tx_handle_atm_hw_cmn(tx_entry, false);
+	tx_handle_atm_hw_cmn(tx_entry, flags, free);
 }
 
-static void tx_handle_atm_hw_res32_free(struct zhpe_tx_entry *tx_entry,
-					struct zhpe_cq_entry *cqe)
+static void tx_handle_atm_hw_cmn64(struct zhpe_tx_entry *tx_entry,
+				   struct zhpe_cq_entry *cqe,
+				   uint64_t flags, bool free)
 {
 	int			completions;
 
@@ -463,45 +486,60 @@ static void tx_handle_atm_hw_res32_free(struct zhpe_tx_entry *tx_entry,
 	    return;
 
 	if (OFI_LIKELY(!tx_entry->cstat.status && tx_entry->ptrs[1]))
-		zhpeu_fab_atomic_store(FI_UINT32, (uint32_t *)tx_entry->ptrs[1],
-				       cqe->result.atomic32);
-
-	tx_handle_atm_hw_cmn(tx_entry, true);
-}
-
-static void tx_handle_atm_hw_res64(struct zhpe_tx_entry *tx_entry,
-				   struct zhpe_cq_entry *cqe)
-{
-	int			completions;
-
-	completions = tx_cstat_update_cqe(tx_entry, cqe, false);
-	assert(completions >= 0);
-	if (OFI_UNLIKELY(completions))
-	    return;
-
-	if (OFI_LIKELY(!tx_entry->cstat.status && tx_entry->ptrs[1]))
-		zhpeu_fab_atomic_store(FI_UINT64, (uint64_t *)tx_entry->ptrs[1],
+		zhpeu_fab_atomic_store(FI_UINT64, tx_entry->ptrs[1],
 				       cqe->result.atomic64);
 
-	tx_handle_atm_hw_cmn(tx_entry, false);
+	tx_handle_atm_hw_cmn(tx_entry, flags, free);
 }
 
-static void tx_handle_atm_hw_res64_free(struct zhpe_tx_entry *tx_entry,
-					struct zhpe_cq_entry *cqe)
+static void tx_handle_atm_hw_rd_res32(struct zhpe_tx_entry *tx_entry,
+				      struct zhpe_cq_entry *cqe)
 {
-	int			completions;
-
-	completions = tx_cstat_update_cqe(tx_entry, cqe, false);
-	assert(completions >= 0);
-	if (OFI_UNLIKELY(completions))
-	    return;
-
-	if (OFI_LIKELY(!tx_entry->cstat.status && tx_entry->ptrs[1]))
-		zhpeu_fab_atomic_store(FI_UINT64, (uint64_t *)tx_entry->ptrs[1],
-				       cqe->result.atomic64);
-
-	tx_handle_atm_hw_cmn(tx_entry, true);
+	tx_handle_atm_hw_cmn32(tx_entry, cqe, FI_ATOMIC | FI_READ, false);
 }
+
+static void tx_handle_atm_hw_rd_res32_free(struct zhpe_tx_entry *tx_entry,
+					   struct zhpe_cq_entry *cqe)
+{
+	tx_handle_atm_hw_cmn32(tx_entry, cqe, FI_ATOMIC | FI_READ, true);
+}
+
+static void tx_handle_atm_hw_wr_res32(struct zhpe_tx_entry *tx_entry,
+				      struct zhpe_cq_entry *cqe)
+{
+	tx_handle_atm_hw_cmn32(tx_entry, cqe, FI_ATOMIC | FI_WRITE, false);
+}
+
+static void tx_handle_atm_hw_wr_res32_free(struct zhpe_tx_entry *tx_entry,
+					   struct zhpe_cq_entry *cqe)
+{
+	tx_handle_atm_hw_cmn32(tx_entry, cqe, FI_ATOMIC | FI_WRITE, true);
+}
+
+static void tx_handle_atm_hw_rd_res64(struct zhpe_tx_entry *tx_entry,
+				      struct zhpe_cq_entry *cqe)
+{
+	tx_handle_atm_hw_cmn64(tx_entry, cqe, FI_ATOMIC | FI_READ, false);
+}
+
+static void tx_handle_atm_hw_rd_res64_free(struct zhpe_tx_entry *tx_entry,
+					   struct zhpe_cq_entry *cqe)
+{
+	tx_handle_atm_hw_cmn64(tx_entry, cqe, FI_ATOMIC | FI_READ, true);
+}
+
+static void tx_handle_atm_hw_wr_res64(struct zhpe_tx_entry *tx_entry,
+				      struct zhpe_cq_entry *cqe)
+{
+	tx_handle_atm_hw_cmn64(tx_entry, cqe, FI_ATOMIC | FI_WRITE, false);
+}
+
+static void tx_handle_atm_hw_wr_res64_free(struct zhpe_tx_entry *tx_entry,
+					   struct zhpe_cq_entry *cqe)
+{
+	tx_handle_atm_hw_cmn64(tx_entry, cqe, FI_ATOMIC | FI_WRITE, true);
+}
+
 
 typedef void (*tx_handler_fn)(struct zhpe_tx_entry *tx_entry,
 			      struct zhpe_cq_entry *cqe);
@@ -516,12 +554,18 @@ static tx_handler_fn tx_handlers[] = {
 	[ZHPE_TX_HANDLE_RX_GET_BUF]	= tx_handle_rx_get_buf,
 	[ZHPE_TX_HANDLE_RX_GET_RND]	= tx_handle_rx_get_rnd,
 	[ZHPE_TX_HANDLE_RMA]		= tx_handle_rma,
-	[ZHPE_TX_HANDLE_ATM_EM]		= tx_handle_atm_em,
-	[ZHPE_TX_HANDLE_ATM_EM_FREE]	= tx_handle_atm_em_free,
-	[ZHPE_TX_HANDLE_ATM_HW_RES32]	= tx_handle_atm_hw_res32,
-	[ZHPE_TX_HANDLE_ATM_HW_RES32_FREE] = tx_handle_atm_hw_res32_free,
-	[ZHPE_TX_HANDLE_ATM_HW_RES64]	= tx_handle_atm_hw_res64,
-	[ZHPE_TX_HANDLE_ATM_HW_RES64_FREE] = tx_handle_atm_hw_res64_free,
+	[ZHPE_TX_HANDLE_ATM_EM_RD]	= tx_handle_atm_em_rd,
+	[ZHPE_TX_HANDLE_ATM_EM_RD_FREE]	= tx_handle_atm_em_rd_free,
+	[ZHPE_TX_HANDLE_ATM_EM_WR]	= tx_handle_atm_em_wr,
+	[ZHPE_TX_HANDLE_ATM_EM_WR_FREE]	= tx_handle_atm_em_wr_free,
+	[ZHPE_TX_HANDLE_ATM_HW_RD_RES32] = tx_handle_atm_hw_rd_res32,
+	[ZHPE_TX_HANDLE_ATM_HW_RD_RES32_FREE] = tx_handle_atm_hw_rd_res32_free,
+	[ZHPE_TX_HANDLE_ATM_HW_WR_RES32] = tx_handle_atm_hw_wr_res32,
+	[ZHPE_TX_HANDLE_ATM_HW_WR_RES32_FREE] = tx_handle_atm_hw_wr_res32_free,
+	[ZHPE_TX_HANDLE_ATM_HW_RD_RES64] = tx_handle_atm_hw_rd_res64,
+	[ZHPE_TX_HANDLE_ATM_HW_RD_RES64_FREE] = tx_handle_atm_hw_rd_res64_free,
+	[ZHPE_TX_HANDLE_ATM_HW_WR_RES64] = tx_handle_atm_hw_wr_res64,
+	[ZHPE_TX_HANDLE_ATM_HW_WR_RES64_FREE] = tx_handle_atm_hw_wr_res64_free,
 };
 
 static void tx_call_handler(struct zhpe_tx_entry *tx_entry,
@@ -588,22 +632,54 @@ static void tx_entry_report_complete(const struct zhpe_tx_entry *tx_entry,
 				     uint64_t flags, void *op_context)
 {
 	struct util_ep		*ep = &tx_entry->conn->zctx->util_ep;
+	bool			report_needed;
 	int			err;
 	int			prov_errno;
 
 	flags |= zopflags2op(tx_entry->cstat.flags);
+	report_needed = zhpe_cq_report_needed(ep->tx_cq, flags);
+
 	if (OFI_LIKELY(!tx_entry->cstat.status)) {
-		ep->tx_cntr_inc(ep->tx_cntr);
-		if (!zhpe_cq_report_needed(ep->tx_cq, flags))
-			return;
-		zhpe_cq_report_success(ep->tx_cq, flags, op_context, 0, NULL,
-				       0, 0);
+		switch (flags & (FI_READ | FI_WRITE)) {
+
+		default:
+			ep->tx_cntr_inc(ep->tx_cntr);
+			break;
+
+		case FI_READ:
+			ep->rd_cntr_inc(ep->rd_cntr);
+			break;
+
+		case FI_WRITE:
+			ep->wr_cntr_inc(ep->wr_cntr);
+			break;
+
+		}
+		if (OFI_LIKELY(report_needed))
+			zhpe_cq_report_success(ep->tx_cq, flags, op_context,
+					       0, NULL, 0, 0);
 		return;
 	}
 
-	cntr_adderr(ep->tx_cntr);
-	if (!zhpe_cq_report_needed(ep->tx_cq, flags))
+	switch (flags & (FI_READ | FI_WRITE)) {
+
+	default:
+		cntr_adderr(ep->tx_cntr);
+		break;
+
+	case FI_READ:
+		cntr_adderr(ep->rd_cntr);
+		break;
+
+	case FI_WRITE:
+		cntr_adderr(ep->wr_cntr);
+		break;
+
+	}
+
+	if (!report_needed)
 		return;
+
 	if (tx_entry->cstat.flags & ZHPE_CS_FLAG_ZERROR) {
 		err = -FI_EIO;
 		prov_errno = tx_entry->cstat.status;
@@ -661,7 +737,10 @@ void zhpe_rx_peek_recv(struct zhpe_ctx *zctx,
 				struct zhpe_rx_entry, rx_wire, dentry) {
 		if (!user_info->match_fn(user_info, &rx_wire->match_info))
 			continue;
-		goto found;
+		if (OFI_LIKELY(rx_wire->rx_state != ZHPE_RX_STATE_INLINE_M &&
+				rx_wire->rx_state != ZHPE_RX_STATE_RND_M))
+		    goto found;
+		break;
 	}
 	if (!zhpe_cq_report_needed(ep->rx_cq, flags))
 		return;
@@ -908,6 +987,7 @@ static void rx_handle_msg_atomic_request(struct zhpe_conn *conn,
 {
 	int32_t			status;
 	struct zhpe_ctx		*zctx = conn->zctx;
+	struct util_ep		*ep = &zctx->util_ep;
 	struct zhpe_dom		*zdom = zctx2zdom(zctx);
 	struct zhpe_msg_atomic_request *areq = (void *)msg->payload;
 	uint32_t		qaccess;
@@ -952,10 +1032,14 @@ static void rx_handle_msg_atomic_request(struct zhpe_conn *conn,
 	zdom_unlock(zdom);
 
 	if (OFI_LIKELY(msg->hdr.flags & ZHPE_OP_FLAG_DELIVERY_COMPLETE)) {
-		if (OFI_LIKELY(status >= 0))
+		if (OFI_LIKELY(status >= 0)) {
 			send_atomic_result(conn, msg->hdr.cmp_idxn, orig,
 					   areq->fi_type);
-		else
+			if (areq->cntr_flags & (FI_READ / FI_READ))
+				ep->rem_rd_cntr_inc(ep->rem_rd_cntr);
+			if (areq->cntr_flags & (FI_WRITE / FI_READ))
+				ep->rem_wr_cntr_inc(ep->rem_wr_cntr);
+		} else
 			zhpe_send_status(conn, msg->hdr.cmp_idxn, status);
 	}
 }
