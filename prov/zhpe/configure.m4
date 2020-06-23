@@ -27,10 +27,6 @@ AC_DEFUN([FI_ZHPE_CONFIGURE],
 	zhpe_CPPFLAGS="$zhpe_CPPFLAGS -DHAVE_ZHPE_STATS"
 	zhpe_LIBS="$zhpe_LIBS -lzhpe_stats"
       ])
-    # ummunotify needed for now to support registration cache
-    AC_CHECK_HEADER(
-      [linux/ummunotify.h],
-      [zhpe_CPPFLAGS="$zhpe_CPPFLAGS -DHAVE_LINUX_UMMUNOTIFY_H"])
   ])
   AS_IF([test $zhpe_happy -eq 1], [$1], [$2])
 ])
