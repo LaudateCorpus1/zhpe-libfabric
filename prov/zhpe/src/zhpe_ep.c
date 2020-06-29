@@ -213,12 +213,17 @@ static int zhpe_ctx_qalloc(struct zhpe_ctx *zctx)
 	struct sockaddr_zhpe	sz;
 	uint32_t		qspecific;
 	int			slice;
+	int			slice_mask;
 
 	manual = (zdom->util_domain.data_progress == FI_PROGRESS_MANUAL);
 
+	slice_mask = ALL_SLICES;
+	/* Allow slice to be specified via environment. */
+	if (!zhpe_ep_queue_per_slice && zhpe_ep_queue_slice >= 0)
+		slice_mask = (SLICE_DEMAND | (1 << zhpe_ep_queue_slice));
 	/* High priority for ENQA. */
-	ret = zhpeq_tq_alloc(zqdom, tx_size, tx_size, 0, ZHPEQ_PRIO_HI, 0,
-			     &zctx->ztq_hi);
+	ret = zhpeq_tq_alloc(zqdom, tx_size, tx_size, 0, ZHPEQ_PRIO_HI,
+			     slice_mask, &zctx->ztq_hi);
 	if (ret < 0) {
 		ZHPE_LOG_ERROR("zhpe_tq_alloc() error %d\n", ret);
 		goto done;
@@ -232,8 +237,9 @@ static int zhpe_ctx_qalloc(struct zhpe_ctx *zctx)
 		 */
 		slice = ((i + zctx->ztq_hi->tqinfo.slice) &
 			 (ZHPE_MAX_SLICES - 1));
+		slice_mask = SLICE_DEMAND | (1 << slice);
 		ret = zhpeq_tq_alloc(zqdom, tx_size, tx_size, 0, ZHPEQ_PRIO_LO,
-				     SLICE_DEMAND | (1U << slice),
+				     slice_mask,
 				     &zctx->ztq_lo[zctx->tx_ztq_slices]);
 		if (ret < 0) {
 			if (ret == -ENOENT)

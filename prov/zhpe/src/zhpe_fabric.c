@@ -558,6 +558,9 @@ ZHPE_INI
 	fi_param_define(&zhpe_prov, "queue_per_slice", FI_PARAM_BOOL,
 			"Enable/disable ep uses one queue per slice");
 
+	fi_param_define(&zhpe_prov, "queue_slice", FI_PARAM_INT,
+			"If queue_per_slice false, specifies slice for queue");
+
 	fi_param_get_int(&zhpe_prov, "def_av_sz", &zhpe_av_def_sz);
 	fi_param_get_int(&zhpe_prov, "def_cq_sz", &zhpe_cq_def_sz);
 	fi_param_get_int(&zhpe_prov, "def_eq_sz", &zhpe_eq_def_sz);
@@ -568,7 +571,9 @@ ZHPE_INI
 	fi_param_get_str(&zhpe_prov, "flowctl_table", &zhpe_conn_flowctl_table);
 	fi_param_get_bool(&zhpe_prov, "mr_cache_enable", &zhpe_mr_cache_enable);
 	fi_param_get_bool(&zhpe_prov, "queue_per_slice",
-			  &zhpe_ep_queue_per_slice);
+			 &zhpe_ep_queue_per_slice);
+	fi_param_get_int(&zhpe_prov, "queue_slice",
+			 &zhpe_ep_queue_slice);
 
 	zhpe_conn_init_flowctl(zhpe_conn_flowctl_table);
 
