@@ -52,105 +52,45 @@ struct atomic_op {
 	bool			hw_fam_only;
 };
 
-static int get_atomic_1op(struct atomic_op *aop, enum fi_datatype datatype,
-			  enum fi_op op, const void *op0)
+static int get_atomic_1op_2(struct atomic_op *aop, const void *op0,
+			    bool read_ok)
 {
-	if (OFI_UNLIKELY(!op0))
-		return -FI_EINVAL;
-
-	switch (datatype) {
-
-	case FI_INT8:
-	case FI_UINT8:
-		aop->fi_type = FI_UINT8;
-		aop->bytes = sizeof(uint8_t);
-		zhpeu_fab_atomic_load(aop->fi_type, op0, &aop->operands[0]);
-		aop->hw_type = ZHPEQ_ATOMIC_SIZE_NONE;
-		break;
-
-	case FI_INT16:
-	case FI_UINT16:
-		aop->fi_type = FI_UINT16;
-		aop->bytes = sizeof(uint16_t);
-		zhpeu_fab_atomic_load(aop->fi_type, op0, &aop->operands[0]);
-		aop->hw_type = ZHPEQ_ATOMIC_SIZE_NONE;
-		break;
-
-	case FI_INT32:
-	case FI_UINT32:
-		aop->fi_type = FI_UINT32;
-		aop->bytes = sizeof(uint32_t);
-		zhpeu_fab_atomic_load(aop->fi_type, op0, &aop->operands[0]);
-		aop->hw_type = ZHPEQ_ATOMIC_SIZE32;
-		aop->hw_handler = ZHPE_TX_HANDLE_ATM_HW_RD_RES32;
-		break;
-
-	case FI_INT64:
-	case FI_UINT64:
-		aop->fi_type = FI_UINT64;
-		aop->bytes = sizeof(uint64_t);
-		zhpeu_fab_atomic_load(aop->fi_type, op0, &aop->operands[0]);
-		aop->hw_type = ZHPEQ_ATOMIC_SIZE64;
-		aop->hw_handler = ZHPE_TX_HANDLE_ATM_HW_RD_RES64;
-		break;
-
-	case FI_FLOAT:
-		/* ZZZ: if this works on x86, it won't be portable. */
-		if (OFI_UNLIKELY(op != FI_ATOMIC_READ && op != FI_ATOMIC_WRITE))
-			return -FI_EOPNOTSUPP;
-		aop->fi_type = FI_FLOAT;
-		aop->bytes = sizeof(float);
-		zhpeu_fab_atomic_load(FI_UINT32, op0, &aop->operands[0]);
-		aop->hw_type = ZHPEQ_ATOMIC_SIZE32;
-		aop->hw_handler = ZHPE_TX_HANDLE_ATM_HW_RD_RES32;
-		break;
-
-	case FI_DOUBLE:
-		/* ZZZ: if this works on x86, it won't be portable. */
-		if (OFI_UNLIKELY(op != FI_ATOMIC_READ && op != FI_ATOMIC_WRITE))
-			return -FI_EOPNOTSUPP;
-		aop->fi_type = FI_DOUBLE;
-		aop->bytes = sizeof(double);
-		zhpeu_fab_atomic_load(FI_UINT64, op0, &aop->operands[0]);
-		aop->hw_type = ZHPEQ_ATOMIC_SIZE64;
-		aop->hw_handler = ZHPE_TX_HANDLE_ATM_HW_RD_RES64;
-		break;
-
-	default:
-		return -FI_EOPNOTSUPP;
-	}
-
-	aop->fi_op = op;
-
-	switch (op) {
+	switch (aop->fi_op) {
 
 	case FI_ATOMIC_READ:
+		if (!read_ok)
+			return -FI_EINVAL;
 		aop->operands[0] = 0;
 		aop->hw_op = ZHPEQ_ATOMIC_ADD;
 		aop->hw_fam_only = false;
 		break;
 
 	case FI_ATOMIC_WRITE:
+		zhpeu_fab_atomic_load(aop->fi_type, op0, &aop->operands[0]);
 		aop->hw_op = ZHPEQ_ATOMIC_SWAP;
 		aop->hw_fam_only = false;
 		break;
 
 	case FI_BAND:
+		zhpeu_fab_atomic_load(aop->fi_type, op0, &aop->operands[0]);
 		aop->hw_op = ZHPEQ_ATOMIC_AND;
 		aop->hw_fam_only = true;
 		break;
 
 	case FI_BOR:
+		zhpeu_fab_atomic_load(aop->fi_type, op0, &aop->operands[0]);
 		aop->hw_op = ZHPEQ_ATOMIC_OR;
 		aop->hw_fam_only = true;
 		break;
 
 	case FI_BXOR:
+		zhpeu_fab_atomic_load(aop->fi_type, op0, &aop->operands[0]);
 		aop->hw_op = ZHPEQ_ATOMIC_XOR;
 		aop->hw_fam_only = true;
 		break;
 
 	case FI_SUM:
+		zhpeu_fab_atomic_load(aop->fi_type, op0, &aop->operands[0]);
 		aop->hw_op = ZHPEQ_ATOMIC_ADD;
 		aop->hw_fam_only = false;
 		break;
@@ -160,6 +100,85 @@ static int get_atomic_1op(struct atomic_op *aop, enum fi_datatype datatype,
 	}
 
 	return 0;
+}
+
+static int get_atomic_1op(struct atomic_op *aop, enum fi_datatype datatype,
+			  enum fi_op op, const void *op0, bool read_ok)
+{
+	int			ret;
+
+	aop->fi_op = op;
+
+	switch (datatype) {
+
+	case FI_INT8:
+	case FI_UINT8:
+		aop->fi_type = FI_UINT8;
+		aop->bytes = sizeof(uint8_t);
+		aop->hw_type = ZHPEQ_ATOMIC_SIZE_NONE;
+		ret = get_atomic_1op_2(aop, op0, read_ok);
+		break;
+
+	case FI_INT16:
+	case FI_UINT16:
+		aop->fi_type = FI_UINT16;
+		aop->bytes = sizeof(uint16_t);
+		aop->hw_type = ZHPEQ_ATOMIC_SIZE_NONE;
+		ret = get_atomic_1op_2(aop, op0, read_ok);
+		break;
+
+	case FI_INT32:
+	case FI_UINT32:
+		aop->fi_type = FI_UINT32;
+		aop->bytes = sizeof(uint32_t);
+		aop->hw_type = ZHPEQ_ATOMIC_SIZE32;
+		aop->hw_handler = ZHPE_TX_HANDLE_ATM_HW_RD_RES32;
+		ret = get_atomic_1op_2(aop, op0, read_ok);
+		break;
+
+	case FI_INT64:
+	case FI_UINT64:
+		aop->fi_type = FI_UINT64;
+		aop->bytes = sizeof(uint64_t);
+		aop->hw_type = ZHPEQ_ATOMIC_SIZE64;
+		aop->hw_handler = ZHPE_TX_HANDLE_ATM_HW_RD_RES64;
+		ret = get_atomic_1op_2(aop, op0, read_ok);
+		break;
+
+	case FI_FLOAT:
+		/* ZZZ: if this works on x86, it won't be portable. */
+		if (OFI_UNLIKELY(op != FI_ATOMIC_READ &&
+				 op != FI_ATOMIC_WRITE)) {
+			ret = -FI_EOPNOTSUPP;
+			break;
+		}
+		aop->fi_type = FI_FLOAT;
+		aop->bytes = sizeof(float);
+		aop->hw_type = ZHPEQ_ATOMIC_SIZE32;
+		aop->hw_handler = ZHPE_TX_HANDLE_ATM_HW_RD_RES32;
+		ret = get_atomic_1op_2(aop, op0, read_ok);
+		break;
+
+	case FI_DOUBLE:
+		/* ZZZ: if this works on x86, it won't be portable. */
+		if (OFI_UNLIKELY(op != FI_ATOMIC_READ &&
+				 op != FI_ATOMIC_WRITE)) {
+			ret = -FI_EOPNOTSUPP;
+			break;
+		}
+		aop->fi_type = FI_DOUBLE;
+		aop->bytes = sizeof(double);
+		aop->hw_type = ZHPEQ_ATOMIC_SIZE64;
+		aop->hw_handler = ZHPE_TX_HANDLE_ATM_HW_RD_RES64;
+		ret = get_atomic_1op_2(aop, op0, read_ok);
+		break;
+
+	default:
+		ret = -FI_EOPNOTSUPP;
+		break;
+	}
+
+	return ret;
 }
 
 static int get_atomic_2op(struct atomic_op *aop, enum fi_datatype datatype,
@@ -593,7 +612,7 @@ zhpe_atomic_writemsg##_name(struct fid_ep *fid_ep,			\
 	}								\
 									\
 	op0 = msg->msg_iov[0].addr;					\
-	ret = get_atomic_1op(&aop, msg->datatype, msg->op, op0);	\
+	ret = get_atomic_1op(&aop, msg->datatype, msg->op, op0, false);	\
 	if (OFI_UNLIKELY(ret < 0))					\
 		goto done;						\
 									\
@@ -636,7 +655,7 @@ zhpe_atomic_writev##_name(struct fid_ep *fid_ep,			\
 	}								\
 									\
 	op0 = iov[0].addr;						\
-	ret = get_atomic_1op(&aop, datatype, op, op0);			\
+	ret = get_atomic_1op(&aop, datatype, op, op0, false);		\
 	if (OFI_UNLIKELY(ret < 0))					\
 		goto done;						\
 									\
@@ -671,13 +690,13 @@ zhpe_atomic_write##_name(struct fid_ep *fid_ep, const void *buf,	\
 									\
 	zhpe_stats_start(zhpe_stats_subid(RMA, 0));			\
 									\
-	if (OFI_UNLIKELY(!buf || count != 1)) {				\
+	if (OFI_UNLIKELY(count != 1)) {					\
 		ret = -FI_EINVAL;					\
 		goto done;						\
 	}								\
 									\
 	op0 = buf;							\
-	ret = get_atomic_1op(&aop, datatype, op, op0);			\
+	ret = get_atomic_1op(&aop, datatype, op, op0, false);		\
 	if (OFI_UNLIKELY(ret < 0))					\
 		goto done;						\
 									\
@@ -711,13 +730,13 @@ zhpe_atomic_inject##_name(struct fid_ep *fid_ep, const void *buf,	\
 									\
 	zhpe_stats_start(zhpe_stats_subid(RMA, 0));			\
 									\
-	if (OFI_UNLIKELY(!buf || count != 1)) {				\
+	if (OFI_UNLIKELY(count != 1)) {					\
 		ret = -FI_EINVAL;					\
 		goto done;						\
 	}								\
 									\
 	op0 = buf;							\
-	ret = get_atomic_1op(&aop, datatype, op, op0);			\
+	ret = get_atomic_1op(&aop, datatype, op, op0, false);		\
 	if (OFI_UNLIKELY(ret < 0))					\
 		goto done;						\
 									\
@@ -769,7 +788,7 @@ zhpe_atomic_fetchmsg##_name(struct fid_ep *fid_ep,			\
 	}								\
  									\
 	op0 = msg->msg_iov[0].addr;					\
-	ret = get_atomic_1op(&aop, msg->datatype, msg->op, op0);	\
+	ret = get_atomic_1op(&aop, msg->datatype, msg->op, op0, true);	\
 	if (OFI_UNLIKELY(ret < 0))					\
 		goto done;						\
 									\
@@ -818,7 +837,7 @@ zhpe_atomic_fetchv##_name(struct fid_ep *fid_ep,			\
 	}								\
 									\
 	op0 = iov[0].addr;						\
-	ret = get_atomic_1op(&aop, datatype, op, op0);			\
+	ret = get_atomic_1op(&aop, datatype, op, op0, true);		\
 	if (OFI_UNLIKELY(ret < 0))					\
 		goto done;						\
 									\
@@ -855,13 +874,13 @@ zhpe_atomic_fetch##_name(struct fid_ep *fid_ep, const void *buf,	\
 									\
 	zhpe_stats_start(zhpe_stats_subid(RMA, 0));			\
 									\
-	if (OFI_UNLIKELY(!buf || !result || count != 1)) {		\
+	if (OFI_UNLIKELY(!result || count != 1)) {			\
 		ret = -FI_EINVAL;					\
 		goto done;						\
 	}								\
 									\
 	op0 = buf;							\
-	ret = get_atomic_1op(&aop, datatype, op, op0);			\
+	ret = get_atomic_1op(&aop, datatype, op, op0, true);		\
 	if (OFI_UNLIKELY(ret < 0))					\
 		goto done;						\
 									\
