@@ -228,43 +228,29 @@ static int zhpe_ctx_qalloc(struct zhpe_ctx *zctx)
 		ZHPE_LOG_ERROR("zhpe_tq_alloc() error %d\n", ret);
 		goto done;
 	}
+	slice = zctx->ztq_hi->tqinfo.slice;
+
 	zctx->tx_size = zctx->ztq_hi->tqinfo.cmdq.ent * 2;
-	/* Low priority for RMA. */
-	for (i = 0; i < ZHPE_MAX_SLICES; i++) {
-		/*
-		 * Start with same queue as high priority queue.
-		 * ZZZ: Traffic class?
-		 */
-		slice = ((i + zctx->ztq_hi->tqinfo.slice) &
-			 (ZHPE_MAX_SLICES - 1));
-		slice_mask = SLICE_DEMAND | (1 << slice);
-		ret = zhpeq_tq_alloc(zqdom, tx_size, tx_size, 0, ZHPEQ_PRIO_LO,
-				     slice_mask,
-				     &zctx->ztq_lo[zctx->tx_ztq_slices]);
-		if (ret < 0) {
-			if (ret == -ENOENT)
-				continue;
-			ZHPE_LOG_ERROR("zhpeq_tq_alloc() error %d\n", ret);
-			goto done;
-		}
-		zctx->tx_ztq_slices++;
-		if (!zhpe_ep_queue_per_slice)
-			break;
-	}
-	if (!zctx->tx_ztq_slices) {
-		ret = -ENOENT;
-		ZHPE_LOG_ERROR("zhpeq_tq_alloc() error %d\n", ret);
-		goto done;
-	}
 	if (info->src_addr && info->src_addrlen && zctx->ctx_idx == 0) {
 		qspecific = ((struct sockaddr_zhpe *)info->src_addr)->sz_queue;
 		qspecific = ntohl(qspecific);
 	} else
 		qspecific = 0;
-	ret = zhpeq_rq_alloc_specific(zqdom, rx_size, qspecific, &zctx->zrq);
-	if (ret < 0) {
-		ZHPE_LOG_ERROR("zhpe_rq_alloc() error %d\n", ret);
-		goto done;
+	if (qspecific) {
+		ret = zhpeq_rq_alloc_specific(zqdom, rx_size, qspecific,
+					      &zctx->zrq);
+		if (ret < 0) {
+			ZHPE_LOG_ERROR("zhpe_rq_alloc_specific() error %d\n",
+				       ret);
+			goto done;
+		}
+	} else {
+		slice_mask = SLICE_DEMAND | (1 << slice);
+		ret = zhpeq_rq_alloc(zqdom, rx_size, slice_mask, &zctx->zrq);
+		if (ret < 0) {
+			ZHPE_LOG_ERROR("zhpe_rq_alloc() error %d\n", ret);
+			goto done;
+		}
 	}
 	ret = zhpeq_rq_epoll_add(zdom->pe->zepoll, zctx->zrq,
 				 zhpe_pe_epoll_handler, zctx,
@@ -285,6 +271,32 @@ static int zhpe_ctx_qalloc(struct zhpe_ctx *zctx)
 	zctx->lcl_rspctxid = ntohl(sz.sz_queue);
 	zhpe_stats_stamp_dbg(__func__, __LINE__,
 			     zctx->lcl_gcid, zctx->lcl_rspctxid, 0, 0);
+	/* Low priority for RMA. */
+	for (i = 0; i < ZHPE_MAX_SLICES; i++) {
+		/*
+		 * Start with same queue as high priority queue.
+		 * ZZZ: Traffic class?
+		 */
+		slice = (slice + 1) & (ZHPE_MAX_SLICES - 1);
+		slice_mask = SLICE_DEMAND | (1 << slice);
+		ret = zhpeq_tq_alloc(zqdom, tx_size, tx_size, 0, ZHPEQ_PRIO_LO,
+				     slice_mask,
+				     &zctx->ztq_lo[zctx->tx_ztq_slices]);
+		if (ret < 0) {
+			if (ret == -ENOENT)
+				continue;
+			ZHPE_LOG_ERROR("zhpeq_tq_alloc() error %d\n", ret);
+			goto done;
+		}
+		zctx->tx_ztq_slices++;
+		if (!zhpe_ep_queue_per_slice)
+			break;
+	}
+	if (!zctx->tx_ztq_slices) {
+		ret = -ENOENT;
+		ZHPE_LOG_ERROR("zhpeq_tq_alloc() error %d\n", ret);
+		goto done;
+	}
 
 	/* Allocate the ctx_ptrs array twice the size of the cmdq. */
 	i = zctx->ztq_hi->tqinfo.cmdq.ent * 2;
