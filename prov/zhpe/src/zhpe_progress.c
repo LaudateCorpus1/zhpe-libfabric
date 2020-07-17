@@ -597,7 +597,8 @@ static void zhpe_rx_entry_report_complete(const struct zhpe_rx_entry *rx_entry,
 	uint64_t		olen;
 
 	zhpe_stats_stamp_dbg(__func__, __LINE__,
-			     (uintptr_t)rx_entry, err, 0, 0);
+			     (uintptr_t)rx_entry, err,
+			     (uintptr_t)rx_entry->op_context, 0);
 
 	if (OFI_LIKELY(err >= 0)) {
 		if (OFI_LIKELY(len <= rx_entry->total_user)) {
@@ -815,7 +816,8 @@ static void rx_send_start_rnd(struct zhpe_rx_entry *rx_entry)
 static void rx_matched_wire(struct zhpe_rx_entry *rx_matched)
 {
 	zhpe_stats_stamp_dbg(__func__, __LINE__,
-			     (uintptr_t)rx_matched, rx_matched->rx_state, 0, 0);
+			     (uintptr_t)rx_matched, rx_matched->rx_state,
+			     (uintptr_t)rx_matched->op_context, 0);
 
 	/* zctx_lock must be locked. */
 	switch (rx_matched->rx_state) {
@@ -845,7 +847,9 @@ void zhpe_rx_matched_user(struct zhpe_rx_entry *rx_matched,
 			  size_t uiov_cnt)
 {
 	zhpe_stats_stamp_dbg(__func__, __LINE__,
-			     (uintptr_t)rx_matched, rx_matched->rx_state, 0, 0);
+			     (uintptr_t)rx_matched, rx_matched->rx_state,
+			     (uintptr_t)rx_matched->op_context,
+			     rx_matched->match_info.tag);
 
 	/* zctx_lock must be locked. */
 	zhpe_get_uiov_lstate(uiov, udesc, uiov_cnt, &rx_matched->lstate);
@@ -1116,10 +1120,6 @@ static void rx_wire_init(struct zhpe_rx_entry *rx_wire, struct zhpe_conn *conn,
 	union zhpe_msg_payload	*pay = (void *)msg->payload;
 	uint8_t			rx_state;
 
-	zhpe_stats_stamp_dbg(__func__, __LINE__,
-			     (uintptr_t)rx_wire, ntohs(msg->hdr.cmp_idxn),
-			     0, 0);
-
 	rx_wire->tx_entry.conn = conn;
 	rx_wire->match_info.tag = tag;
 	rx_wire->total_wire = 0;
@@ -1130,6 +1130,9 @@ static void rx_wire_init(struct zhpe_rx_entry *rx_wire, struct zhpe_conn *conn,
 		rx_wire->cq_data = be64toh(pay->data[i++]);
 		rx_wire->op_flags |= FI_REMOTE_CQ_DATA;
 	}
+	zhpe_stats_stamp_dbg(__func__, __LINE__,
+			     (uintptr_t)rx_wire, ntohs(msg->hdr.cmp_idxn),
+			     tag, rx_wire->cq_data);
 	if (msg->hdr.op & ZHPE_OP_SEND_IX) {
 		rx_wire->total_wire = msg->hdr.len;
 		memcpy(rx_wire->inline_data, &pay->data[i], msg->hdr.len);

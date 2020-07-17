@@ -331,6 +331,9 @@ static int recv_iov(struct zhpe_ctx *zctx, const struct iovec *uiov,
 	rx_user->match_info = user_info;
 	zhpe_get_uiov_lstate(uiov, udesc, uiov_cnt, &rx_user->lstate);
 	dlist_insert_tail(&rx_user->dentry, &match_lists->user_list);
+	zhpe_stats_stamp_dbg(__func__, __LINE__,
+			     (uintptr_t)rx_user, rx_user->rx_state,
+			     (uintptr_t)rx_user->op_context, tag);
 	zctx_unlock(zctx);
 
 	return 0;
@@ -557,7 +560,7 @@ static int send_inline(struct zhpe_ctx *zctx, void *op_context, uint64_t tag,
 				     (uintptr_t)conn, op);
 		zhpe_stats_stamp_dbgc(ntohs(conn->rem_conn_idxn),
 				      conn->tx_seq - 1, reservation[0],
-				      0, 0, 0);
+				      0, tag, cq_data);
 	} else {
 		tx_entry->cstat.completions++;
 		zhpe_tx_reserve(zctx->ztq_hi, tx_entry, 2, wqe, reservation);
@@ -575,7 +578,7 @@ static int send_inline(struct zhpe_ctx *zctx, void *op_context, uint64_t tag,
 				     (uintptr_t)conn, op);
 		zhpe_stats_stamp_dbgc(ntohs(conn->rem_conn_idxn),
 				      conn->tx_seq - 2, reservation[0],
-				      reservation[1], 0, 0);
+				      reservation[1], tag, cq_data);
 	}
 	zhpeq_tq_commit(zctx->ztq_hi);
 	zctx->pe_ctx_ops->signal(zctx);
@@ -752,7 +755,7 @@ static int send_iov(struct zhpe_ctx *zctx, void *op_context, uint64_t tag,
 				     (uintptr_t)conn, op);
 		zhpe_stats_stamp_dbgc(ntohs(conn->rem_conn_idxn),
 				      conn->tx_seq - 1, reservation[0],
-				      0, 0, 0);
+				      0, tag, cq_data);
 		goto done_unlock;
 	}
 
@@ -775,7 +778,7 @@ static int send_iov(struct zhpe_ctx *zctx, void *op_context, uint64_t tag,
 				     (uintptr_t)conn, op);
 		zhpe_stats_stamp_dbgc(ntohs(conn->rem_conn_idxn),
 				      conn->tx_seq - 2, reservation[0],
-				      reservation[1], 0, 0);
+				      reservation[1], tag, cq_data);
 	} else {
 		/* Fits in one message. */
 		zhpe_tx_reserve(zctx->ztq_hi, tx_entry, 1, wqe, reservation);
