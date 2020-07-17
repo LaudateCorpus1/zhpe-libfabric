@@ -277,8 +277,9 @@ static int zhpe_ctx_qalloc(struct zhpe_ctx *zctx)
 		 * Start with same queue as high priority queue.
 		 * ZZZ: Traffic class?
 		 */
-		slice = (slice + 1) & (ZHPE_MAX_SLICES - 1);
+		slice &= (ZHPE_MAX_SLICES - 1);
 		slice_mask = SLICE_DEMAND | (1 << slice);
+		slice++;
 		ret = zhpeq_tq_alloc(zqdom, tx_size, tx_size, 0, ZHPEQ_PRIO_LO,
 				     slice_mask,
 				     &zctx->ztq_lo[zctx->tx_ztq_slices]);
