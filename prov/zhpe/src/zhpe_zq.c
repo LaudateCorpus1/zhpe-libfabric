@@ -532,11 +532,11 @@ bool zhpe_iov_state_adv(struct zhpe_iov_state *state, uint64_t incr)
 	uint64_t		slen;
 
 	slen = zhpe_iov_state_len(state);
-	state->off += incr;
-	if (state->off == slen) {
+	if (incr == slen) {
 		state->idx++;
 		state->off = 0;
-	}
+	} else
+		state->off += incr;
 
 	return (state->idx >= state->cnt);
 }

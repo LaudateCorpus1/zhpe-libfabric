@@ -99,8 +99,11 @@ static int do_shutdown(struct zhpe_ctx *zctx)
 		conn->eflags |= ZHPE_CONN_EFLAG_SHUTDOWN1;
 		if (conn->eflags & ~ZHPE_CONN_EFLAG_SHUTDOWN1)
 			continue;
-		zhpe_msg_prov_no_eflags(conn, ZHPE_OP_SHUTDOWN, NULL, 0, 0,
-					conn->tx_seq++);
+		if (conn->fam)
+			conn->eflags |= ZHPE_CONN_EFLAG_SHUTDOWN2;
+		else
+			zhpe_msg_prov_no_eflags(conn, ZHPE_OP_SHUTDOWN, NULL,
+						0, 0, conn->tx_seq++);
 	}
 	/* Poll for shutdown completion. */
 	start = time(NULL);

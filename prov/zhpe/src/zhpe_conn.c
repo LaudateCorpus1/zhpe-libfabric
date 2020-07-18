@@ -704,6 +704,9 @@ static void conn_fam_setup(struct zhpe_conn *conn, struct sockaddr_zhpe *sz)
 	size_t			i;
 	int			rc;
 
+	/* rkays are zero based. */
+	conn->rem_rma_flags = FI_ZHPE_RMA_ZERO_OFF;
+
 	/* zctx_lock() must be held. */
 	rc = zhpeq_domain_insert_addr(zqdom, sz, &conn->addr_cookie);
 	if (rc < 0) {
@@ -735,10 +738,11 @@ static void conn_fam_setup(struct zhpe_conn *conn, struct sockaddr_zhpe *sz)
 	for (i = 0; i < n_qkdata; i++) {
 		rkey = xmalloc(sizeof(*rkey));
 		rkey->tkey.rem_gcid = conn->tkey.rem_gcid;
-		rkey->tkey.rem_rspctxid = conn->rem_rspctxid;
+		rkey->tkey.rem_rspctxid = conn->tkey.rem_rspctxid0;
 		rkey->tkey.key = i;
 		rkey->conn = conn;
 		rkey->qkdata = qkdata[i];
+		rkey->offset = qkdata[i]->z.vaddr;
 		dlist_init(&rkey->rkey_wait_list);
 		rkey->ref = 1;
 		rc = ofi_rbmap_insert(&zctx->rkey_tree, &rkey->tkey, rkey,

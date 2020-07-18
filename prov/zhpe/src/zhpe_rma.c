@@ -177,7 +177,12 @@ zhpe_rma_rkey_lookup(struct zhpe_conn *conn, uint64_t key,
 		rkey->ref = 2;
 		rc = ofi_rbmap_insert(&zctx->rkey_tree, &tkey, rkey, NULL);
 		assert_always(!rc);
-		zhpe_send_key_request(conn, &key, 1);
+		if (OFI_LIKELY(!conn->fam))
+			zhpe_send_key_request(conn, &key, 1);
+		else {
+			wait_handler(wait_prep(prep_arg), -FI_ENOKEY);
+			return rkey;
+		}
 	} else {
 		rkey = rbnode->data;
 		zhpe_rma_rkey_get(rkey);
@@ -201,7 +206,8 @@ static void rma_rkey_fixup(struct zhpe_rma_entry *rma_entry)
 	uint32_t		qaccess;
 	uint64_t		pre_base;
 
-	if (OFI_UNLIKELY(!rma_entry->rstate.cnt))
+	if (OFI_UNLIKELY(!rma_entry->rstate.cnt ||
+			 rma_entry->tx_entry.cstat.status))
 		return;
 	qaccess = (rma_entry->tx_entry.rma_get ? ZHPEQ_MR_GET_REMOTE :
 		   ZHPEQ_MR_PUT_REMOTE);

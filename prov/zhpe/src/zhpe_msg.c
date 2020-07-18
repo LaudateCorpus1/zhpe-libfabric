@@ -73,6 +73,7 @@ static int rx_match_info_init(struct zhpe_ctx *zctx, uint64_t opt_flags,
 	    src_addr != FI_ADDR_UNSPEC) {
 		zhpe_stats_start(zhpe_stats_subid(SEND, 10));
 		minfo->conn = zhpe_conn_av_lookup(zctx, src_addr);
+		assert(!minfo->conn->fam);
 		zhpe_stats_stop(zhpe_stats_subid(SEND, 10));
 		if (OFI_UNLIKELY(minfo->conn->eflags))
 			return zhpe_conn_eflags_error(minfo->conn->eflags);
@@ -520,6 +521,7 @@ static int send_inline(struct zhpe_ctx *zctx, void *op_context, uint64_t tag,
 	}
 	zhpe_stats_start(zhpe_stats_subid(SEND, 10));
 	conn = zhpe_conn_av_lookup(zctx, dst_addr);
+	assert(!conn->fam);
 	zhpe_stats_stop(zhpe_stats_subid(SEND, 10));
 	if (OFI_UNLIKELY(conn->eflags)) {
 		rc = zhpe_conn_eflags_error(conn->eflags);
@@ -716,6 +718,7 @@ static int send_iov(struct zhpe_ctx *zctx, void *op_context, uint64_t tag,
 	}
 	zhpe_stats_start(zhpe_stats_subid(SEND, 10));
 	conn = zhpe_conn_av_lookup(zctx, dst_addr);
+	assert(!conn->fam);
 	zhpe_stats_stop(zhpe_stats_subid(SEND, 10));
 	if (OFI_UNLIKELY(conn->eflags)) {
 		send_zmr_put(ptrs, rc);
@@ -1593,6 +1596,7 @@ void zhpe_msg_prov_no_eflags(struct zhpe_conn *conn, uint8_t op,
 	int32_t			reservation[1];
 	union zhpe_hw_wq_entry	*wqe[1];
 
+	assert(!conn->fam);
 	/* Assume conn->zctx is locked. */
 	zhpe_tx_reserve(zctx->ztq_hi, tx_entry, 1, wqe, reservation);
 	send_inline_special(conn, op, payload, paylen, conn->rem_conn_idxn,
@@ -1626,6 +1630,7 @@ void zhpe_msg_connect(struct zhpe_ctx *zctx, uint8_t op,
 	int32_t			reservation[1];
 	union zhpe_hw_wq_entry	*wqe[1];
 
+	assert(!conn->fam);
 	/* Assume conn->zctx is locked. */
 	zhpe_tx_reserve(zctx->ztq_hi, tx_entry, 1, wqe, reservation);
 	send_inline_special(conn, op, payload, paylen, 0, 0, tx_seq,
