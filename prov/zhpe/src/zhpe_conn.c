@@ -808,7 +808,8 @@ struct zhpe_conn *zhpe_conn_av_lookup(struct zhpe_ctx *zctx, fi_addr_t fiaddr)
 		conn->rem_conn_idxn =
 			htons(zhpe_ibuf_index(&zctx->conn_pool, conn));
 		conn->rem_rspctxid = zctx->lcl_rspctxid;
-		conn->rem_rma_flags = conn_wire_rma_flags(zctx);
+		conn->rem_rma_flags =
+			conn_rem_rma_flags(conn_wire_rma_flags(zctx));
 		zdom = zctx2zdom(zctx);
 		rc = zhpeq_domain_insert_addr(zdom->zqdom, &sz_copy,
 					      &conn->addr_cookie);
