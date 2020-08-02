@@ -329,6 +329,10 @@ int zhpe_fabric(struct fi_fabric_attr *attr, struct fid_fabric **fabric,
 	if (!attr || !fabric)
 		goto done;
 
+	ret = zhpeq_open();
+	if (ret < 0)
+		goto done;
+
 	ret = -FI_ENOMEM;
 	zfab = calloc(1, sizeof(*zfab));
 	if (!zfab)
