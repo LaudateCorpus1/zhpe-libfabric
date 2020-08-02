@@ -106,6 +106,8 @@ void zhpe_conn_flowctl(struct zhpe_conn *conn, uint8_t retry_idx)
 	    conn->tx_flowctl_delay_idx < conn_flowctl->delay_entries) {
 		conn->tx_flowctl_delay_idx++;
 		conn->tx_flowctl_retry_idx++;
+		if (OFI_UNLIKELY(!conn->tx_flowctl_retry_idx))
+			conn->tx_flowctl_retry_idx++;
 		zhpe_stats_stamp_dbg(__func__, __LINE__,
 				     (uintptr_t)conn,
 				     conn->tx_flowctl_delay_idx,
