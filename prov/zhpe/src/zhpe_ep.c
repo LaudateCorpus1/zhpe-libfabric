@@ -233,7 +233,7 @@ static int zhpe_ctx_qalloc(struct zhpe_ctx *zctx)
 	}
 	slice = zctx->ztq_hi->tqinfo.slice;
 
-	zctx->tx_size = zctx->ztq_hi->tqinfo.cmdq.ent * 2;
+	zctx->tx_size = roundup_pow_of_2(zctx->ztq_hi->tqinfo.cmdq.ent) * 2;
 	if (info->src_addr && info->src_addrlen && zctx->ctx_idx == 0) {
 		qspecific = ((struct sockaddr_zhpe *)info->src_addr)->sz_queue;
 		qspecific = ntohl(qspecific);
