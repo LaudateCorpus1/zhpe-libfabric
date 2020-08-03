@@ -165,7 +165,7 @@ static void tx_conn_retry(struct zhpe_tx_entry *tx_entry, uint16_t index)
 				txqe_inlist, dentry) {
 		if (!(txqe_inlist->tx_entry->cstat.flags & ZHPE_CS_FLAG_RMA)) {
 			msg_inlist = (void *)&wqe->enqa.payload;
-			if (msg_seq > ntohl(msg_inlist->hdr.seqn))
+			if (wrap32sub(msg_seq, ntohl(msg_inlist->hdr.seqn)) > 0)
 				continue;
 		}
 		dlist_insert_before(&txqe->dentry, &txqe_inlist->dentry);
