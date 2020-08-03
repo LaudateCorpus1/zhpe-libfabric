@@ -628,7 +628,7 @@ int zhpe_domain(struct fid_fabric *fid_fabric, struct fi_info *info,
 	ret = ofi_domain_init(&zfab->util_fabric.fabric_fid, info,
 			      &zdom->util_domain, context);
 
-	if (zdom->util_domain.data_progress == FI_PROGRESS_AUTO)
+	if (zdom->util_domain.data_progress != FI_PROGRESS_MANUAL)
 		zdom->util_domain.threading = FI_THREAD_SAFE;
 
 	if (ret < 0) {
@@ -667,10 +667,12 @@ int zhpe_domain(struct fid_fabric *fid_fabric, struct fi_info *info,
 	if (ret < 0)
 		goto done;
 
-	zdom->pe = zhpe_pe_init(zdom);
-	if (!zdom->pe) {
-		ret = -FI_ENOMEM;
-		goto done;
+	if (zdom->util_domain.data_progress != FI_PROGRESS_MANUAL) {
+		zdom->pe = zhpe_pe_init(zdom);
+		if (!zdom->pe) {
+			ret = -FI_ENOMEM;
+			goto done;
+		}
 	}
 
 	*fid_domain = &zdom->util_domain.domain_fid;

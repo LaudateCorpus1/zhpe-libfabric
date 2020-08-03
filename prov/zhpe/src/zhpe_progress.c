@@ -1314,7 +1314,7 @@ void zhpe_rx_oos_free(struct zhpeq_rx_seq *zseq, struct zhpeq_rx_oos *rx_oos)
 	struct zhpe_conn       *conn = container_of(zseq, struct zhpe_conn,
 						    rx_zseq);
 
-	return zhpe_buf_free(&conn->zctx->rx_oos_pool, rx_oos);
+	zhpe_buf_free(&conn->zctx->rx_oos_pool, rx_oos);
 }
 
 static void rx_oos_msg_handler(void *handler_data, struct zhpe_rdm_entry *rqe)
@@ -1676,7 +1676,8 @@ void zhpe_pe_add_ctx(struct zhpe_ctx *zctx)
 {
 	struct zhpe_dom		*zdom = zctx2zdom(zctx);
 
-	pe_work_queue(zdom->pe, pe_add_ctx, zctx);
+	if (zctx2zdom(zctx)->util_domain.data_progress != FI_PROGRESS_MANUAL)
+		pe_work_queue(zdom->pe, pe_add_ctx, zctx);
 }
 
 static bool pe_del_ctx(struct zhpeu_work_head *head,
@@ -1693,7 +1694,8 @@ void zhpe_pe_del_ctx(struct zhpe_ctx *zctx)
 {
 	struct zhpe_dom		*zdom = zctx2zdom(zctx);
 
-	pe_work_queue(zdom->pe, pe_del_ctx, zctx);
+	if (zctx2zdom(zctx)->util_domain.data_progress != FI_PROGRESS_MANUAL)
+		pe_work_queue(zdom->pe, pe_del_ctx, zctx);
 }
 
 static int pe_progress(struct zhpe_pe *pe)

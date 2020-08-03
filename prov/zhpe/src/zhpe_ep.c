@@ -211,14 +211,11 @@ static int zhpe_ctx_qalloc(struct zhpe_ctx *zctx)
 	struct fi_info		*info = zep->info;
 	size_t			tx_size = info->tx_attr->size;
 	size_t			rx_size = info->rx_attr->size;
-	bool			manual;
 	size_t			i;
 	struct sockaddr_zhpe	sz;
 	uint32_t		qspecific;
 	int			slice;
 	int			slice_mask;
-
-	manual = (zdom->util_domain.data_progress == FI_PROGRESS_MANUAL);
 
 	slice_mask = ALL_SLICES;
 	/* Allow slice to be specified via environment. */
@@ -255,12 +252,14 @@ static int zhpe_ctx_qalloc(struct zhpe_ctx *zctx)
 			goto done;
 		}
 	}
-	ret = zhpeq_rq_epoll_add(zdom->pe->zepoll, zctx->zrq,
-				 zhpe_pe_epoll_handler, zctx,
-				 zhpe_ep_rx_poll_timeout, manual);
-	if (ret < 0) {
-		ZHPE_LOG_ERROR("zhpe_rq_epoll_add() error %d\n", ret);
-		goto done;
+	if (zdom->util_domain.data_progress != FI_PROGRESS_MANUAL) {
+		ret = zhpeq_rq_epoll_add(zdom->pe->zepoll, zctx->zrq,
+					 zhpe_pe_epoll_handler, zctx,
+					 zhpe_ep_rx_poll_timeout, false);
+		if (ret < 0) {
+			ZHPE_LOG_ERROR("zhpe_rq_epoll_add() error %d\n", ret);
+			goto done;
+		}
 	}
 	i = sizeof(sz);
 	ret = zhpeq_rq_get_addr(zctx->zrq, &sz, &i);
@@ -320,7 +319,7 @@ static int zhpe_ctx_qalloc(struct zhpe_ctx *zctx)
 	ret = 0;
 
  done:
-	if (ret >= 0 && !manual)
+	if (ret >= 0)
 		zhpe_pe_add_ctx(zctx);
 
 	return ret;
