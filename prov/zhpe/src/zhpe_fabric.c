@@ -329,7 +329,7 @@ int zhpe_fabric(struct fi_fabric_attr *attr, struct fid_fabric **fabric,
 	if (!attr || !fabric)
 		goto done;
 
-	ret = zhpeq_open();
+	ret = zhpeq_init(ZHPEQ_API_VERSION, NULL);
 	if (ret < 0)
 		goto done;
 
@@ -422,9 +422,9 @@ int zhpe_getinfo(uint32_t api_version, const char *node, const char *service,
 	 * zhpe_getinfo() returns either zero or -FI_ENODATA. Other errors
 	 * will be logged, but not returned to the caller.
 	 */
-	rc = zhpeq_init(ZHPEQ_API_VERSION, NULL);
+	rc = zhpeq_present(ZHPEQ_API_VERSION);
 	if (rc < 0) {
-		ZHPE_LOG_ERROR("zhpeq_init() error %d:%s\n",
+		ZHPE_LOG_ERROR("zhpeq_init_lite() error %d:%s\n",
 			       rc, fi_strerror(-rc));
 		goto done;
 	}
