@@ -231,6 +231,7 @@ static int zhpe_ctx_qalloc(struct zhpe_ctx *zctx)
 	slice = zctx->ztq_hi->tqinfo.slice;
 
 	zctx->tx_size = roundup_pow_of_2(zctx->ztq_hi->tqinfo.cmdq.ent) * 2;
+	assert_always(zctx->tx_size < UINT16_MAX);
 	if (info->src_addr && info->src_addrlen && zctx->ctx_idx == 0) {
 		qspecific = ((struct sockaddr_zhpe *)info->src_addr)->sz_queue;
 		qspecific = ntohl(qspecific);
@@ -301,9 +302,8 @@ static int zhpe_ctx_qalloc(struct zhpe_ctx *zctx)
 		goto done;
 	}
 
-	/* Allocate the ctx_ptrs array twice the size of the cmdq. */
-	i = zctx->ztq_hi->tqinfo.cmdq.ent * 2;
-	i = min(i, (size_t)UINT16_MAX);
+	/* Allocate the ctx_ptrs array. */
+	i = zctx->tx_size + 1;
 	zctx->ctx_ptrs = calloc(i, sizeof(*zctx->ctx_ptrs));
 	if (!zctx->ctx_ptrs) {
 		ret = -FI_ENOMEM;
