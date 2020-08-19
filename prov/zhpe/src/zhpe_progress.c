@@ -178,14 +178,14 @@ static int tx_cstat_update_cqe(struct zhpe_tx_entry *tx_entry,
 			       struct zhpe_cq_entry *cqe, bool msg)
 {
 	struct zhpe_compstat	*cstat = &tx_entry->cstat;
-	uint8_t			hwstatus = cqe->status;
+	uint8_t			hwstatus = cqe->hdr.status;
 
 	if (OFI_LIKELY(hwstatus == ZHPE_HW_CQ_STATUS_SUCCESS))
 		goto done;
 
 	if (msg &&
 	    OFI_LIKELY(hwstatus == ZHPE_HW_CQ_STATUS_GENZ_RDM_QUEUE_FULL)) {
-		tx_conn_retry(tx_entry, cqe->index);
+		tx_conn_retry(tx_entry, cqe->hdr.index);
 
 		return cstat->completions;
 	}
@@ -193,7 +193,7 @@ static int tx_cstat_update_cqe(struct zhpe_tx_entry *tx_entry,
 	if ((cstat->flags & ZHPE_CS_FLAG_ZERROR) || cstat->status < 0)
 		goto done;
 
-	cstat->status = cqe->status;
+	cstat->status = cqe->hdr.status;
 	cstat->flags |= ZHPE_CS_FLAG_ZERROR;
 	/* ZZZ: Think on this. */
 	if (cstat->flags & ZHPE_CS_FLAG_REMOTE_STATUS) {
@@ -222,7 +222,7 @@ static void tx_handle_msg_inject(struct zhpe_tx_entry *tx_entry,
 	struct zhpe_conn	*conn = tx_entry->conn;
 	struct zhpe_ctx		*zctx = conn->zctx;
 	struct util_ep		*ep = &zctx->util_ep;
-	uint8_t			hwstatus = cqe->status;
+	uint8_t			hwstatus = cqe->hdr.status;
 
 	if (OFI_LIKELY(!hwstatus)) {
 		/* Success. */
@@ -231,7 +231,7 @@ static void tx_handle_msg_inject(struct zhpe_tx_entry *tx_entry,
 	}
 
 	if (OFI_LIKELY(hwstatus == ZHPE_HW_CQ_STATUS_GENZ_RDM_QUEUE_FULL)) {
-		tx_conn_retry(tx_entry, cqe->index);
+		tx_conn_retry(tx_entry, cqe->hdr.index);
 		return;
 	}
 
@@ -242,13 +242,13 @@ static void tx_handle_msg_inject(struct zhpe_tx_entry *tx_entry,
 static void tx_handle_msg_prov(struct zhpe_tx_entry *tx_entry,
 			       struct zhpe_cq_entry *cqe)
 {
-	uint8_t			hwstatus = cqe->status;
+	uint8_t			hwstatus = cqe->hdr.status;
 
 	if (OFI_LIKELY(!hwstatus))
 		return;
 
 	if (OFI_LIKELY(hwstatus == ZHPE_HW_CQ_STATUS_GENZ_RDM_QUEUE_FULL)) {
-		tx_conn_retry(tx_entry, cqe->index);
+		tx_conn_retry(tx_entry, cqe->hdr.index);
 		return;
 	}
 
@@ -585,7 +585,7 @@ void zhpe_tx_call_handler_fake(struct zhpe_tx_entry *tx_entry,
 {
 	struct zhpe_cq_entry	cqe;
 
-	cqe.status = cqe_status;
+	cqe.hdr.status = cqe_status;
 	tx_call_handler(tx_entry, &cqe);
 }
 
