@@ -455,8 +455,8 @@ struct zhpe_conn {
 	uint32_t		rem_rspctxid;
 	uint16_t		rem_conn_idxn;
 
-	void			(*rx_msg_handler)(struct zhpe_conn *conn,
-						  struct zhpe_rdm_entry *rqe);
+	struct zhpe_rdm_entry	*(*rx_msg_handler)(struct zhpe_conn *conn,
+						   struct zhpe_rdm_entry *rqe);
 	struct zhpe_rx_entry	*rx_pending;
 	void			(*rx_pending_fn)(struct zhpe_conn *conn,
 						 struct zhpe_msg *msg);
@@ -978,7 +978,8 @@ struct zhpe_ctx {
 	struct zhpe_rx_match_lists rx_match_untagged;
 	struct dlist_entry	rx_work_list;
 
-	uint32_t		rx_queued;
+	int32_t			rx_outstanding;
+	int32_t			rx_limit;
 
 	uint32_t		lcl_gcid;
 	uint32_t		lcl_rspctxid;
@@ -1431,12 +1432,15 @@ int zhpe_sep_open(struct fid_domain *fid_domain, struct fi_info *info,
 int zhpe_set_fd_cloexec(int fd);
 int zhpe_set_fd_nonblock(int fd);
 
-void zhpe_rx_msg_handler_connected(struct zhpe_conn *conn,
-				   struct zhpe_rdm_entry *rqe);
-void zhpe_rx_msg_handler_unconnected(struct zhpe_conn *conn,
-				     struct zhpe_rdm_entry *rqe);
-void zhpe_rx_msg_handler_drop(struct zhpe_conn *conn,
+struct zhpe_rdm_entry *
+zhpe_rx_msg_handler_connected(struct zhpe_conn *conn,
 			      struct zhpe_rdm_entry *rqe);
+struct zhpe_rdm_entry *
+zhpe_rx_msg_handler_unconnected(struct zhpe_conn *conn,
+				struct zhpe_rdm_entry *rqe);
+struct zhpe_rdm_entry *
+zhpe_rx_msg_handler_drop(struct zhpe_conn *conn,
+			 struct zhpe_rdm_entry *rqe);
 struct zhpeq_rx_oos *zhpe_rx_oos_alloc(struct zhpeq_rx_seq *zseq);
 void zhpe_rx_oos_free(struct zhpeq_rx_seq *zseq, struct zhpeq_rx_oos *rx_oos);
 

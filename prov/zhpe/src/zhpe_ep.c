@@ -268,6 +268,7 @@ static int zhpe_ctx_qalloc(struct zhpe_ctx *zctx)
 		ZHPE_LOG_ERROR("zhpe_rq_get_addr() error %d\n", ret);
 		goto done;
 	}
+	zctx->rx_limit = zctx->zrq->rqinfo.cmplq.ent;
 	if (!zctx->ctx_idx)
 		memcpy(zep->uuid, sz.sz_uuid, sizeof(zep->uuid));
 	zctx->lcl_gcid = zhpeu_uuid_to_gcid(sz.sz_uuid);

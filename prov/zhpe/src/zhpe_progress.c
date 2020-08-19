@@ -592,13 +592,20 @@ void zhpe_tx_call_handler_fake(struct zhpe_tx_entry *tx_entry,
 static void zhpe_rx_entry_report_complete(const struct zhpe_rx_entry *rx_entry,
 					  int err)
 {
-	struct util_ep		*ep = &rx_entry->zctx->util_ep;
+	struct zhpe_ctx		*zctx = rx_entry->zctx;
+	struct util_ep		*ep = &zctx->util_ep;
 	uint64_t		len = rx_entry->total_wire;
 	uint64_t		olen;
 
+	zctx->rx_outstanding--;
+	assert(zctx->rx_outstanding >= 0);
+
 	zhpe_stats_stamp_dbg(__func__, __LINE__,
 			     (uintptr_t)rx_entry, err,
-			     (uintptr_t)rx_entry->op_context, 0);
+			     (uintptr_t)rx_entry->op_context,
+			     rx_entry->match_info.tag);
+	zhpe_stats_stamp_dbgc(rx_entry->cq_data, zctx->rx_outstanding,
+			      0, 0, 0, 0);
 
 	if (OFI_LIKELY(err >= 0)) {
 		if (OFI_LIKELY(len <= rx_entry->total_user)) {
@@ -1185,6 +1192,8 @@ static void rx_handle_msg_send(struct zhpe_conn *conn, struct zhpe_msg *msg)
 	struct zhpe_rx_entry	*rx_wire;
 	size_t			i;
 
+	zctx->rx_outstanding++;
+
 	i = 0;
 	if (msg->hdr.op & ZHPE_OP_SEND_TX) {
 		wire_info.tag = be64toh(pay->data[i++]);
@@ -1330,11 +1339,16 @@ static void rx_oos_msg_handler(void *handler_data, struct zhpe_rdm_entry *rqe)
 	rx_handle_msg(conn, msg);
 }
 
-static void rx_oos_msg_handler_connected(struct zhpe_conn *conn,
-					 struct zhpe_rdm_entry *rqe)
+struct zhpe_rdm_entry *
+rx_oos_msg_handler_connected(struct zhpe_conn *conn,
+			     struct zhpe_rdm_entry *rqe)
 {
+	struct zhpe_ctx		*zctx = conn->zctx;
 	struct zhpe_msg		*msg = (void *)&rqe->payload;
 	uint32_t		rx_seq = ntohl(msg->hdr.seqn);
+
+	if (OFI_UNLIKELY(zctx->rx_outstanding >= zctx->rx_limit))
+		return NULL;
 
 	if (rx_seq == conn->rx_zseq.seq) {
 		zhpe_stats_stamp_dbg(__func__, __LINE__,
@@ -1346,17 +1360,27 @@ static void rx_oos_msg_handler_connected(struct zhpe_conn *conn,
 		conn->rx_zseq.seq++;
 		zhpeq_rx_oos_spill(&conn->rx_zseq, UINT32_MAX,
 				   rx_oos_msg_handler, conn);
-		if (unlikely(!conn->rx_zseq.rx_oos_list))
+		if (OFI_UNLIKELY(!conn->rx_zseq.rx_oos_list))
 			conn->rx_msg_handler = zhpe_rx_msg_handler_connected;
 	} else
 		zhpeq_rx_oos_insert(&conn->rx_zseq, rqe, rx_seq);
+
+	zhpeq_rq_entry_done(zctx->zrq, rqe);
+	zhpeq_rq_head_update(zctx->zrq, 0);
+
+	return zhpeq_rq_entry(zctx->zrq);
 }
 
-void zhpe_rx_msg_handler_connected(struct zhpe_conn *conn,
-				   struct zhpe_rdm_entry *rqe)
+struct zhpe_rdm_entry *
+zhpe_rx_msg_handler_connected(struct zhpe_conn *conn,
+			      struct zhpe_rdm_entry *rqe)
 {
+	struct zhpe_ctx		*zctx = conn->zctx;
 	struct zhpe_msg		*msg = (void *)&rqe->payload;
 	uint32_t		rx_seq = ntohl(msg->hdr.seqn);
+
+	if (OFI_UNLIKELY(zctx->rx_outstanding >= zctx->rx_limit))
+		return NULL;
 
 	if (OFI_LIKELY(rx_seq == conn->rx_zseq.seq)) {
 		zhpe_stats_stamp_dbg(__func__, __LINE__,
@@ -1370,10 +1394,16 @@ void zhpe_rx_msg_handler_connected(struct zhpe_conn *conn,
 		zhpeq_rx_oos_insert(&conn->rx_zseq, rqe, rx_seq);
 		conn->rx_msg_handler = rx_oos_msg_handler_connected;
 	}
+
+	zhpeq_rq_entry_done(zctx->zrq, rqe);
+	zhpeq_rq_head_update(zctx->zrq, 0);
+
+	return zhpeq_rq_entry(zctx->zrq);
 }
 
-void zhpe_rx_msg_handler_unconnected(struct zhpe_conn *conn,
-				     struct zhpe_rdm_entry *rqe)
+struct zhpe_rdm_entry *
+zhpe_rx_msg_handler_unconnected(struct zhpe_conn *conn,
+				struct zhpe_rdm_entry *rqe)
 {
 	struct zhpe_ctx		*zctx = conn->zctx;
 	struct zhpe_msg		*msg = (void *)&rqe->payload;
@@ -1397,11 +1427,22 @@ void zhpe_rx_msg_handler_unconnected(struct zhpe_conn *conn,
 		ZHPE_LOG_ERROR("Illegal opcode %u\n", msg->hdr.op);
 		abort();
 	}
+
+	zhpeq_rq_entry_done(zctx->zrq, rqe);
+	zhpeq_rq_head_update(zctx->zrq, 0);
+
+	return zhpeq_rq_entry(zctx->zrq);
 }
 
-void zhpe_rx_msg_handler_drop(struct zhpe_conn *conn,
-			      struct zhpe_rdm_entry *rqe)
+struct zhpe_rdm_entry *zhpe_rx_msg_handler_drop(struct zhpe_conn *conn,
+						struct zhpe_rdm_entry *rqe)
 {
+	struct zhpe_ctx		*zctx = conn->zctx;
+
+	zhpeq_rq_entry_done(zctx->zrq, rqe);
+	zhpeq_rq_head_update(zctx->zrq, 0);
+
+	return zhpeq_rq_entry(zctx->zrq);
 }
 
 static int ctx_progress_rx(struct zhpe_ctx *zctx)
@@ -1417,10 +1458,8 @@ static int ctx_progress_rx(struct zhpe_ctx *zctx)
 		msg = (void *)&rqe->payload;
 		conn = zhpe_ibuf_get(&zctx->conn_pool,
 				     ntohs(msg->hdr.conn_idxn));
-		conn->rx_msg_handler(conn, rqe);
-		zhpeq_rq_entry_done(zctx->zrq, rqe);
-		zhpeq_rq_head_update(zctx->zrq, 0);
-	} while (OFI_LIKELY((rqe = zhpeq_rq_entry(zctx->zrq)) != NULL));
+		rqe = conn->rx_msg_handler(conn, rqe);
+	} while (OFI_LIKELY((rqe != NULL)));
 
 	return 1;
 }
