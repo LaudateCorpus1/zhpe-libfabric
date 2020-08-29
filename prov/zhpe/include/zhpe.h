@@ -1238,7 +1238,6 @@ struct zhpe_msg_connect1_nak {
 };
 
 struct zhpe_msg_connect2 {
-	uint32_t		rx_seqn;
 	uint32_t		rspctxidn;
 	uint16_t		conn_idxn;
 	uint8_t		        rma_flags;
@@ -1246,7 +1245,8 @@ struct zhpe_msg_connect2 {
 };
 
 struct zhpe_msg_connect3 {
-	char			blob[ZHPE_MAX_MSG_PAYLOAD];
+	uint32_t		rx_seqn;
+	char			blob[ZHPEQ_MAX_KEY_BLOB];
 };
 
 struct zhpe_msg_connect_status {

@@ -507,13 +507,13 @@ static void conn_connect23_tx(struct zhpe_conn *conn)
 	uint32_t		msgs;
 
 	connect2.rspctxidn = htonl(zctx->lcl_rspctxid);
-	connect2.rx_seqn = htonl(conn->rx_zseq.seq);
 	connect2.conn_idxn = htons(zhpe_ibuf_index(&zctx->conn_pool, conn));
 	connect2.rma_flags = conn_wire_rma_flags(zctx);
 	memcpy(connect2.uuid, zctx->zep->uuid, sizeof(connect2.uuid));
 
+	connect3.rx_seqn = htonl(conn->rx_zseq.seq);
 	blob_off = offsetof(struct zhpe_msg_connect3, blob);
-	blob_len = sizeof(connect3) - blob_off;
+	blob_len = sizeof(connect3.blob);
 	rc = zhpeq_qkdata_export(zctx2zdom(zctx)->reg_zmr->qkdata,
 				 zctx2zdom(zctx)->reg_zmr->qkdata->z.access,
 				 connect3.blob, &blob_len);
@@ -635,7 +635,6 @@ void zhpe_conn_connect2_rx(struct zhpe_conn *conn, struct zhpe_msg *msg)
 	assert_always(!conn->eflags);
 	assert_always(conn->flags & ZHPE_CONN_FLAG_CONNECT_MASK);
 	if (!conn->rem_rspctxid) {
-		conn->tx_seq = ntohl(connect2->rx_seqn);
 		conn->rem_rspctxid = ntohl(sz.sz_queue);
 		conn->rem_conn_idxn = connect2->conn_idxn;
 		conn->rem_rma_flags = conn_rem_rma_flags(connect2->rma_flags);
@@ -674,6 +673,8 @@ void zhpe_conn_connect3_rx(struct zhpe_conn *conn, struct zhpe_msg *msg)
 	assert_always(conn->flags & ZHPE_CONN_FLAG_CONNECT_MASK);
 	assert_always(conn->rem_rspctxid);
 
+	if (!(conn->flags & ZHPE_CONN_FLAG_CONNECT1))
+		conn->tx_seq = ntohl(connect3->rx_seqn);
 	blob_len = msg->hdr.len - offsetof(struct zhpe_msg_connect3, blob);
 	rc = zhpeq_qkdata_import(zctx2zdom(zctx)->zqdom, conn->addr_cookie,
 				 connect3->blob, blob_len, &conn->qkdata);
