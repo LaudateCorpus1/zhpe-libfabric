@@ -1351,11 +1351,6 @@ rx_oos_msg_handler_connected(struct zhpe_conn *conn,
 		return NULL;
 
 	if (rx_seq == conn->rx_zseq.seq) {
-		zhpe_stats_stamp_dbg(__func__, __LINE__,
-				     (uintptr_t)conn, (uintptr_t)msg,
-				     msg->hdr.op, rx_seq);
-		zhpe_stats_stamp_dbgc(rqe->hdr.sgcid, rqe->hdr.reqctxid,
-				      0, 0, 0, 0);
 		rx_handle_msg(conn, msg);
 		conn->rx_zseq.seq++;
 		zhpeq_rx_oos_spill(&conn->rx_zseq, UINT32_MAX,
@@ -1383,11 +1378,6 @@ zhpe_rx_msg_handler_connected(struct zhpe_conn *conn,
 		return NULL;
 
 	if (OFI_LIKELY(rx_seq == conn->rx_zseq.seq)) {
-		zhpe_stats_stamp_dbg(__func__, __LINE__,
-				     (uintptr_t)conn, (uintptr_t)msg,
-				     msg->hdr.op, rx_seq);
-		zhpe_stats_stamp_dbgc(rqe->hdr.sgcid, rqe->hdr.reqctxid,
-				      0, 0, 0, 0);
 		rx_handle_msg(conn, msg);
 		conn->rx_zseq.seq++;
 	} else {
@@ -1407,10 +1397,6 @@ zhpe_rx_msg_handler_unconnected(struct zhpe_conn *conn,
 {
 	struct zhpe_ctx		*zctx = conn->zctx;
 	struct zhpe_msg		*msg = (void *)&rqe->payload;
-
-	zhpe_stats_stamp_dbg(__func__, __LINE__,
-			     (uintptr_t)conn, (uintptr_t)msg, msg->hdr.op,
-			     ntohl(msg->hdr.seqn));
 
 	/* ZZZ: Add version checking. */
 	switch (msg->hdr.op) {
@@ -1458,6 +1444,11 @@ static int ctx_progress_rx(struct zhpe_ctx *zctx)
 		msg = (void *)&rqe->payload;
 		conn = zhpe_ibuf_get(&zctx->conn_pool,
 				     ntohs(msg->hdr.conn_idxn));
+		zhpe_stats_stamp_dbg(__func__, __LINE__,
+				     (uintptr_t)conn, (uintptr_t)msg,
+				     msg->hdr.op, zctx->zrq->head);
+		zhpe_stats_stamp_dbgc(conn->rx_zseq.seq, ntohl(msg->hdr.seqn),
+				      rqe->hdr.sgcid, rqe->hdr.reqctxid, 0, 0);
 		rqe = conn->rx_msg_handler(conn, rqe);
 	} while (OFI_LIKELY((rqe != NULL)));
 
@@ -1472,7 +1463,8 @@ static void ctx_progress_ztq(struct zhpe_ctx *zctx, struct zhpeq_tq *ztq)
 	while (OFI_LIKELY((cqe = zhpeq_tq_cq_entry(ztq)) != NULL)) {
 		tx_entry = zhpeq_tq_cq_context(ztq, cqe);
 		zhpe_stats_stamp_dbg(__func__, __LINE__,
-				     (uintptr_t)tx_entry, 0, 0, 0);
+				     (uintptr_t)ztq, (uintptr_t)tx_entry,
+				     cqe->hdr.index, cqe->hdr.status);
 		tx_entry->conn->tx_queued--;
 		zctx->tx_queued--;
 		assert(zctx->tx_queued >= 0);

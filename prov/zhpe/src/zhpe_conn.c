@@ -164,6 +164,9 @@ static int conn_dequeue_wqe(struct zhpe_conn *conn,
 		zhpe_stats_stamp_dbg(__func__, __LINE__,
 				     (uintptr_t)tx_entry, tx_entry->cmp_idx,
 				     reservation, ntohl(msg->hdr.seqn));
+		zhpe_stats_stamp_dbgc((uintptr_t)conn,
+				      wqe->enqa.dgcid, wqe->enqa.rspctxid,
+				      msg->hdr.op, 0, 0);
 	} else
 		zhpe_stats_stamp_dbg(__func__, __LINE__,
 				     (uintptr_t)tx_entry, tx_entry->cmp_idx,
@@ -217,6 +220,8 @@ static int conn_dequeue(struct zhpe_conn *conn)
 	struct zhpe_tx_queue_entry *txqe;
 
 	if (dlist_empty(&conn->tx_queue)) {
+		zhpe_stats_stamp_dbg(__func__, __LINE__,
+				     (uintptr_t)conn, conn->flags, 0, 0);
 		if (OFI_LIKELY(conn->flags != ZHPE_CONN_FLAG_CLEANUP))
 			return 0;
 		conn->flags = 0;
@@ -257,6 +262,8 @@ static int conn_dequeue_connect(struct zhpe_conn *conn)
 	struct zhpe_msg		*msg;
 
 	if (!(conn->flags & ZHPE_CONN_FLAG_CONNECT_MASK)) {
+		zhpe_stats_stamp_dbg(__func__, __LINE__,
+				     (uintptr_t)conn, conn->flags, 0, 0);
 		conn->tx_dequeue = conn_dequeue;
 		return conn_dequeue(conn);
 	}
@@ -582,6 +589,9 @@ void zhpe_conn_connect1_rx(struct zhpe_ctx *zctx, struct zhpe_msg *msg,
 	conn->rem_conn_idxn = rem_conn_idxn;
 	conn->rem_rspctxid = ntohl(connect1->src_rspctxidn);
 	conn->rem_rma_flags = conn_rem_rma_flags(connect1->src_rma_flags);
+	zhpe_stats_stamp_dbg(__func__, __LINE__,
+			     (uintptr_t)conn, conn->tkey.rem_gcid,
+			     conn->rem_rspctxid, ntohs(conn->rem_conn_idxn));
 	conn_connect23_tx(conn);
 	if (cctx != zctx)
 		zctx_unlock(cctx);
@@ -629,6 +639,10 @@ void zhpe_conn_connect2_rx(struct zhpe_conn *conn, struct zhpe_msg *msg)
 		conn->rem_rspctxid = ntohl(sz.sz_queue);
 		conn->rem_conn_idxn = connect2->conn_idxn;
 		conn->rem_rma_flags = conn_rem_rma_flags(connect2->rma_flags);
+		zhpe_stats_stamp_dbg(__func__, __LINE__,
+				     (uintptr_t)conn, conn->tkey.rem_gcid,
+				     conn->rem_rspctxid,
+				     ntohs(conn->rem_conn_idxn));
 	} else
 		assert_always(conn->flags & ZHPE_CONN_FLAG_CONNECT1);
 
@@ -641,6 +655,8 @@ void zhpe_conn_connect2_rx(struct zhpe_conn *conn, struct zhpe_msg *msg)
 	assert_always(rc >= 0);
 	if (rc < 0)
 		conn_connect_error(conn, rc, true);
+	zhpe_stats_stamp_dbg(__func__, __LINE__,
+			     (uintptr_t)conn, rc, 0, 0);
 }
 
 void zhpe_conn_connect3_rx(struct zhpe_conn *conn, struct zhpe_msg *msg)
@@ -673,6 +689,8 @@ void zhpe_conn_connect3_rx(struct zhpe_conn *conn, struct zhpe_msg *msg)
 		return;
 	}
 	conn->rx_reqzmmu = conn->qkdata->z.zaddr - conn->qkdata->z.vaddr;
+	zhpe_stats_stamp_dbg(__func__, __LINE__,
+			     (uintptr_t)conn, conn->flags, 0, 0);
 	if (conn->flags & ZHPE_CONN_FLAG_CONNECT1)
 		conn->flags &= ~ZHPE_CONN_FLAG_CONNECT_MASK;
 	else
@@ -688,6 +706,8 @@ void zhpe_conn_connect_status_rx(struct zhpe_conn *conn, struct zhpe_msg *msg)
 
 	assert_always(!conn->eflags);
 
+	zhpe_stats_stamp_dbg(__func__, __LINE__,
+			     (uintptr_t)conn, conn->flags, status, 0);
 	if (status >= 0) {
 		assert_always(conn->flags & ZHPE_CONN_FLAG_CONNECT_MASK);
 		conn->flags &= ~ZHPE_CONN_FLAG_CONNECT_MASK;
@@ -812,6 +832,10 @@ struct zhpe_conn *zhpe_conn_av_lookup(struct zhpe_ctx *zctx, fi_addr_t fiaddr)
 		conn->rem_rspctxid = zctx->lcl_rspctxid;
 		conn->rem_rma_flags =
 			conn_rem_rma_flags(conn_wire_rma_flags(zctx));
+		zhpe_stats_stamp_dbg(__func__, __LINE__,
+				     (uintptr_t)conn, conn->tkey.rem_gcid,
+				     conn->rem_rspctxid,
+				     ntohs(conn->rem_conn_idxn));
 		zdom = zctx2zdom(zctx);
 		rc = zhpeq_domain_insert_addr(zdom->zqdom, &sz_copy,
 					      &conn->addr_cookie);
@@ -829,6 +853,8 @@ struct zhpe_conn *zhpe_conn_av_lookup(struct zhpe_ctx *zctx, fi_addr_t fiaddr)
 		conn->rx_reqzmmu =
 			conn->qkdata->z.zaddr - conn->qkdata->z.vaddr;
 	} else {
+		zhpe_stats_stamp_dbg(__func__, __LINE__, (uintptr_t)conn,
+				     tkey.rem_gcid, tkey.rem_rspctxid0, 0);
 		zhpe_conn_flags_set(conn, ZHPE_CONN_FLAG_CONNECT);
 		conn_connect1_tx(conn, sz_copy.sz_uuid);
 	}

@@ -360,8 +360,6 @@ static int rma_iov_op(struct zhpe_ctx *zctx, void *op_context, uint64_t cq_data,
 	if (OFI_UNLIKELY(!(zctx->enabled & ZHPE_CTX_ENABLED_TX)))
 		return -FI_EOPBADSTATE;
 
-	zhpe_stats_stamp_dbg(__func__, __LINE__, 0, 0, 0, 0);
-
 	zctx_lock(zctx);
 	zhpe_stats_start(zhpe_stats_subid(RMA, 10));
 	conn = zhpe_conn_av_lookup(zctx, rem_addr);
@@ -373,6 +371,9 @@ static int rma_iov_op(struct zhpe_ctx *zctx, void *op_context, uint64_t cq_data,
 	rma_entry->tx_entry.rma_get = get;
 	rma_entry->op_flags = op_flags;
 	rma_entry->op_context = op_context;
+
+	zhpe_stats_stamp_dbg(__func__, __LINE__, (uintptr_t)conn,
+			     (uintptr_t)rma_entry, 0, 0);
 
 	zhpe_stats_start(zhpe_stats_subid(RMA, 20));
 	zhpe_get_uiov_lstate(uiov, udesc, uiov_cnt, &rma_entry->lstate);
