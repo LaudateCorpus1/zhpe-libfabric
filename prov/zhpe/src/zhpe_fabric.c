@@ -65,53 +65,63 @@ static int zhpe_fabric_close(fid_t fid)
 static int zhpe_ext_lookup(const char *url, void **sa, size_t *sa_len)
 {
 	int			ret = -FI_EINVAL;
-	const char		fam_pfx[] = "zhpe:///fam";
-	const size_t		fam_pfx_len = strlen(fam_pfx);
-	const char		ion_pfx[] = "zhpe:///ion";
+	struct sockaddr_zhpe	*sz = NULL;
+	const char		url_pfx[] = "zhpe:///";
+	const size_t		url_pfx_len = strlen(url_pfx);
+	const char		ion_pfx[] = "ion";
 	const size_t		ion_pfx_len = strlen(ion_pfx);
 	const char		*p = url;
-	uint			gcid;
-	struct sockaddr_zhpe	*sz;
+	ulong			gcid;
 	char			*e;
-	ulong			v;
 
 	if (!sa)
 		goto done;
 	*sa = NULL;
 	if (!url || !sa_len)
 		goto done;
-	if (!strncmp(url, fam_pfx, fam_pfx_len)) {
-		gcid = 40;
-		p += fam_pfx_len;
-	} else if (!strncmp(url, ion_pfx, ion_pfx_len)) {
-		gcid = 0;
-		p += ion_pfx_len;
-	} else
-		goto done;
-	if (!*p)
-		goto done;
-	errno = 0;
-	v = strtoul(p, &e, 0);
-	if (errno) {
-		ret = -errno;
-		goto done;
-	}
-	if (*e)
-		goto done;
+
 	*sa_len = 2 * sizeof(*sz);
 	sz = calloc(1, *sa_len);
 	if (!sz) {
 		ret = -errno;
 		goto done;
 	}
-	*sa = sz;
-	sz->sz_family = AF_ZHPE;
-	gcid += v;
+
+	/* Strip off prefix for compatibility. */
+	if (!strncmp(url, url_pfx, url_pfx_len))
+		p += url_pfx_len;
+
+	/* Try a name lookup. */
+	ret = zhpeq_get_zaddr(p, NULL, false, sz);
+	if (ret >= 0 || strncmp(p, ion_pfx, ion_pfx_len))
+		goto done;
+
+	/* If it is an "ion", get gcid from name for compatibilty. */
+	p += ion_pfx_len;
+	errno = 0;
+	gcid = strtoul(p, &e, 0);
+	if (errno) {
+		ret = -errno;
+		goto done;
+	}
+	if (*e || (gcid & ~ZHPE_GCID_MASK)) {
+		ret = -FI_EINVAL;
+		goto done;
+	}
+	/* Validate GCID against hosts.zhpeq. */
+	ret = zhpeq_validate_gcid("Ion", gcid);
+	if (ret < 0)
+		goto done;
 	zhpeu_install_gcid_in_uuid(sz->sz_uuid, gcid);
-	sz->sz_queue = htonl(ZHPE_SZQ_FLAGS_FAM);
-	*sa  = sz;
 	ret = 0;
  done:
+	if (likely(ret >= 0)) {
+		sz->sz_family = AF_ZHPE;
+		sz->sz_queue = htonl(ZHPE_SZQ_FLAGS_FAM);
+		*sa  = sz;
+	} else
+		free(sz);
+
 	return ret;
 }
 
