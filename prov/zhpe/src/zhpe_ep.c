@@ -60,8 +60,6 @@ static size_t shutdown_check(struct zhpe_ctx *zctx, size_t idx)
 	/* zhpe_ctx() must be locked. */
 	for (; idx < zctx->conn_pool.max_index; idx++) {
 		conn = zhpe_ibuf_get(&zctx->conn_pool, idx);
-		if (!conn)
-			continue;
 		if (OFI_UNLIKELY((conn->eflags & ZHPE_CONN_EFLAG_SHUTDOWN3) !=
 				 ZHPE_CONN_EFLAG_SHUTDOWN3))
 			break;
@@ -113,8 +111,20 @@ static int do_shutdown(struct zhpe_ctx *zctx)
 			ret = 0;
 			break;
 		}
-		if (time(NULL) - start > 30)
+		if (time(NULL) - start > 30) {
+			zhpe_stats_stamp_dbg(__func__, __LINE__,
+					     (uintptr_t)zctx, zctx->tx_queued,
+					     dlist_empty(&zctx->rx_work_list),
+					     i);
+			conn = zhpe_ibuf_get(&zctx->conn_pool, i);
+			if (!conn)
+				break;
+			zhpe_stats_stamp_dbg(__func__, __LINE__,
+					     (uintptr_t)conn, conn->eflags,
+					     conn->tx_queued,
+					     !conn->rx_zseq.rx_oos_list);
 			break;
+		}
 		/* May drop and reacquire zctx_lock() or yield the core. */
 		zhpe_ctx_cleanup_progress(zctx, true);
 	}
@@ -274,7 +284,9 @@ static int zhpe_ctx_qalloc(struct zhpe_ctx *zctx)
 	zctx->lcl_gcid = zhpeu_uuid_to_gcid(sz.sz_uuid);
 	zctx->lcl_rspctxid = ntohl(sz.sz_queue);
 	zhpe_stats_stamp_dbg(__func__, __LINE__,
-			     zctx->lcl_gcid, zctx->lcl_rspctxid, 0, 0);
+			     zctx->lcl_gcid, zctx->lcl_rspctxid, 0,
+			     (zctx->ztq_hi->tqinfo.queue * ZHPE_MAX_SLICES +
+			      slice));
 	/* Low priority for RMA. */
 	for (i = 0; i < ZHPE_MAX_SLICES; i++) {
 		/*
