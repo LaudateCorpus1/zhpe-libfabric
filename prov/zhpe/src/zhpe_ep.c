@@ -105,7 +105,7 @@ static int do_shutdown(struct zhpe_ctx *zctx)
 	}
 	/* Poll for shutdown completion. */
 	start = time(NULL);
-	for (;;) {
+	for (i = 1;;) {
 		i = shutdown_check(zctx, i);
 		if (i >= zctx->conn_pool.max_index && !zctx->tx_queued) {
 			ret = 0;

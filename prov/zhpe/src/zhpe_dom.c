@@ -231,7 +231,7 @@ void zhpe_dom_mr_free(struct zhpe_mr *zmr)
 
 struct dom_cleanup_data {
 	void			*filter_data;
-	bool			(*filter)(struct dom_cleanup_data *clean,
+	bool			(*filter)(struct dom_cleanup_data *cleanup,
 					  struct ofi_rbnode *rbnode);
 };
 
@@ -302,7 +302,10 @@ void zhpe_dom_cleanup_ctx(struct zhpe_ctx *zctx)
 	/* Block races with zhpe_mr_close. */
 	mutex_lock(&zdom->kexp_teardown_mutex);
 
+	/* If do_shutdown() fails, lock needed. */
+	zctx_lock(zctx);
 	dom_cleanup(zdom, zctx, dom_cleanup_filter_ctx);
+	zctx_unlock(zctx);
 
 	mutex_unlock(&zdom->kexp_teardown_mutex);
 }
