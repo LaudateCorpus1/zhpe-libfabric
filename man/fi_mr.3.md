@@ -32,7 +32,7 @@ fi_mr_unmap_key
 : Releases a previously mapped raw memory region key.
 
 fi_mr_bind
-: Associate a registered memory region with a completion counter.
+: Associate a registered memory region with a completion counter or an endpoint.
 
 fi_mr_refresh
 : Updates the memory pages associated with a memory region.
@@ -164,11 +164,13 @@ The following apply to memory registration.
 *FI_MR_LOCAL*
 : When the FI_MR_LOCAL mode bit is set, applications must register all
   data buffers that will be accessed by the local hardware and provide
-  a valid mem_desc parameter into applicable data transfer operations.
+  a valid desc parameter into applicable data transfer operations.
   When FI_MR_LOCAL is zero, applications are not required to register
   data buffers before using them for local operations (e.g. send and
-  receive data buffers), and the mem_desc parameter into data transfer
-  operations is ignored.
+  receive data buffers).  The desc parameter into data transfer
+  operations will be ignored in this case, unless otherwise required
+  (e.g. se  FI_MR_HMEM).  It is recommended that applications pass in
+  NULL for desc when not required.
 
   A provider may hide local registration requirements from applications
   by making use of an internal registration cache or similar mechanisms.
@@ -245,17 +247,34 @@ The following apply to memory registration.
   MR with an endpoint, the application must use fi_mr_bind().  To
   enable the memory region, the application must call fi_mr_enable().
 
+*FI_MR_HMEM*
+: This mode bit is associated with the FI_HMEM capability.
+  If FI_MR_HMEM is set, the application must register buffers that
+  were allocated using a device call and provide a valid desc
+  parameter into applicable data transfer operations even if they are
+  only used for local operations (e.g. send and receive data buffers).
+  Device memory must be registered using the fi_mr_regattr call, with
+  the iface and device fields filled out.
+
+  If FI_MR_HMEM is set, but FI_MR_LOCAL is unset, only device buffers
+  must be registered when used locally.  In this case, the desc parameter
+  passed into data transfer operations must either be valid or NULL.
+  Similarly, if FI_MR_LOCAL is set, but FI_MR_HMEM is not, the desc
+  parameter must either be valid or NULL.
+
 *Basic Memory Registration*
 : Basic memory registration is indicated by the FI_MR_BASIC mr_mode bit.
   FI_MR_BASIC is maintained for backwards compatibility (libfabric version
   1.4 or earlier).  The behavior of basic registration is equivalent
   to setting the following mr_mode bits to one: FI_MR_VIRT_ADDR,
   FI_MR_ALLOCATED, and FI_MR_PROV_KEY.  Additionally, providers that
-  support basic registration usually required FI_MR_LOCAL.  FI_MR_BASIC 
-  must either be set alone, or in conjunction with FI_MR_LOCAL.  Other
-  mr_mode bit pairings are invalid.  Unlike other mr_mode bits, if
-  FI_MR_BASIC is set on input to fi_getinfo(),  it will not be cleared
-  by the provider.  That is, setting FI_MR_BASIC
+  support basic registration usually required the fi_info mode bit FI_LOCAL_MR.
+  As a result, it is recommended that applications migrating from libfabric 1.4
+  or earlier or wanting to support basic memory registration set the mr_mode
+  to FI_MR_VIRT_ADDR | FI_MR_ALLOCATED | FI_MR_PROV_KEY | FI_MR_LOCAL.
+  FI_MR_BASIC must be set alone.  Other mr_mode bit pairings are invalid.
+  Unlike other mr_mode bits, if FI_MR_BASIC is set on input to fi_getinfo(),
+  it will not be cleared by the provider.  That is, setting FI_MR_BASIC
   to one requests basic registration.
 
 The registrations functions -- fi_mr_reg, fi_mr_regv, and
@@ -361,6 +380,13 @@ this routine.  Use of this call is required if the FI_RAW_MR mode bit has
 been set by the provider; however, it is safe to use this call with any
 memory region.
 
+On input, the key_size parameter should indicate the size of the raw_key
+buffer.  If the actual key is larger than what can fit into the buffer, it
+will return -FI_ETOOSMALL.  On output, key_size is set to the size of the
+buffer needed to store the key, which may be larger than the input value.
+The needed key_size can also be obtained through the mr_key_size domain
+attribute (fi_domain_attr) field.
+
 A raw key must be mapped by a peer before it can be used in data transfer
 operations.  See fi_mr_map_raw below.
 
@@ -440,10 +466,16 @@ struct fi_mr_attr {
 	const struct iovec *mr_iov;
 	size_t             iov_count;
 	uint64_t           access;
+	uint64_t           offset;
 	uint64_t           requested_key;
 	void               *context;
 	size_t             auth_key_size;
 	uint8_t            *auth_key;
+	enum fi_hmem_iface iface;
+	union {
+		uint64_t         reserved;
+		int              cuda;
+	} device;
 };
 ```
 ## mr_iov
@@ -459,33 +491,49 @@ as the mr_iov_limit domain attribute.  See `fi_domain(3)`.
 
 ## access
 
-Indicates the type of access that the local or a peer endpoint has to
-the registered memory region.  Supported access permissions are the
+Indicates the type of _operations_ that the local or a peer endpoint may
+perform on registered memory region.  Supported access permissions are the
 bitwise OR of the following flags:
 
 *FI_SEND*
 : The memory buffer may be used in outgoing message data transfers.  This
-  includes fi_msg and fi_tagged operations.
+  includes fi_msg and fi_tagged send operations.
 
 *FI_RECV*
 : The memory buffer may be used to receive inbound message transfers.
-  This includes fi_msg and fi_tagged operations.
+  This includes fi_msg and fi_tagged receive operations.
 
 *FI_READ*
 : The memory buffer may be used as the result buffer for RMA read
-  and atomic operations on the initiator side.
+  and atomic operations on the initiator side.  Note that from the
+  viewpoint of the application, the memory buffer is being written
+  into by the network.
 
 *FI_WRITE*
 : The memory buffer may be used as the source buffer for RMA write
-  and atomic operations on the initiator side.
+  and atomic operations on the initiator side.  Note that from the
+  viewpoint of the application, the endpoint is reading from the memory
+  buffer and copying the data onto the network.
 
 *FI_REMOTE_READ*
 : The memory buffer may be used as the source buffer of an RMA read
-  operation on the target side.
+  operation on the target side.  The contents of the memory buffer
+  are not modified by such operations.
 
 *FI_REMOTE_WRITE*
 : The memory buffer may be used as the target buffer of an RMA write
-  or atomic operation.
+  or atomic operation.  The contents of the memory buffer may be
+  modified as a result of such operations.
+
+Note that some providers may not enforce fine grained access permissions.
+For example, a memory region registered for FI_WRITE access may also
+behave as if FI_SEND were specified as well.  Relaxed enforcement of
+such access is permitted, though not guaranteed, provided security is
+maintained.
+
+## offset
+
+The offset field is reserved for future use and must be 0.
 
 ## requested_key
 
@@ -519,6 +567,26 @@ that are programmed to use the same authorization key may access the memory
 region.  The domain authorization key will be used if the auth_key_size 
 provided is 0.  This field is ignored unless the fabric is opened with API 
 version 1.5 or greater.
+
+## iface
+Indicates the software interfaces used by the application to allocate and
+manage the memory region. This field is ignored unless the application has
+requested the FI_HMEM capability.
+
+*FI_HMEM_SYSTEM*
+: Uses standard operating system calls and libraries, such as malloc,
+  calloc, realloc, mmap, and free.
+
+*FI_HMEM_CUDA*
+: Uses Nvidia CUDA interfaces such as cuMemAlloc, cuMemAllocHost,
+  cuMemAllocManaged, cuMemFree, cudaMalloc, cudaFree.
+
+## device
+Reserved 64 bits for device identifier if using non-standard HMEM interface.
+This field is ignore unless the iface field is valid.
+
+*cuda*
+: For FI_HMEM_CUDA, this is equivalent to CUdevice (int).
 
 # NOTES
 
@@ -582,6 +650,49 @@ Fabric errno values are defined in
 
 *-FI_EBADFLAGS*
 : Returned if the specified flags are not supported by the provider.
+
+# MEMORY REGISTRATION CACHE
+
+Many hardware NICs accessed by libfabric require that data buffers be
+registered with the hardware while the hardware accesses it.  This ensures
+that the virtual to physical address mappings for those buffers do not change
+while the transfer is occurring.  The performance impact of registering
+memory regions can be significant.  As a result, some providers make use
+of a registration cache, particularly when working with applications that
+are unable to manage their own network buffers.  A registration cache avoids
+the overhead of registering and unregistering a data buffer with each
+transfer.
+
+As a general rule, if hardware requires the FI_MR_LOCAL mode bit described
+above, but this is not supported by the application, a memory registration
+cache _may_ be in use.  The following environment variables may be used to
+configure registration caches.
+
+*FI_MR_CACHE_MAX_SIZE*
+: This defines the total number of bytes for all memory regions that may
+  be tracked by the cache.  If not set, the cache has no limit on how many
+  bytes may be registered and cached.  Setting this will reduce the
+  amount of memory that is not actively being used as part of a data transfer
+  that is registered with a provider.  By default, the cache size is
+  unlimited.
+
+*FI_MR_CACHE_MAX_COUNT*
+: This defines the total number of memory regions that may be registered with
+  the cache.  If not set, a default limit is chosen.  Setting this will reduce
+  the number of regions that are registered, regardless of their size, which
+  are not actively being used as part of a data transfer.  Setting this to
+  zero will disable registration caching.
+
+*FI_MR_CACHE_MONITOR*
+: The cache monitor is responsible for detecting changes made between the
+  virtual addresses used by an application and the underlying physical pages.
+  Valid monitor options are: userfaultfd, memhooks, and disabled.  Selecting
+  disabled will turn off the registration cache.  Userfaultfd is a Linux
+  kernel feature used to report virtual to physical address mapping changes
+  to user space.  Memhooks operates by intercepting relevant memory
+  allocation and deallocation calls which may result in the mappings changing,
+  such as malloc, mmap, free, etc.  Note that memhooks operates at the elf
+  linker layer, and does not use glibc memory hooks.
 
 # SEE ALSO
 

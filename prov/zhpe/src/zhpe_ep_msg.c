@@ -33,221 +33,57 @@
 
 #include <zhpe.h>
 
-#define ZHPE_LOG_DBG(...) _ZHPE_LOG_DBG(FI_LOG_EP_CTRL, __VA_ARGS__)
-#define ZHPE_LOG_ERROR(...) _ZHPE_LOG_ERROR(FI_LOG_EP_CTRL, __VA_ARGS__)
-
-static const struct fi_ep_attr zhpe_msg_ep_attr = {
-	.type = FI_EP_MSG,
-	.protocol = FI_PROTO_UNSPEC,
-	.protocol_version = ZHPE_WIRE_PROTO_VERSION,
-	.max_msg_size = ZHPE_EP_MAX_MSG_SZ,
-	.msg_prefix_size = ZHPE_EP_MSG_PREFIX_SZ,
-	.max_order_raw_size = ZHPE_EP_MAX_ORDER_RAW_SZ,
-	.max_order_war_size = ZHPE_EP_MAX_ORDER_WAR_SZ,
-	.max_order_waw_size = ZHPE_EP_MAX_ORDER_WAW_SZ,
-	.mem_tag_format = ZHPE_EP_MEM_TAG_FMT,
-	.tx_ctx_cnt = ZHPE_EP_MAX_TX_CNT,
-	.rx_ctx_cnt = ZHPE_EP_MAX_RX_CNT,
-};
-
-static const struct fi_tx_attr zhpe_msg_tx_attr = {
-	.caps = ZHPE_EP_MSG_CAP,
-	.mode = ZHPE_MODE,
-	.msg_order = ZHPE_EP_MSG_ORDER,
-	.inject_size = ZHPE_EP_MAX_INJECT_SZ,
-	.size = ZHPE_EP_TX_SZ,
-	.iov_limit = ZHPE_EP_MAX_IOV_LIMIT,
-	.rma_iov_limit = ZHPE_EP_MAX_IOV_LIMIT,
-};
-
-static const struct fi_rx_attr zhpe_msg_rx_attr = {
-	.caps = ZHPE_EP_MSG_CAP,
-	.mode = ZHPE_MODE,
-	.op_flags = 0,
-	.msg_order = ZHPE_EP_MSG_ORDER,
-	.comp_order = ZHPE_EP_COMP_ORDER,
-	.total_buffered_recv = ZHPE_EP_DEF_BUFF_RECV,
-	/* Same as TX_SZ for EP_MSG */
-	.size = ZHPE_EP_TX_SZ,
-	.iov_limit = ZHPE_EP_MAX_IOV_LIMIT,
-};
-
-static int zhpe_msg_verify_rx_attr(const struct fi_rx_attr *attr)
-{
-	int			ret;
-	struct zhpeq_attr	zattr;
-
-	if (!attr)
-		return 0;
-
-	if ((attr->caps | ZHPE_EP_MSG_CAP) != ZHPE_EP_MSG_CAP)
-		return -FI_ENODATA;
-
-	if ((attr->msg_order | ZHPE_EP_MSG_ORDER) != ZHPE_EP_MSG_ORDER)
-		return -FI_ENODATA;
-
-	if ((attr->comp_order | ZHPE_EP_COMP_ORDER) != ZHPE_EP_COMP_ORDER)
-		return -FI_ENODATA;
-
-	ret = zhpeq_query_attr(&zattr);
-	if (ret < 0)
-		return ret;
-
-	if (attr->size > zattr.z.max_rx_qlen)
-		return -FI_ENODATA;
-
-	if (attr->iov_limit > zhpe_msg_rx_attr.iov_limit)
-		return -FI_ENODATA;
-
-	return 0;
-}
-
-static int zhpe_msg_verify_tx_attr(const struct fi_tx_attr *attr)
-{
-	int			ret;
-	struct zhpeq_attr	zattr;
-
-	if (!attr)
-		return 0;
-
-	if ((attr->caps | ZHPE_EP_MSG_CAP) != ZHPE_EP_MSG_CAP)
-		return -FI_ENODATA;
-
-	if ((attr->msg_order | ZHPE_EP_MSG_ORDER) != ZHPE_EP_MSG_ORDER)
-		return -FI_ENODATA;
-
-	if (attr->inject_size > zhpe_msg_tx_attr.inject_size)
-		return -FI_ENODATA;
-
-	ret = zhpeq_query_attr(&zattr);
-	if (ret < 0)
-		return ret;
-
-	if (attr->size > zattr.z.max_tx_qlen)
-		return -FI_ENODATA;
-
-	if (attr->iov_limit > zhpe_msg_tx_attr.iov_limit)
-		return -FI_ENODATA;
-
-	if (attr->rma_iov_limit > zhpe_msg_tx_attr.rma_iov_limit)
-		return -FI_ENODATA;
-
-	return 0;
-}
-
-int zhpe_msg_verify_ep_attr(struct fi_ep_attr *ep_attr,
-			    struct fi_tx_attr *tx_attr,
-			    struct fi_rx_attr *rx_attr)
-{
-	if (ep_attr) {
-
-		switch (ep_attr->protocol) {
-
-		case FI_PROTO_UNSPEC:
-			break;
-		default:
-			return -FI_ENODATA;
-		}
-
-		if (ep_attr->protocol_version &&
-		    (ep_attr->protocol_version !=
-		     zhpe_msg_ep_attr.protocol_version))
-			return -FI_ENODATA;
-
-		if (ep_attr->max_msg_size > zhpe_msg_ep_attr.max_msg_size)
-			return -FI_ENODATA;
-
-		if (ep_attr->msg_prefix_size > zhpe_msg_ep_attr.msg_prefix_size)
-			return -FI_ENODATA;
-
-		if (ep_attr->max_order_raw_size >
-		   zhpe_msg_ep_attr.max_order_raw_size)
-			return -FI_ENODATA;
-
-		if (ep_attr->max_order_war_size >
-		   zhpe_msg_ep_attr.max_order_war_size)
-			return -FI_ENODATA;
-
-		if (ep_attr->max_order_waw_size >
-		   zhpe_msg_ep_attr.max_order_waw_size)
-			return -FI_ENODATA;
-
-		if (ep_attr->tx_ctx_cnt > ZHPE_EP_MAX_TX_CNT)
-			return -FI_ENODATA;
-
-		if (ep_attr->rx_ctx_cnt > ZHPE_EP_MAX_RX_CNT)
-			return -FI_ENODATA;
-
-		if (ep_attr->auth_key_size &&
-		    (ep_attr->auth_key_size != zhpe_msg_ep_attr.auth_key_size))
-			return -FI_ENODATA;
-	}
-
-	if (zhpe_msg_verify_tx_attr(tx_attr) ||
-	    zhpe_msg_verify_rx_attr(rx_attr))
-		return -FI_ENODATA;
-
-	return 0;
-}
-
-int zhpe_msg_fi_info(uint32_t version,
-		     const union sockaddr_in46 *src_addr,
-		     const union sockaddr_in46 *dest_addr,
-		     const struct fi_info *hints, struct fi_info **info)
-{
-	*info = zhpe_fi_info(version, hints, src_addr, dest_addr,
-			     ZHPE_EP_MSG_CAP, ZHPE_MODE,
-			     &zhpe_msg_ep_attr, &zhpe_msg_tx_attr,
-			     &zhpe_msg_rx_attr);
-
-	return (*info ? 0 : -FI_ENOMEM);
-}
+#define ZHPE_SUBSYS	FI_LOG_EP_CTRL
 
 static int zhpe_ep_cm_getname(fid_t fid, void *addr, size_t *addrlen)
 {
-	size_t		        len = *addrlen;
-	union sockaddr_in46	*src_addr;
-	struct zhpe_ep		*zhpe_ep;
-	struct zhpe_pep		*zhpe_pep;
-	int			rc;
-	union sockaddr_in46	addr_buf;
+	int			ret = -FI_EINVAL;
+	struct zhpe_ep		*zep = fid2zep(fid);
+	struct zhpe_ctx		*zctx = zep->ep.zctx;
+	size_t			oaddrlen;
+
+	zctx_lock(zctx);
+
+	if (!addrlen)
+		goto done;
 
 	switch (fid->fclass) {
 
 	case FI_CLASS_EP:
 	case FI_CLASS_SEP:
-		zhpe_ep = container_of(fid, struct zhpe_ep, ep.fid);
-		if (zhpe_ep->attr->is_enabled == 0)
-			return -FI_EOPBADSTATE;
-		src_addr = &zhpe_ep->attr->src_addr;
+	case FI_CLASS_RX_CTX:
+	case FI_CLASS_TX_CTX:
 		break;
-	case FI_CLASS_PEP:
-		zhpe_pep = container_of(fid, struct zhpe_pep, pep.fid);
-		if (!zhpe_pep->name_set)
-			return -FI_EOPBADSTATE;
-		src_addr = &zhpe_pep->src_addr;
-		break;
+
 	default:
-		ZHPE_LOG_ERROR("Invalid argument\n");
-		return -FI_EINVAL;
+		goto done;
 	}
 
-	*addrlen = sockaddr_len(src_addr);
-	if (!*addrlen)
-		return -FI_EOPBADSTATE;
-
-	if (sockaddr_wildcard(src_addr)) {
-		rc = zhpe_gethostaddr(src_addr->sa_family, &addr_buf);
-		if (rc < 0)
-			return rc;
-		addr_buf.sin_port = src_addr->sin_port;
-		src_addr = &addr_buf;
+	if (!(zep->enabled & ZHPE_EP_ENABLED_QALLOC)) {
+		ret = -FI_EOPBADSTATE;
+		goto done;
 	}
 
-	memcpy(addr, src_addr, MIN(len, *addrlen));
+	/*
+	 * Quirky semantics: getting the semantics right required changes
+	 * right in zhpeq_rq_get_addr() and in zhpe backend.
+	 */
+	oaddrlen = *addrlen;
+	ret = zhpeq_rq_get_addr(zctx->zrq, addr, addrlen);
+	if (ret >= 0) {
+		/* Sanitize return value. */
+		ret = 0;
+		if (*addrlen > oaddrlen)
+			ret = -FI_ETOOSMALL;
+	}
 
-	return (*addrlen <= len) ? 0 : -FI_ETOOSMALL;
+ done:
+	zctx_unlock(zctx);
+
+	return ret;
 }
+
+#ifdef NOTYET
 
 static int zhpe_pep_create_listener(struct zhpe_pep *pep)
 {
@@ -268,7 +104,7 @@ static int zhpe_ep_cm_setname(fid_t fid, void *addr, size_t addrlen)
 	struct zhpe_ep		*zhpe_ep;
 	struct zhpe_pep		*zhpe_pep;
 
-	if (!sockaddr_valid(addr, addrlen, true))
+	if (!zhpeu_sockaddr_valid(addr, addrlen, true))
 		return -FI_EINVAL;
 
 	switch (fid->fclass) {
@@ -278,17 +114,19 @@ static int zhpe_ep_cm_setname(fid_t fid, void *addr, size_t addrlen)
 		zhpe_ep = container_of(fid, struct zhpe_ep, ep.fid);
 		if (!zhpe_ep->attr->listener.listener_thread_valid)
 			return -FI_EINVAL;
-		if (sa->sa_family != zhpe_sa_family(&zhpe_ep->attr->info))
+		if (sa->sa_family !=
+		    zhpe_sa_family(zhpe_ep->attr->info.addr_format))
 			return -FI_EINVAL;
-		sockaddr_cpy(&zhpe_ep->attr->src_addr, sa);
+		zhpeu_sockaddr_cpy(&zhpe_ep->attr->src_addr, sa);
 		return zhpe_conn_listen(zhpe_ep->attr);
 	case FI_CLASS_PEP:
 		zhpe_pep = container_of(fid, struct zhpe_pep, pep.fid);
 		if (!zhpe_pep->cm.listener_thread_valid)
 			return -FI_EINVAL;
-		if (sa->sa_family != zhpe_sa_family(&zhpe_pep->info))
+		if (sa->sa_family !=
+		    zhpe_sa_family(zhpe_pep->info.addr_format))
 			return -FI_EINVAL;
-		sockaddr_cpy(&zhpe_pep->src_addr, sa);
+		zhpeu_sockaddr_cpy(&zhpe_pep->src_addr, sa);
 		return zhpe_pep_create_listener(zhpe_pep);
 	default:
 		ZHPE_LOG_ERROR("Invalid argument\n");
@@ -304,7 +142,7 @@ static int zhpe_ep_cm_getpeer(struct fid_ep *ep, void *addr, size_t *addrlen)
 
 	zhpe_ep = container_of(ep, struct zhpe_ep, ep);
 	dest_addr = &zhpe_ep->attr->dest_addr;
-	*addrlen = sockaddr_len(dest_addr);
+	*addrlen = zhpeu_sockaddr_len(dest_addr);
 	if (!*addrlen)
 		return -FI_EOPBADSTATE;
 
@@ -508,7 +346,7 @@ static int zhpe_ep_cm_connect(struct fid_ep *ep, const void *addr,
 	    zhpe_conn_listen(_ep->attr))
 		return -FI_EINVAL;
 
-	sockaddr_cpy(&_ep->attr->dest_addr, addr);
+	zhpeu_sockaddr_cpy(&_ep->attr->dest_addr, addr);
 
 	req = calloc(1, sizeof(*req));
 	if (!req)
@@ -522,8 +360,8 @@ static int zhpe_ep_cm_connect(struct fid_ep *ep, const void *addr,
 	req->hdr.port = htons(_ep->attr->msg_src_port);
 	req->hdr.cm_data_sz = htons(paramlen);
 	req->caps = _ep->attr->info.caps;
-	sockaddr_cpy(&req->src_addr, &_ep->attr->src_addr);
-	sockaddr_cpy(&handle->dest_addr, addr);
+	zhpeu_sockaddr_cpy(&req->src_addr, &_ep->attr->src_addr);
+	zhpeu_sockaddr_cpy(&handle->dest_addr, addr);
 
 	handle->ep = _ep;
 	handle->req = req;
@@ -664,69 +502,47 @@ static int zhpe_ep_cm_shutdown(struct fid_ep *ep, uint64_t flags)
 	return 0;
 }
 
+#endif
+
 struct fi_ops_cm zhpe_ep_cm_ops = {
 	.size = sizeof(struct fi_ops_cm),
+#ifdef NOT_YET
 	.setname = zhpe_ep_cm_setname,
+#else
+	.setname = fi_no_setname,
+#endif
 	.getname = zhpe_ep_cm_getname,
+#ifdef NOT_YET
 	.getpeer = zhpe_ep_cm_getpeer,
-	.connect = zhpe_ep_cm_connect,
+#else
+	.getpeer = fi_no_getpeer,
+#endif
+	.connect = fi_no_connect,
 	.listen = fi_no_listen,
-	.accept = zhpe_ep_cm_accept,
+	.accept = fi_no_accept,
 	.reject = fi_no_reject,
+#ifdef NOTYET
 	.shutdown = zhpe_ep_cm_shutdown,
+#else
+	.shutdown = fi_no_shutdown,
+#endif
 	.join = fi_no_join,
 };
 
-static int zhpe_msg_endpoint(struct fid_domain *domain, struct fi_info *info,
-		struct zhpe_ep **ep, void *context, size_t fclass)
-{
-	int ret;
-	struct zhpe_pep *pep;
+struct fi_ops_cm zhpe_ep_cm_bad_ops = {
+	.size			= sizeof(struct fi_ops_cm),
+	.setname		= fi_no_setname,
+	.getname		= fi_no_getname,
+	.getpeer		= fi_no_getpeer,
+	.connect		= fi_no_connect,
+	.listen			= fi_no_listen,
+	.accept			= fi_no_accept,
+	.reject			= fi_no_reject,
+	.shutdown		= fi_no_shutdown,
+	.join			= fi_no_join,
+};
 
-	if (info) {
-		if (info->ep_attr) {
-			ret = zhpe_msg_verify_ep_attr(info->ep_attr,
-						      info->tx_attr,
-						      info->rx_attr);
-			if (ret)
-				return -FI_EINVAL;
-		}
-	}
-
-	ret = zhpe_alloc_endpoint(domain, info, ep, context, fclass);
-	if (ret)
-		return ret;
-
-	if (info && info->handle && info->handle->fclass == FI_CLASS_PEP) {
-		pep = container_of(info->handle, struct zhpe_pep, pep.fid);
-		sockaddr_cpy(&(*ep)->attr->src_addr, &pep->src_addr);
-	}
-
-	if (!info || !info->ep_attr)
-		(*ep)->attr->ep_attr = zhpe_msg_ep_attr;
-
-	if (!info || !info->tx_attr)
-		(*ep)->tx_attr = zhpe_msg_tx_attr;
-
-	if (!info || !info->rx_attr)
-		(*ep)->rx_attr = zhpe_msg_rx_attr;
-
-	return 0;
-}
-
-int zhpe_msg_ep(struct fid_domain *domain, struct fi_info *info,
-		struct fid_ep **ep, void *context)
-{
-	int ret;
-	struct zhpe_ep *endpoint;
-
-	ret = zhpe_msg_endpoint(domain, info, &endpoint, context, FI_CLASS_EP);
-	if (ret)
-		return ret;
-
-	*ep = &endpoint->ep;
-	return 0;
-}
+#ifdef NOTYET
 
 static int zhpe_pep_fi_bind(fid_t fid, struct fid *bfid, uint64_t flags)
 {
@@ -1105,14 +921,14 @@ int zhpe_msg_passive_ep(struct fid_fabric *fabric, struct fi_info *info,
 
 	if (info) {
 		if (info->src_addr)
-			sockaddr_cpy(&_pep->src_addr, info->src_addr);
+			zhpeu_sockaddr_cpy(&_pep->src_addr, info->src_addr);
 		else {
 			zhpe_getaddrinfo_hints_init(&ai, zhpe_sa_family(info));
 			ai.ai_flags |= AI_PASSIVE;
 			ret = zhpe_getaddrinfo(NULL, "0", &ai, &rai);
 			if (ret < 0)
 				goto err;
-			sockaddr_cpy(&_pep->src_addr, rai->ai_addr);
+			zhpeu_sockaddr_cpy(&_pep->src_addr, rai->ai_addr);
 			freeaddrinfo(rai);
 		}
 		_pep->info = *info;
@@ -1146,3 +962,4 @@ err:
 	return ret;
 }
 
+#endif

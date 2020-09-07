@@ -31,7 +31,7 @@
  */
 
 #include <stdlib.h>
-#include "hook.h"
+#include "hook_prov.h"
 
 
 static uint64_t hook_cntr_read(struct fid_cntr *cntr)
@@ -83,7 +83,7 @@ static int hook_cntr_seterr(struct fid_cntr *cntr, uint64_t value)
 	return fi_cntr_seterr(mycntr->hcntr, value);
 }
 
-static struct fi_ops_cntr hook_cntr_ops = {
+struct fi_ops_cntr hook_cntr_ops = {
 	.size = sizeof(struct fi_ops_cntr),
 	.read = hook_cntr_read,
 	.readerr = hook_cntr_readerr,
@@ -99,23 +99,38 @@ int hook_cntr_open(struct fid_domain *domain, struct fi_cntr_attr *attr,
 {
 	struct hook_domain *dom = container_of(domain, struct hook_domain, domain);
 	struct hook_cntr *mycntr;
+	struct fi_cntr_attr hattr;
 	int ret;
 
 	mycntr = calloc(1, sizeof *mycntr);
 	if (!mycntr)
 		return -FI_ENOMEM;
 
+	mycntr->domain = dom;
 	mycntr->cntr.fid.fclass = FI_CLASS_CNTR;
 	mycntr->cntr.fid.context = context;
 	mycntr->cntr.fid.ops = &hook_fid_ops;
 	mycntr->cntr.ops = &hook_cntr_ops;
 
-	ret = fi_cntr_open(dom->hdomain, attr, &mycntr->hcntr,
+	hattr = *attr;
+	if (attr->wait_obj == FI_WAIT_SET)
+		hattr.wait_set = hook_to_hwait(attr->wait_set);
+
+	ret = fi_cntr_open(dom->hdomain, &hattr, &mycntr->hcntr,
 			   &mycntr->cntr.fid);
 	if (ret)
-		free(mycntr);
-	else
-		*cntr = &mycntr->cntr;
+		goto err1;
 
+	*cntr = &mycntr->cntr;
+
+	ret = hook_ini_fid(dom->fabric->prov_ctx, &mycntr->cntr.fid);
+	if (ret)
+		goto err2;
+
+	return ret;
+err2:
+	fi_close(&mycntr->hcntr->fid);
+err1:
+	free(mycntr);
 	return ret;
 }

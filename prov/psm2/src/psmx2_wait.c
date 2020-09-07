@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2018 Intel Corporation. All rights reserved.
+ * Copyright (c) 2013-2019 Intel Corporation. All rights reserved.
  *
- * This software is waitailable to you under a choice of one of two
+ * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
- * General Public License (GPL) Version 2, waitailable from the file
+ * General Public License (GPL) Version 2, available from the file
  * COPYING in the main directory of this source tree, or the
  * BSD license below:
  *
@@ -140,7 +140,8 @@ static void psmx2_wait_stop_progress(void)
 static struct fi_ops_wait *psmx2_wait_ops_save;
 static struct fi_ops_wait psmx2_wait_ops;
 
-static int psmx2_wait_wait(struct fid_wait *wait, int timeout)
+DIRECT_FN
+STATIC int psmx2_wait_wait(struct fid_wait *wait, int timeout)
 {
 	struct util_wait *wait_priv;
 	struct psmx2_fid_fabric *fabric;
@@ -158,6 +159,7 @@ static int psmx2_wait_wait(struct fid_wait *wait, int timeout)
 	return err;
 }
 
+DIRECT_FN
 int psmx2_wait_open(struct fid_fabric *fabric, struct fi_wait_attr *attr,
 		   struct fid_wait **waitset)
 {
@@ -177,6 +179,7 @@ int psmx2_wait_open(struct fid_fabric *fabric, struct fi_wait_attr *attr,
 	return 0;
 }
 
+DIRECT_FN
 int psmx2_wait_trywait(struct fid_fabric *fabric, struct fid **fids, int count)
 {
 	struct psmx2_fid_cq *cq_priv;
@@ -203,7 +206,7 @@ int psmx2_wait_trywait(struct fid_fabric *fabric, struct fid **fids, int count)
 				return -FI_EINVAL;
 		}
 
-		ret = wait->try(wait);
+		ret = wait->wait_try(wait);
 		if (ret)
 			return ret;
 	}

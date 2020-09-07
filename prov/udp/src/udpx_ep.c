@@ -42,7 +42,7 @@ static int udpx_setname(fid_t fid, void *addr, size_t addrlen)
 	int ret;
 
 	ep = container_of(fid, struct udpx_ep, util_ep.ep_fid.fid);
-	FI_DBG(&udpx_prov, FI_LOG_EP_CTRL, "%s\n", ofi_hex_str(addr, addrlen));
+	ofi_straddr_dbg(&udpx_prov, FI_LOG_EP_CTRL, "bind addr: ", addr);
 	ret = bind(ep->sock, addr, (socklen_t)addrlen);
 	if (ret) {
 		FI_WARN(&udpx_prov, FI_LOG_EP_CTRL, "bind %d (%s)\n",
@@ -252,7 +252,7 @@ static void udpx_rx_src_comp(struct udpx_ep *ep, void *context, uint64_t flags,
 			     size_t len, void *buf, void *addr)
 {
 	ep->util_ep.rx_cq->src[ofi_cirque_windex(ep->util_ep.rx_cq->cirq)] =
-			ip_av_get_index(ep->util_ep.av, addr);
+			ofi_ip_av_get_fi_addr(ep->util_ep.av, addr);
 	udpx_rx_comp(ep, context, flags, len, buf, addr);
 }
 
@@ -293,7 +293,7 @@ static void udpx_ep_progress(struct util_ep *util_ep)
 	hdr.msg_iov = entry->iov;
 	hdr.msg_iovlen = entry->iov_count;
 
-	ret = recvmsg(ep->sock, &hdr, 0);
+	ret = ofi_recvmsg_udp(ep->sock, &hdr, 0);
 	if (ret >= 0) {
 		ep->rx_comp(ep, entry->context, 0, ret, NULL, &addr);
 		ofi_cirque_discard(ep->rxq);
@@ -374,8 +374,9 @@ out:
 static const void *
 udpx_dest_addr(struct udpx_ep *ep, fi_addr_t addr, uint64_t flags)
 {
-	return (flags & FI_MULTICAST) ? (const void *) (uintptr_t) addr :
-					ip_av_get_addr(ep->util_ep.av, (int)addr);
+	return (flags & FI_MULTICAST) ?
+	       (const void *) (uintptr_t) addr :
+	       ofi_ip_av_get_addr(ep->util_ep.av, (int)addr);
 }
 
 static size_t
@@ -416,7 +417,7 @@ static ssize_t udpx_send(struct fid_ep *ep_fid, const void *buf, size_t len,
 	struct udpx_ep *ep;
 
 	ep = container_of(ep_fid, struct udpx_ep, util_ep.ep_fid.fid);
-	return udpx_sendto(ep, buf, len, ip_av_get_addr(ep->util_ep.av, (int)dest_addr),
+	return udpx_sendto(ep, buf, len, ofi_ip_av_get_addr(ep->util_ep.av, (int)dest_addr),
 			   ep->util_ep.av->addrlen, context);
 }
 
@@ -453,7 +454,7 @@ static ssize_t udpx_sendmsg(struct fid_ep *ep_fid, const struct fi_msg *msg,
 		goto out;
 	}
 
-	ret = sendmsg(ep->sock, &hdr, 0);
+	ret = ofi_sendmsg_udp(ep->sock, &hdr, 0);
 	if (ret >= 0) {
 		ep->tx_comp(ep, msg->context);
 		ret = 0;
@@ -501,7 +502,7 @@ static ssize_t udpx_inject(struct fid_ep *ep_fid, const void *buf, size_t len,
 
 	ep = container_of(ep_fid, struct udpx_ep, util_ep.ep_fid.fid);
 	ret = ofi_sendto_socket(ep->sock, buf, len, 0,
-				ip_av_get_addr(ep->util_ep.av, (int)dest_addr),
+				ofi_ip_av_get_addr(ep->util_ep.av, (int)dest_addr),
 				(socklen_t)ep->util_ep.av->addrlen);
 	return ret == (ssize_t)len ? 0 : -errno;
 }
@@ -560,7 +561,7 @@ static int udpx_ep_close(struct fid *fid)
 		if (ep->util_ep.rx_cq->wait) {
 			wait = container_of(ep->util_ep.rx_cq->wait,
 					    struct util_wait_fd, util_wait);
-			fi_epoll_del(wait->epoll_fd, (int)ep->sock);
+			ofi_epoll_del(wait->epoll_fd, (int)ep->sock);
 		}
 		fid_list_remove(&ep->util_ep.rx_cq->ep_list,
 				&ep->util_ep.rx_cq->ep_list_lock,
@@ -603,8 +604,8 @@ static int udpx_ep_bind_cq(struct udpx_ep *ep, struct util_cq *cq,
 
 			wait = container_of(cq->wait,
 					    struct util_wait_fd, util_wait);
-			ret = fi_epoll_add(wait->epoll_fd, (int)ep->sock,
-					   &ep->util_ep.ep_fid.fid);
+			ret = ofi_epoll_add(wait->epoll_fd, (int)ep->sock,
+					   OFI_EPOLL_IN, &ep->util_ep.ep_fid.fid);
 			if (ret)
 				return ret;
 		} else {
@@ -660,22 +661,30 @@ static int udpx_ep_bind(struct fid *ep_fid, struct fid *bfid, uint64_t flags)
 static void udpx_bind_src_addr(struct udpx_ep *ep)
 {
 	int ret;
-	struct addrinfo ai, *rai = NULL;
+	struct addrinfo ai, *rai = NULL, *cur_ai;
 	char hostname[HOST_NAME_MAX];
 
 	memset(&ai, 0, sizeof(ai));
-	ai.ai_family = AF_INET;
 	ai.ai_socktype = SOCK_DGRAM;
 
-	ofi_getnodename(hostname, sizeof(hostname));
-	ret = getaddrinfo(hostname, NULL, &ai, &rai);
+	ret = gethostname(hostname, sizeof(hostname));
+	ret = getaddrinfo(ret ? "127.0.0.1" : hostname, NULL, &ai, &rai);
 	if (ret) {
 		FI_WARN(&udpx_prov, FI_LOG_EP_CTRL,
 			"getaddrinfo failed\n");
 		return;
 	}
 
-	ret = udpx_setname(&ep->util_ep.ep_fid.fid, rai->ai_addr, rai->ai_addrlen);
+	for (cur_ai = rai; cur_ai && cur_ai->ai_family != AF_INET;
+	     cur_ai = cur_ai->ai_next)
+		;
+
+	if (cur_ai) {
+		ret = udpx_setname(&ep->util_ep.ep_fid.fid, cur_ai->ai_addr,
+				   cur_ai->ai_addrlen);
+	} else {
+		ret = -FI_EADDRNOTAVAIL;
+	}
 	if (ret) {
 		FI_WARN(&udpx_prov, FI_LOG_EP_CTRL, "failed to set addr\n");
 	}
@@ -763,13 +772,11 @@ int udpx_endpoint(struct fid_domain *domain, struct fi_info *info,
 	ret = ofi_endpoint_init(domain, &udpx_util_prov, info, &ep->util_ep,
 				context, udpx_ep_progress);
 	if (ret)
-		goto err;
+		goto err1;
 
 	ret = udpx_ep_init(ep, info);
-	if (ret) {
-		free(ep);
-		return ret;
-	}
+	if (ret)
+		goto err2;
 
 	*ep_fid = &ep->util_ep.ep_fid;
 	(*ep_fid)->fid.ops = &udpx_ep_fi_ops;
@@ -779,7 +786,9 @@ int udpx_endpoint(struct fid_domain *domain, struct fi_info *info,
 			 &udpx_msg_mcast_ops : &udpx_msg_ops;
 
 	return 0;
-err:
+err2:
+	ofi_endpoint_close(&ep->util_ep);
+err1:
 	free(ep);
 	return ret;
 }

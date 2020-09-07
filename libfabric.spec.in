@@ -4,6 +4,9 @@
 # Define install_modulefile to 1 if you want this RPM to install a modulefile.
 %{!?install_modulefile: %define install_modulefile 0}
 
+# Define install_default_module_version to 1 if you want this RPM to install a .version file
+%{!?install_default_module_version: %define install_default_module_version 0}
+
 # Path to install modulefiles in
 %{!?modulefile_path: %define modulefile_path /usr/share/Modules/modulefiles}
 
@@ -17,6 +20,9 @@ License: GPLv2 or BSD
 Url: http://www.github.com/ofiwg/libfabric
 Source: http://www.github.org/ofiwg/%{name}/releases/download/v{%version}/%{name}-%{version}.tar.bz2
 BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
+%if 0%{?suse_version} >= 1
+Provides: libfabric1 = %{version}-%{release}
+%endif
 
 %description
 libfabric provides a user-space API to access high-performance fabric
@@ -61,7 +67,15 @@ module-whatis   \"This module adds Libfabric %{version} to the environment\"
 prepend-path PATH %{_prefix}/bin
 prepend-path LD_LIBRARY_PATH %{_libdir}
 prepend-path MANPATH %{_mandir}
+prepend-path PKG_CONFIG_PATH %{_libdir}/pkgconfig
 EOF
+%if %{install_default_module_version}
+cat <<EOF >%{buildroot}/%{modulefile_path}/%{name}/.version
+#%Module1.0
+##
+set ModulesVersion "%{version}"
+EOF
+%endif
 %endif
 
 %makeinstall installdirs
@@ -80,9 +94,6 @@ rm -rf %{buildroot}
 %{_bindir}/fi_info
 %{_bindir}/fi_strerror
 %{_bindir}/fi_pingpong
-%if %{install_modulefile}
-%{modulefile_path}/%{name}/%{version}
-%endif
 %dir %{_libdir}/libfabric/
 %doc AUTHORS COPYING README
 
@@ -91,6 +102,13 @@ rm -rf %{buildroot}
 %{_libdir}/libfabric*.so
 %{_libdir}/*.a
 %{_libdir}/pkgconfig/libfabric.pc
+%if %{install_modulefile}
+%{modulefile_path}/%{name}/%{version}
+%if %{install_default_module_version}
+%{modulefile_path}/%{name}/.version
+%endif
+%dir %{modulefile_path}
+%endif
 %{_includedir}/*
 %{_mandir}/man1/*
 %{_mandir}/man3/*

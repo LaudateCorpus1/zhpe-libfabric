@@ -270,6 +270,11 @@ int fi_no_query_atomic(struct fid_domain *domain, enum fi_datatype datatype,
 {
 	return -FI_ENOSYS;
 }
+int fi_no_query_collective(struct fid_domain *domain, enum fi_collective_op coll,
+			   struct fi_collective_attr *attr, uint64_t flags)
+{
+	return -FI_ENOSYS;
+}
 
 /*
  * struct fi_ops_mr
@@ -585,6 +590,70 @@ int fi_no_av_insertsym(struct fid_av *av, const char *node, size_t nodecnt,
 }
 int fi_no_av_remove(struct fid_av *av, fi_addr_t *fi_addr, size_t count,
 			uint64_t flags)
+{
+	return -FI_ENOSYS;
+}
+
+ssize_t fi_coll_no_barrier(struct fid_ep *ep, fi_addr_t coll_addr, void *context)
+{
+	return -FI_ENOSYS;
+}
+ssize_t fi_coll_no_broadcast(struct fid_ep *ep, void *buf, size_t count, void *desc,
+			     fi_addr_t coll_addr, fi_addr_t root_addr,
+			     enum fi_datatype datatype, uint64_t flags, void *context)
+{
+	return -FI_ENOSYS;
+}
+ssize_t fi_coll_no_alltoall(struct fid_ep *ep, const void *buf, size_t count, void *desc,
+			    void *result, void *result_desc, fi_addr_t coll_addr,
+			    enum fi_datatype datatype, uint64_t flags, void *context)
+{
+	return -FI_ENOSYS;
+}
+ssize_t fi_coll_no_allreduce(struct fid_ep *ep, const void *buf, size_t count, void *desc,
+			     void *result, void *result_desc, fi_addr_t coll_addr,
+			     enum fi_datatype datatype, enum fi_op op, uint64_t flags,
+			     void *context)
+{
+	return -FI_ENOSYS;
+}
+ssize_t fi_coll_no_allgather(struct fid_ep *ep, const void *buf, size_t count, void *desc,
+			     void *result, void *result_desc, fi_addr_t coll_addr,
+			     enum fi_datatype datatype, uint64_t flags, void *context)
+{
+	return -FI_ENOSYS;
+}
+ssize_t fi_coll_no_reduce_scatter(struct fid_ep *ep, const void *buf, size_t count,
+				  void *desc, void *result, void *result_desc,
+				  fi_addr_t coll_addr, enum fi_datatype datatype,
+				  enum fi_op op, uint64_t flags, void *context)
+{
+	return -FI_ENOSYS;
+}
+ssize_t fi_coll_no_reduce(struct fid_ep *ep, const void *buf, size_t count, void *desc,
+			  void *result, void *result_desc, fi_addr_t coll_addr,
+			  fi_addr_t root_addr, enum fi_datatype datatype, enum fi_op op,
+			  uint64_t flags, void *context)
+{
+	return -FI_ENOSYS;
+}
+ssize_t fi_coll_no_scatter(struct fid_ep *ep, const void *buf, size_t count, void *desc,
+			   void *result, void *result_desc, fi_addr_t coll_addr,
+			   fi_addr_t root_addr, enum fi_datatype datatype, uint64_t flags,
+			   void *context)
+{
+	return -FI_ENOSYS;
+}
+ssize_t fi_coll_no_gather(struct fid_ep *ep, const void *buf, size_t count, void *desc,
+			  void *result, void *result_desc, fi_addr_t coll_addr,
+			  fi_addr_t root_addr, enum fi_datatype datatype, uint64_t flags,
+			  void *context)
+{
+	return -FI_ENOSYS;
+}
+ssize_t fi_coll_no_msg(struct fid_ep *ep, const struct fi_msg_collective *msg,
+		       struct fi_ioc *resultv, void **result_desc, size_t result_count,
+		       uint64_t flags)
 {
 	return -FI_ENOSYS;
 }

@@ -3,6 +3,8 @@
  * Copyright (c) 2015-2017 Los Alamos National Security, LLC.
  *                         All rights reserved.
  * Copyright (c) 2015-2017 Cray Inc. All rights reserved.
+ * Copyrigth (c) 2019      Triad National Security, LLC. All rights
+ *                         reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -62,6 +64,7 @@
 #include "gnix_nameserver.h"
 #include "gnix_wait.h"
 #include "gnix_xpmem.h"
+#include "gnix_mbox_allocator.h"
 
 /* check if only one bit of a set is enabled, when one is required */
 #define IS_EXCLUSIVE(x) \
@@ -249,8 +252,7 @@ static struct fi_info *_gnix_allocinfo(void)
 	gnix_info->ep_attr->type = FI_EP_RDM;
 	gnix_info->ep_attr->protocol = FI_PROTO_GNI;
 	gnix_info->ep_attr->max_msg_size = GNIX_MAX_MSG_SIZE;
-	/* TODO: need to work on this */
-	gnix_info->ep_attr->mem_tag_format = 0x0;
+	gnix_info->ep_attr->mem_tag_format = FI_TAG_GENERIC;
 	gnix_info->ep_attr->tx_ctx_cnt = 1;
 	gnix_info->ep_attr->rx_ctx_cnt = 1;
 
@@ -722,7 +724,7 @@ static void gnix_fini(void)
 struct fi_provider gnix_prov = {
 	.name = gnix_prov_name,
 	.version = FI_VERSION(GNI_MAJOR_VERSION, GNI_MINOR_VERSION),
-	.fi_version = FI_VERSION(1, 6),
+	.fi_version = OFI_VERSION_LATEST,
 	.getinfo = gnix_getinfo,
 	.fabric = gnix_fabric_open,
 	.cleanup = gnix_fini
@@ -774,6 +776,8 @@ GNI_INI
 
 	if (getenv("GNIX_DISABLE_XPMEM") != NULL)
 		gnix_xpmem_disabled = true;
+	if (getenv("GNIX_MBOX_FALLBACK_DISABLE") != NULL)
+		gnix_mbox_alloc_allow_fallback = false;
 
 	return (provider);
 }

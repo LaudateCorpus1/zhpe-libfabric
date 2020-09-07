@@ -57,22 +57,29 @@ static int smr_av_close(struct fid *fid)
 static int smr_av_insert(struct fid_av *av_fid, const void *addr, size_t count,
 			 fi_addr_t *fi_addr, uint64_t flags, void *context)
 {
-	struct smr_addr *smr_names = (void *)addr;
 	struct util_av *util_av;
 	struct util_ep *util_ep;
 	struct smr_av *smr_av;
 	struct smr_ep *smr_ep;
 	struct dlist_entry *av_entry;
 	const char *ep_name;
-	int index, i, ret;
+	fi_addr_t index;
+	int i, ret;
 	int succ_count = 0;
 
 	util_av = container_of(av_fid, struct util_av, av_fid);
 	smr_av = container_of(util_av, struct smr_av, util_av);
 
-	for (i = 0; i < count; i++) {
-		ep_name = smr_no_prefix((const char *) smr_names[i].name);
-		ret = ofi_av_insert_addr(util_av, ep_name, 0, &index);
+	for (i = 0; i < count; i++, addr = (char *) addr + strlen(addr) + 1) {
+		if (smr_av->used < SMR_MAX_PEERS) {
+			ep_name = smr_no_prefix(addr);
+			ret = ofi_av_insert_addr(util_av, ep_name, &index);
+		} else {
+			FI_WARN(&smr_prov, FI_LOG_AV,
+				"AV insert failed. The maximum number of AV "
+				"entries shm supported has been reached.\n");
+			ret = -FI_ENOMEM;
+		}
 		if (ret) {
 			if (util_av->eq)
 				ofi_av_write_event(util_av, i, -ret, context);
@@ -84,6 +91,7 @@ static int smr_av_insert(struct fid_av *av_fid, const void *addr, size_t count,
 					ofi_av_write_event(util_av, i, -ret, context);
 			} else {
 				succ_count++;
+				smr_av->used++;
 			}
 		}
 
@@ -119,7 +127,7 @@ static int smr_av_remove(struct fid_av *av_fid, fi_addr_t *fi_addr, size_t count
 
 	fastlock_acquire(&util_av->lock);
 	for (i = 0; i < count; i++) {
-		ret = ofi_av_remove_addr(util_av, 0, fi_addr[i]);
+		ret = ofi_av_remove_addr(util_av, fi_addr[i]);
 		if (ret) {
 			FI_WARN(&smr_prov, FI_LOG_AV,
 				"Unable to remove address from AV\n");
@@ -132,6 +140,7 @@ static int smr_av_remove(struct fid_av *av_fid, fi_addr_t *fi_addr, size_t count
 			smr_ep = container_of(util_ep, struct smr_ep, util_ep);
 			smr_unmap_from_endpoint(smr_ep->region, fi_addr[i]);
 		}
+		smr_av->used--;
 	}
 
 	fastlock_release(&util_av->lock);
@@ -154,8 +163,8 @@ static int smr_av_lookup(struct fid_av *av, fi_addr_t fi_addr, void *addr,
 		return -FI_ADDR_NOTAVAIL;
 
 	strncpy((char *)addr, smr_name(peer_smr), *addrlen);
-	((char *) addr)[*addrlen] = '\0';
-	*addrlen = sizeof(struct smr_addr);
+	((char *) addr)[MIN(*addrlen - 1, strlen(smr_name(peer_smr)))] = '\0';
+	*addrlen = strlen(smr_name(peer_smr) + 1);
 	return 0;
 }
 
@@ -211,8 +220,7 @@ int smr_av_open(struct fid_domain *domain, struct fi_av_attr *attr,
 	if (!smr_av)
 		return -FI_ENOMEM;
 
-	util_attr.addrlen = sizeof(int);
-	util_attr.overhead = 0;
+	util_attr.addrlen = NAME_MAX;
 	util_attr.flags = 0;
 	if (attr->count > SMR_MAX_PEERS) {
 		ret = -FI_ENOSYS;
@@ -223,6 +231,7 @@ int smr_av_open(struct fid_domain *domain, struct fi_av_attr *attr,
 	if (ret)
 		goto out;
 
+	smr_av->used = 0;
 	*av = &smr_av->util_av.av_fid;
 	(*av)->fid.ops = &smr_av_fi_ops;
 	(*av)->ops = &smr_av_ops;

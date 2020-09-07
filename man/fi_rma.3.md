@@ -82,6 +82,7 @@ ssize_t fi_inject_writedata(struct fid_ep *ep, const void *buf, size_t len,
 
 *desc*
 : Descriptor associated with the local data buffer
+  See [`fi_mr`(3)](fi_mr.3.html).
 
 *data*
 : Remote CQ data to transfer with the operation.
@@ -101,7 +102,9 @@ ssize_t fi_inject_writedata(struct fid_ep *ep, const void *buf, size_t len,
 : Additional flags to apply for the read or write operation.
 
 *context*
-: User specified pointer to associate with the operation.
+: User specified pointer to associate with the operation.  This parameter is
+  ignored if the operation will not generate a successful completion, unless
+  an op flag specifies the context parameter be used for required input.
 
 # DESCRIPTION
 
@@ -178,15 +181,8 @@ struct fi_rma_iov {
 
 ## fi_inject_write
 
-The write inject call is an optimized version of fi_write.  The
-fi_inject_write function behaves as if the FI_INJECT transfer flag
-were set, and FI_COMPLETION were not.  That is, the data buffer is
-available for reuse immediately on returning from
-fi_inject_write, and no completion event will be generated for this
-write.  The completion event will be suppressed even if the endpoint
-has not been configured with FI_SELECTIVE_COMPLETION.  See the flags
-discussion below for more details. The requested message size that
-can be used with fi_inject_write is limited by inject_size.
+The write inject call is an optimized version of fi_write.  It provides
+similar completion semantics as fi_inject [`fi_msg`(3)](fi_msg.3.html).
 
 ## fi_writedata
 

@@ -38,7 +38,7 @@
 
 static struct fi_ops_domain udpx_domain_ops = {
 	.size = sizeof(struct fi_ops_domain),
-	.av_open = ip_av_create,
+	.av_open = ofi_ip_av_create,
 	.cq_open = udpx_cq_open,
 	.endpoint = udpx_endpoint,
 	.scalable_ep = fi_no_scalable_ep,
@@ -47,6 +47,7 @@ static struct fi_ops_domain udpx_domain_ops = {
 	.stx_ctx = fi_no_stx_context,
 	.srx_ctx = fi_no_srx_context,
 	.query_atomic = fi_no_query_atomic,
+	.query_collective = fi_no_query_collective,
 };
 
 static int udpx_domain_close(fid_t fid)
@@ -67,6 +68,13 @@ static struct fi_ops udpx_domain_fi_ops = {
 	.bind = fi_no_bind,
 	.control = fi_no_control,
 	.ops_open = fi_no_ops_open,
+};
+
+static struct fi_ops_mr udpx_mr_ops = {
+	.size = sizeof(struct fi_ops_mr),
+	.reg = ofi_mr_reg,
+	.regv = ofi_mr_regv,
+	.regattr = ofi_mr_regattr,
 };
 
 int udpx_domain_open(struct fid_fabric *fabric, struct fi_info *info,
@@ -92,5 +100,6 @@ int udpx_domain_open(struct fid_fabric *fabric, struct fi_info *info,
 	*domain = &util_domain->domain_fid;
 	(*domain)->fid.ops = &udpx_domain_fi_ops;
 	(*domain)->ops = &udpx_domain_ops;
+	(*domain)->mr = &udpx_mr_ops;
 	return 0;
 }

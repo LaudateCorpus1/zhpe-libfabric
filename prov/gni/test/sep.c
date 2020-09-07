@@ -1,7 +1,8 @@
 /*
- * Copyright (c) 2015-2017 Los Alamos National Security, LLC.
+ * Copyright (c) 2015-2018 Los Alamos National Security, LLC.
  *                         All rights reserved.
  * Copyright (c) 2015-2017 Cray Inc. All rights reserved.
+ * Copyright (c) 2019 Triad National Security, LLC. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -1368,7 +1369,8 @@ void sep_read(int index, int len)
 	}
 
 	cr_assert_eq(ret, 1);
-	sep_check_tcqe(&cqe, (void *)READ_CTX, FI_RMA | FI_READ, 0, tx_ep[0][index]);
+	sep_check_tcqe(&cqe, (void *)READ_CTX, FI_RMA | FI_READ, 0,
+			tx_ep[0][index]);
 
 	r[0] = 1;
 	sep_check_cntrs(w, r, w_e, r_e, false);
@@ -2146,6 +2148,68 @@ void sep_invalid_fetch_atomic(enum fi_datatype dt, enum fi_op op)
 	}
 }
 
+static void cancel_sep_send_sep(int index)
+{
+	ssize_t ret, len = 16;
+	struct fi_cq_err_entry buf;
+
+	sep_init_data(source, len, 0xab + index);
+	sep_init_data(target, len, 0);
+
+	ret = fi_send(tx_ep[0][index], source, len, loc_mr[0],
+		      rx_addr[index], target);
+	cr_assert(ret == 0, "fi_send failed err:%ld", ret);
+
+	ret = fi_cancel(&tx_ep[0][index]->fid, target);
+	fprintf(stderr, "ret = %ld %s\n", ret, fi_strerror(-ret));
+	cr_assert(ret == FI_SUCCESS, "fi_cancel failed");
+
+	/* check for event */
+	ret = fi_cq_readerr(tx_cq[0][index], &buf, FI_SEND);
+	cr_assert(ret == 1, "did not find one error event");
+
+	cr_assert(buf.buf == (void *) source, "buffer mismatch");
+	cr_assert(buf.err == FI_ECANCELED, "error code mismatch");
+	cr_assert(buf.prov_errno == FI_ECANCELED, "prov error code mismatch");
+	cr_assert(buf.len == len, "length mismatch");
+}
+
+static void cancel_sep_recv_sep(int index)
+{
+	ssize_t ret, len = 16;
+	struct fi_cq_err_entry buf;
+
+	sep_init_data(source, len, 0xab + index);
+	sep_init_data(target, len, 0);
+
+	ret = fi_recv(rx_ep[1][index], target, len, rem_mr[0],
+		      FI_ADDR_UNSPEC, source);
+	cr_assert(ret == 0, "fi_recv failed err:%ld", ret);
+
+	ret = fi_cancel(&rx_ep[1][index]->fid, source);
+	cr_assert(ret == FI_SUCCESS, "fi_cancel failed");
+
+	/* check for event */
+	ret = fi_cq_readerr(rx_cq[1][index], &buf, FI_RECV);
+	cr_assert(ret == 1, "did not find one error event");
+
+	cr_assert(buf.buf == (void *) target, "buffer mismatch");
+	cr_assert(buf.err == FI_ECANCELED, "error code mismatch");
+	cr_assert(buf.prov_errno == FI_ECANCELED, "prov error code mismatch");
+	cr_assert(buf.len == len, "length mismatch");
+}
+
+static void cancel_sep_no_event(int index)
+{
+	ssize_t ret;
+
+	ret = fi_cancel(&tx_ep[0][index]->fid, NULL);
+	cr_assert(ret == -FI_ENOENT, "fi_cancel failed");
+
+	ret = fi_cancel(&rx_ep[0][index]->fid, NULL);
+	cr_assert(ret == -FI_ENOENT, "fi_cancel failed");
+}
+
 void run_tests(void)
 {
 	int i, j;
@@ -2363,6 +2427,27 @@ void run_tests(void)
 			sep_invalid_fetch_atomic(j, i);
 		}
 	}
+
+}
+
+void run_cancel_tests(void)
+{
+	int i;
+
+	cr_log_info("cancel send test\n");
+	for (i = 0; i < ctx_cnt; i++) {
+		cancel_sep_send_sep(i);
+	}
+
+	cr_log_info("cancel recv test\n");
+	for (i = 0; i < ctx_cnt; i++) {
+		cancel_sep_recv_sep(i);
+	}
+
+	cr_log_info("cancel no event test\n");
+	for (i = 0; i < ctx_cnt; i++) {
+		cancel_sep_no_event(i);
+	}
 }
 
 TestSuite(scalablea,
@@ -2434,10 +2519,22 @@ Test(scalablem_basic, all)
 	run_tests();
 }
 
+Test(scalablem_basic, cancel)
+{
+	cr_log_info(BLUE "sep:basic:FI_AV_MAP cancel tests:\n" COLOR_RESET);
+	run_cancel_tests();
+}
+
 Test(scalablet_basic, all)
 {
 	cr_log_info(BLUE "sep:basic:FI_AV_TABLE tests:\n" COLOR_RESET);
 	run_tests();
+}
+
+Test(scalablet_basic, cancel)
+{
+	cr_log_info(BLUE "sep:basic:FI_AV_TABLE cancel tests:\n" COLOR_RESET);
+	run_cancel_tests();
 }
 
 Test(scalablem_scalable, all)
@@ -2446,10 +2543,22 @@ Test(scalablem_scalable, all)
 	run_tests();
 }
 
+Test(scalablem_scalable, cancel)
+{
+	cr_log_info(BLUE "sep:scalable:FI_AV_MAP cancel tests:\n" COLOR_RESET);
+	run_cancel_tests();
+}
+
 Test(scalablet_scalable, all)
 {
 	cr_log_info(BLUE "sep:scalable:FI_AV_TABLE tests:\n" COLOR_RESET);
 	run_tests();
+}
+
+Test(scalablet_scalable, cancel)
+{
+	cr_log_info(BLUE "sep:scalable:FI_AV_TABLE cancel tests:\n" COLOR_RESET);
+	run_cancel_tests();
 }
 
 #define INSERT_ADDR_COUNT (NUMCONTEXTS + 6)
@@ -2525,7 +2634,7 @@ Test(scalable, av_insert)
 
 	ret = fi_av_insert(t_av, epname, TOTALEPS,
 			   addresses, FI_SYNC_ERR, err);
-	cr_assert_eq(ret, -FI_EINVAL, "%d", ret);
+	cr_assert((ret != TOTALEPS), "fi_av_insert should have failed but did not.");
 
 	cr_log_info("check for errors\n");
 	for (i = 0; i < NUMEPS; i++) {
@@ -2550,7 +2659,7 @@ Test(scalable, av_insert)
 
 	ret = fi_av_insert(t_av, epname, TOTALEPS,
 			   addresses, FI_SYNC_ERR, err);
-	cr_assert_eq(ret, -FI_EINVAL, "%d", ret);
+	cr_assert((ret != TOTALEPS), "fi_av_insert should have failed but did not.");
 
 	cr_log_info("check for errors\n");
 

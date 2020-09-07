@@ -1,0 +1,17 @@
+terse tx_ctx+rx_ctx
+second key space
+cruft: domain, cq, cntr
+eq cleanup
+msg do_endpoint:
+       if (info && info->handle && info->handle->fclass == FI_CLASS_PEP) {
+                pep = container_of(info->handle, struct zhpe_pep, pep.fid);
+                sockaddr_cpy(&(*ep)->attr->src_addr, &pep->src_addr);
+        }
+FIXME
+NOTYET
+XXX
+report_event abort
+fi_shutdown
+zhpe_dom_close races
+
+

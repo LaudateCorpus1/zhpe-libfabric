@@ -1,9 +1,9 @@
 /*
  * Copyright (c) 2013-2017 Intel Corporation. All rights reserved.
  *
- * This software is waitailable to you under a choice of one of two
+ * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
- * General Public License (GPL) Version 2, waitailable from the file
+ * General Public License (GPL) Version 2, available from the file
  * COPYING in the main directory of this source tree, or the
  * BSD license below:
  *
@@ -176,7 +176,7 @@ int psmx_wait_trywait(struct fid_fabric *fabric, struct fid **fids, int count)
 				return -FI_EINVAL;
 		}
 
-		ret = wait->try(wait);
+		ret = wait->wait_try(wait);
 		if (ret)
 			return ret;
 	}

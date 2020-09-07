@@ -79,6 +79,13 @@ Scalable endpoints
   accessing the same context, either directly by posting send/recv/read/write
   request, or indirectly by polling associated completion queues or counters.
 
+  Using the scalable endpoint as a whole in communication functions is not
+  supported. Instead, individual tx context or rx context of the scalable
+  endpoint should be used. Similarly, using the address of the scalable
+  endpoint as the source address or destination address doesn't collectively
+  address all the tx/rx contexts. It addresses only the first tx/rx context,
+  instead.
+
 Shared Tx contexts
 : In order to achieve the purpose of saving PSM context by using shared Tx
   context, the endpoints bound to the shared Tx contexts need to be Tx only.
@@ -155,6 +162,11 @@ The *psm2* provider checks for the following environment variables:
 
   The default setting is 5.
 
+*FI_PSM2_CONN_TIMEOUT*
+: Timeout (seconds) for establishing connection between two PSM endpoints.
+
+  The default setting is 5.
+
 *FI_PSM2_PROG_INTERVAL*
 : When auto progress is enabled (asked via the hints to *fi_getinfo*),
   a progress thread is created to make progress calls from time to time.
@@ -195,17 +207,19 @@ The *psm2* provider checks for the following environment variables:
   The default setting is 2.
 
 *FI_PSM2_LAZY_CONN*
-: Control when connections are established between PSM2 endpoints that OFI
-  endpoints are built on top of. When set to 0, connections are established
-  when addresses are inserted into the address vector. This is the eager
-  connection mode. When set to 1, connections are established when addresses
-  are used the first time in communication. This is the lazy connection mode.
+: There are two strategies on when to establish connections between the PSM2
+  endpoints that OFI endpoints are built on top of. In eager connection mode,
+  connections are established when addresses are inserted into the address
+  vector. In lazy connection mode, connections are established when addresses
+  are used the first time in communication. Eager connection mode has slightly
+  lower critical path overhead but lazy connection mode scales better.
 
-  Lazy connection mode may reduce the start-up time on large systems at the
-  expense of slightly higher data path overhead. For applications that use
-  multiple endpoints, lazy connection mode can be especially helpful with
-  the potential of greatly reduce the time to set up address vectors and to
-  close endpoints.
+  This option controls how the two connection modes are used. When set to 1,
+  lazy connection mode is always used. When set to 0, eager connection mode
+  is used when required conditions are all met and lazy connection mode is
+  used otherwise. The conditions for eager connection mode are: (1) multiple
+  endpoint (and scalable endpoint) support is disabled by explicitly setting
+  PSM2_MULTI_EP=0; and (2) the address vector type is FI_AV_MAP.
 
   The default setting is 0.
 
@@ -229,7 +243,7 @@ The *psm2* provider checks for the following environment variables:
   available: *tag60* means 32-4-60 partitioning for CQ data, internal protocol
   flags, and application tag. *tag64* means 4-28-64 partitioning for internal
   protocol flags, CQ data, and application tag. *auto* means to choose either
-  *tag60* or *tag64* based on the the hints passed to fi_getinfo -- *tag60* is used
+  *tag60* or *tag64* based on the hints passed to fi_getinfo -- *tag60* is used
   if remote CQ data support is requested explicitly, either by passing non-zero value
   via *hints->domain_attr->cq_data_size* or by including *FI_REMOTE_CQ_DATA* in
   *hints->caps*, otherwise *tag64* is used. If *tag64* is the result of automatic

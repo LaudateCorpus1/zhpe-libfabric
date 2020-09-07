@@ -238,6 +238,47 @@ FI_LOG_SUBSYS environment variables.
 - *mr*
 : Provides output specific to memory registration.
 
+# PROVIDER INSTALLATION AND SELECTION
+
+The libfabric build scripts will install all providers that are supported
+by the installation system.  Providers that are missing build prerequisites
+will be disabled.  Installed providers will dynamically check for necessary
+hardware on library initialization and respond appropriately to application
+queries.
+
+Users can enable or disable available providers through build configuration
+options.  See 'configure --help' for details.  In general, a specific provider
+can be controlled using the configure option '--enable-<provider_name>'.  For
+example, '--enable-udp' (or '--enable-udp=yes') will add the udp provider to the
+build.  To disable the provider, '--enable-udp=no' can be used.
+
+Providers can also be enable or disabled at run time using the FI_PROVIDER
+environment variable.  The FI_PROVIDER variable is set to a comma separated
+list of providers to include.  If the list begins with the '^' symbol, then
+the list will be negated.
+
+  Example: To enable the udp and tcp providers only, set:
+	FI_PROVIDER="udp,tcp"
+
+The fi_info utility, which is included as part of the libfabric package, can
+be used to retrieve information about which providers are available in the
+system.  Additionally, it can retrieve a list of all environment variables
+that may be used to configure libfabric and each provider.  See
+[`fi_info`(1)](fi_info.1.html) for more details.
+
+# ENVIRONMENT VARIABLE CONTROLS
+
+Core features of libfabric and its providers may be configured by an
+administrator through the use of environment variables.  Man pages
+will usually describe the most commonly accessed variables, such as those
+mentioned above.  However, libfabric defines interfaces for publishing
+and obtaining environment variables.  These are targeted for providers,
+but allow applications and users to obtain the full list of variables
+that may be set, along with a brief description of their use.
+
+A full list of variables available may be obtained by running the fi_info
+application, with the -e or --env command line option.
+
 # NOTES
 
 Because libfabric is designed to provide applications direct access to
@@ -258,6 +299,7 @@ portability across providers.
 
 # SEE ALSO
 
+[`fi_info`(1)](fi_info.1.html),
 [`fi_provider`(7)](fi_provider.7.html),
 [`fi_getinfo`(3)](fi_getinfo.3.html),
 [`fi_endpoint`(3)](fi_endpoint.3.html),

@@ -44,6 +44,7 @@
 #include "gnix_vc.h"
 #include "gnix_mbox_allocator.h"
 #include "gnix_util.h"
+#include "fi_ext_gni.h"
 
 /*
  * TODO: make this a domain parameter
@@ -204,6 +205,7 @@ static int __nic_setup_irq_cq(struct gnix_nic *nic)
 	int vmdh_index = -1;
 	int flags = GNI_MEM_READWRITE;
 	struct gnix_auth_key *info;
+	struct fi_gni_auth_key key;
 
 	len = (size_t)sysconf(_SC_PAGESIZE);
 
@@ -224,8 +226,10 @@ static int __nic_setup_irq_cq(struct gnix_nic *nic)
 	memset(mmap_addr, 0x0, len);
 
 	if (nic->using_vmdh) {
-		info = _gnix_auth_key_lookup(GNIX_PROV_DEFAULT_AUTH_KEY,
-				GNIX_PROV_DEFAULT_AUTH_KEYLEN);
+		key.type = GNIX_AKT_RAW;
+		key.raw.protection_key = nic->cookie;
+
+		info = _gnix_auth_key_lookup((uint8_t *) &key, sizeof(key));
 		assert(info);
 
 		if (!nic->mdd_resources_set) {

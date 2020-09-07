@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="14.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug-ICC|x64">
@@ -30,8 +30,8 @@
     <ProjectGuid>{6B3A874F-B14C-4F16-B7C3-31E94859AE3E}</ProjectGuid>
     <Keyword>Win32Proj</Keyword>
     <RootNamespace>libfabric</RootNamespace>
-    <WindowsTargetPlatformVersion>8.1</WindowsTargetPlatformVersion>
   </PropertyGroup>
+  <Import Project="$(SolutionDir)\Libfabric.Build.Default.props" />
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug-v140|x64'" Label="Configuration">
     <ConfigurationType>DynamicLibrary</ConfigurationType>
@@ -125,7 +125,7 @@
       <Optimization>Disabled</Optimization>
       <PreprocessorDefinitions>WIN32;_WINSOCKAPI_=;_CRT_SECURE_NO_WARNINGS;_WINSOCK_DEPRECATED_NO_WARNINGS;_WINDOWS;_USRDLL;LIBFABRIC_EXPORTS;HAVE_CONFIG_H;ENABLE_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <SDLCheck>true</SDLCheck>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)include;$(ProjectDir)include\windows;$(ProjectDir)prov\netdir\NetDirect</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)include\windows;$(ProjectDir)prov\netdir\NetDirect;$(ProjectDir)prov\hook\src;$(ProjectDir)prov\hook\include;$(ProjectDir)prov\hook\perf\include</AdditionalIncludeDirectories>
       <CompileAs>CompileAsC</CompileAs>
       <DisableSpecificWarnings>4127;4200;4204;4221;4115;4201;4100</DisableSpecificWarnings>
       <C99Support>true</C99Support>
@@ -148,7 +148,7 @@
       <Optimization>Disabled</Optimization>
       <PreprocessorDefinitions>WIN32;_WINSOCKAPI_=;_CRT_SECURE_NO_WARNINGS;_WINSOCK_DEPRECATED_NO_WARNINGS;_WINDOWS;_USRDLL;LIBFABRIC_EXPORTS;HAVE_CONFIG_H;ENABLE_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <SDLCheck>true</SDLCheck>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)include;$(ProjectDir)include\windows;$(ProjectDir)prov\netdir\NetDirect</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)include\windows;$(ProjectDir)prov\netdir\NetDirect;$(ProjectDir)prov\hook\src;$(ProjectDir)prov\hook\include;$(ProjectDir)prov\hook\perf\include;</AdditionalIncludeDirectories>
       <CompileAs>CompileAsC</CompileAs>
       <DisableSpecificWarnings>4127;4200;4204;4221;4115;4201;4100</DisableSpecificWarnings>
       <C99Support>true</C99Support>
@@ -171,7 +171,7 @@
       <Optimization>Disabled</Optimization>
       <PreprocessorDefinitions>WIN32;_WINSOCKAPI_=;_CRT_SECURE_NO_WARNINGS;_WINSOCK_DEPRECATED_NO_WARNINGS;_WINDOWS;_USRDLL;LIBFABRIC_EXPORTS;HAVE_CONFIG_H;ENABLE_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <SDLCheck>true</SDLCheck>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)include;$(ProjectDir)include\windows;$(ProjectDir)prov\netdir\NetDirect</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)include\windows;$(ProjectDir)prov\netdir\NetDirect;$(ProjectDir)prov\hook\src;$(ProjectDir)prov\hook\include;$(ProjectDir)prov\hook\perf\include</AdditionalIncludeDirectories>
       <CompileAs>CompileAsC</CompileAs>
       <DisableSpecificWarnings>4127;4200;94;4204;4221;869</DisableSpecificWarnings>
       <C99Support>true</C99Support>
@@ -195,7 +195,7 @@
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <PreprocessorDefinitions>WIN32;_WINSOCKAPI_=;_CRT_SECURE_NO_WARNINGS;_WINSOCK_DEPRECATED_NO_WARNINGS;_WINDOWS;_USRDLL;LIBFABRIC_EXPORTS;HAVE_CONFIG_H;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <SDLCheck>true</SDLCheck>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)include;$(ProjectDir)include\windows;$(ProjectDir)prov\netdir\NetDirect</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)include\windows;$(ProjectDir)prov\netdir\NetDirect;$(ProjectDir)prov\hook\src;$(ProjectDir)prov\hook\include;$(ProjectDir)prov\hook\perf\include</AdditionalIncludeDirectories>
       <DisableSpecificWarnings>4127;4200;4204;4221;4115;4201;4100</DisableSpecificWarnings>
       <C99Support>true</C99Support>
       <ShowIncludes>false</ShowIncludes>
@@ -220,7 +220,7 @@
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <PreprocessorDefinitions>WIN32;_WINSOCKAPI_=;_CRT_SECURE_NO_WARNINGS;_WINSOCK_DEPRECATED_NO_WARNINGS;_WINDOWS;_USRDLL;LIBFABRIC_EXPORTS;HAVE_CONFIG_H;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <SDLCheck>true</SDLCheck>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)include;$(ProjectDir)include\windows;$(ProjectDir)prov\netdir\NetDirect</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)include\windows;$(ProjectDir)prov\netdir\NetDirect;$(ProjectDir)prov\hook\src;$(ProjectDir)prov\hook\include;$(ProjectDir)prov\hook\perf\include;</AdditionalIncludeDirectories>
       <DisableSpecificWarnings>4127;4200;4204;4221;4115;4201;4100</DisableSpecificWarnings>
       <C99Support>true</C99Support>
       <ShowIncludes>false</ShowIncludes>
@@ -245,7 +245,7 @@
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <PreprocessorDefinitions>WIN32;_WINSOCKAPI_=;_CRT_SECURE_NO_WARNINGS;_WINSOCK_DEPRECATED_NO_WARNINGS;_WINDOWS;_USRDLL;LIBFABRIC_EXPORTS;HAVE_CONFIG_H;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <SDLCheck>true</SDLCheck>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)include;$(ProjectDir)include\windows;$(ProjectDir)prov\netdir\NetDirect</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)include\windows;$(ProjectDir)prov\netdir\NetDirect;$(ProjectDir)prov\hook\src;$(ProjectDir)prov\hook\include;$(ProjectDir)prov\hook\perf\include;</AdditionalIncludeDirectories>
       <DisableSpecificWarnings>4127;4200;94;4204;4221;869</DisableSpecificWarnings>
       <C99Support>true</C99Support>
       <ShowIncludes>false</ShowIncludes>
@@ -262,6 +262,17 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="prov\hook\perf\src\hook_perf.c" />
+    <ClCompile Include="prov\hook\src\hook.c" />
+    <ClCompile Include="prov\hook\src\hook_av.c" />
+    <ClCompile Include="prov\hook\src\hook_cm.c" />
+    <ClCompile Include="prov\hook\src\hook_cntr.c" />
+    <ClCompile Include="prov\hook\src\hook_cq.c" />
+    <ClCompile Include="prov\hook\src\hook_domain.c" />
+    <ClCompile Include="prov\hook\src\hook_ep.c" />
+    <ClCompile Include="prov\hook\src\hook_eq.c" />
+    <ClCompile Include="prov\hook\src\hook_wait.c" />
+    <ClCompile Include="prov\hook\src\hook_xfer.c" />
     <ClCompile Include="prov\netdir\src\netdir_cntr.c" />
     <ClCompile Include="prov\netdir\src\netdir_ep_msg.c" />
     <ClCompile Include="prov\netdir\src\netdir_ep_rma.c" />
@@ -274,6 +285,10 @@
     <ClCompile Include="prov\rxd\src\rxd_cq.c" />
     <ClCompile Include="prov\rxd\src\rxd_domain.c" />
     <ClCompile Include="prov\rxd\src\rxd_ep.c" />
+    <ClCompile Include="prov\rxd\src\rxd_msg.c" />
+    <ClCompile Include="prov\rxd\src\rxd_tagged.c" />
+    <ClCompile Include="prov\rxd\src\rxd_rma.c" />
+    <ClCompile Include="prov\rxd\src\rxd_atomic.c" />
     <ClCompile Include="prov\rxd\src\rxd_fabric.c" />
     <ClCompile Include="prov\rxd\src\rxd_init.c">
       <ForcedIncludeFiles Condition="'$(Configuration)|$(Platform)'=='Debug-v140|x64'">
@@ -289,14 +304,15 @@
       <ForcedIncludeFiles Condition="'$(Configuration)|$(Platform)'=='Release-ICC|x64'">
       </ForcedIncludeFiles>
     </ClCompile>
-    <ClCompile Include="prov\rxd\src\rxd_rma.c" />
     <ClCompile Include="prov\rxm\src\rxm_attr.c" />
     <ClCompile Include="prov\rxm\src\rxm_conn.c" />
     <ClCompile Include="prov\rxm\src\rxm_rma.c" />
     <ClCompile Include="prov\rxm\src\rxm_cq.c" />
+    <ClCompile Include="prov\rxm\src\rxm_av.c" />
     <ClCompile Include="prov\rxm\src\rxm_domain.c" />
     <ClCompile Include="prov\rxm\src\rxm_ep.c" />
     <ClCompile Include="prov\rxm\src\rxm_fabric.c" />
+    <ClCompile Include="prov\rxm\src\rxm_atomic.c" />
     <ClCompile Include="prov\rxm\src\rxm_init.c">
       <ForcedIncludeFiles Condition="'$(Configuration)|$(Platform)'=='Debug-v140|x64'">
       </ForcedIncludeFiles>
@@ -312,14 +328,6 @@
       </ForcedIncludeFiles>
     </ClCompile>
     <ClCompile Include="prov\netdir\src\netdir_addr.c" />
-    <ClCompile Include="prov\netdir\src\netdir_attr.c">
-      <UseMSVC Condition="'$(Configuration)|$(Platform)'=='Debug-v140|x64'">false</UseMSVC>
-      <UseMSVC Condition="'$(Configuration)|$(Platform)'=='Debug-v141|x64'">false</UseMSVC>
-      <UseMSVC Condition="'$(Configuration)|$(Platform)'=='Debug-ICC|x64'">false</UseMSVC>
-      <UseMSVC Condition="'$(Configuration)|$(Platform)'=='Release-v140|x64'">false</UseMSVC>
-      <UseMSVC Condition="'$(Configuration)|$(Platform)'=='Release-v141|x64'">false</UseMSVC>
-      <UseMSVC Condition="'$(Configuration)|$(Platform)'=='Release-ICC|x64'">false</UseMSVC>
-    </ClCompile>
     <ClCompile Include="prov\netdir\src\netdir_ov.c" />
     <ClCompile Include="prov\netdir\src\netdir_cq.c" />
     <ClCompile Include="prov\netdir\src\netdir_domain.c" />
@@ -330,6 +338,14 @@
     <ClCompile Include="prov\netdir\src\netdir_init.c" />
     <ClCompile Include="prov\netdir\src\netdir_ndinit.c" />
     <ClCompile Include="prov\netdir\src\netdir_pep.c" />
+    <ClCompile Include="prov\sockets\src\sock_attr.c">
+      <AdditionalIncludeDirectories Condition="'$(Configuration)|$(Platform)'=='Debug-v140|x64'">$(ProjectDir)prov\sockets\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories Condition="'$(Configuration)|$(Platform)'=='Debug-v141|x64'">$(ProjectDir)prov\sockets\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories Condition="'$(Configuration)|$(Platform)'=='Debug-ICC|x64'">$(ProjectDir)prov\sockets\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories Condition="'$(Configuration)|$(Platform)'=='Release-v140|x64'">$(ProjectDir)prov\sockets\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories Condition="'$(Configuration)|$(Platform)'=='Release-v141|x64'">$(ProjectDir)prov\sockets\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories Condition="'$(Configuration)|$(Platform)'=='Release-ICC|x64'">$(ProjectDir)prov\sockets\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
     <ClCompile Include="prov\sockets\src\sock_atomic.c">
       <AdditionalIncludeDirectories Condition="'$(Configuration)|$(Platform)'=='Debug-v140|x64'">$(ProjectDir)prov\sockets\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalIncludeDirectories Condition="'$(Configuration)|$(Platform)'=='Debug-v141|x64'">$(ProjectDir)prov\sockets\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -509,10 +525,14 @@
     <ClCompile Include="prov\tcp\src\tcpx_attr.c" />
     <ClCompile Include="prov\tcp\src\tcpx_comm.c" />
     <ClCompile Include="prov\tcp\src\tcpx_conn_mgr.c" />
+    <ClCompile Include="prov\tcp\src\tcpx_shared_ctx.c" />
     <ClCompile Include="prov\tcp\src\tcpx_cq.c" />
     <ClCompile Include="prov\tcp\src\tcpx_domain.c" />
+    <ClCompile Include="prov\tcp\src\tcpx_rma.c" />
+    <ClCompile Include="prov\tcp\src\tcpx_msg.c" />
     <ClCompile Include="prov\tcp\src\tcpx_ep.c" />
     <ClCompile Include="prov\tcp\src\tcpx_fabric.c" />
+    <ClCompile Include="prov\tcp\src\tcpx_eq.c" />
     <ClCompile Include="prov\tcp\src\tcpx_init.c" />
     <ClCompile Include="prov\tcp\src\tcpx_progress.c" />
     <ClCompile Include="prov\udp\src\udpx_attr.c" />
@@ -533,6 +553,7 @@
     <ClCompile Include="prov\util\src\util_av.c" />
     <ClCompile Include="prov\util\src\util_buf.c" />
     <ClCompile Include="prov\util\src\util_cntr.c" />
+    <ClCompile Include="prov\util\src\util_coll.c" />
     <ClCompile Include="prov\util\src\util_cq.c" />
     <ClCompile Include="prov\util\src\util_domain.c" />
     <ClCompile Include="prov\util\src\util_ep.c" />
@@ -545,6 +566,8 @@
     <ClCompile Include="prov\util\src\util_poll.c" />
     <ClCompile Include="prov\util\src\util_wait.c" />
     <ClCompile Include="prov\util\src\util_mem_monitor.c" />
+    <ClCompile Include="prov\util\src\util_mem_hooks.c" />
+    <ClCompile Include="prov\util\src\util_mr_cache.c" />
     <ClCompile Include="src\common.c" />
     <ClCompile Include="src\enosys.c">
       <DisableSpecificWarnings Condition="'$(Configuration)|$(Platform)'=='Debug-ICC|x64'">4127;869</DisableSpecificWarnings>
@@ -553,12 +576,16 @@
     <ClCompile Include="src\fabric.c" />
     <ClCompile Include="src\fasthash.c" />
     <ClCompile Include="src\fi_tostr.c" />
+    <ClCompile Include="src\hmem.c" />
+    <ClCompile Include="src\hmem_cuda.c" />
     <ClCompile Include="src\indexer.c" />
     <ClCompile Include="src\iov.c" />
+    <ClCompile Include="src\shared\ofi_str.c" />
     <ClCompile Include="src\log.c" />
     <ClCompile Include="src\perf.c" />
     <ClCompile Include="src\mem.c" />
     <ClCompile Include="src\rbtree.c" />
+    <ClCompile Include="src\tree.c" />
     <ClCompile Include="src\var.c" />
     <ClCompile Include="src\windows\osd.c" />
   </ItemGroup>
@@ -568,13 +595,17 @@
     <ClInclude Include="include\ofi_abi.h" />
     <ClInclude Include="include\ofi_atom.h" />
     <ClInclude Include="include\ofi_atomic.h" />
+    <ClInclude Include="include\ofi_hmem.h" />
+    <ClInclude Include="include\ofi_hook.h" />
     <ClInclude Include="include\ofi_mr.h" />
     <ClInclude Include="include\ofi_net.h" />
+    <ClInclude Include="include\ofi_coll.h" />
     <ClInclude Include="include\ofi_enosys.h" />
     <ClInclude Include="include\ofi_file.h" />
     <ClInclude Include="include\ofi_iov.h" />
     <ClInclude Include="include\ofi_indexer.h" />
     <ClInclude Include="include\ofi_list.h" />
+    <ClInclude Include="include\shared\ofi_str.h" />
     <ClInclude Include="include\ofi_lock.h" />
     <ClInclude Include="include\ofi_mem.h" />
     <ClInclude Include="include\ofi_osd.h" />
@@ -582,6 +613,7 @@
     <ClInclude Include="include\ofi_proto.h" />
     <ClInclude Include="include\ofi_rbuf.h" />
     <ClInclude Include="include\ofi_signal.h" />
+    <ClInclude Include="include\ofi_tree.h" />
     <ClInclude Include="include\ofi_util.h" />
     <ClInclude Include="include\ofi_prov.h" />
     <ClInclude Include="include\rbtree.h" />
@@ -595,6 +627,7 @@
     <ClInclude Include="include\rdma\fi_rma.h" />
     <ClInclude Include="include\rdma\fi_tagged.h" />
     <ClInclude Include="include\rdma\fi_trigger.h" />
+    <ClInclude Include="include\rdma\fi_collective.h" />
     <ClInclude Include="include\rdma\providers\fi_log.h" />
     <ClInclude Include="include\rdma\providers\fi_prov.h" />
     <ClInclude Include="include\uthash.h" />
@@ -619,15 +652,16 @@
     <ClInclude Include="include\windows\sys\uio.h" />
     <ClInclude Include="include\windows\sys\wait.h" />
     <ClInclude Include="include\windows\unistd.h" />
+    <ClInclude Include="prov\hook\src\hook.h" />
     <ClInclude Include="prov\netdir\src\netdir_buf.h" />
     <ClInclude Include="prov\netdir\src\netdir_cq.h" />
     <ClInclude Include="prov\netdir\src\netdir_queue.h" />
     <ClInclude Include="prov\netdir\src\netdir_unexp.h" />
     <ClInclude Include="prov\netdir\src\netdir_util.h" />
     <ClInclude Include="prov\rxd\src\rxd.h" />
+    <ClInclude Include="prov\rxd\src\rxd_proto.h" />
     <ClInclude Include="prov\rxm\src\rxm.h" />
     <ClInclude Include="prov\netdir\src\netdir.h" />
-    <ClInclude Include="prov\netdir\src\netdir_err.h" />
     <ClInclude Include="prov\netdir\src\netdir_iface.h" />
     <ClInclude Include="prov\netdir\src\netdir_log.h" />
     <ClInclude Include="prov\netdir\src\netdir_ov.h" />

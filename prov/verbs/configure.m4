@@ -11,7 +11,6 @@ AC_DEFUN([FI_VERBS_CONFIGURE],[
 	# Determine if we can support the verbs provider
 	verbs_ibverbs_happy=0
 	verbs_rdmacm_happy=0
-	verbs_ibverbs_exp_happy=0
 	AS_IF([test x"$enable_verbs" != x"no"],
 	      [FI_CHECK_PACKAGE([verbs_ibverbs],
 				[infiniband/verbs.h],
@@ -23,16 +22,6 @@ AC_DEFUN([FI_VERBS_CONFIGURE],[
 				[FI_VERBS_DOUBLE_CHECK_LIBIBVERBS],
 				[verbs_ibverbs_happy=0])
 
-	      FI_CHECK_PACKAGE([verbs_ibverbs],
-				[infiniband/verbs_exp.h],
-				[ibverbs],
-				[ibv_open_device],
-				[],
-				[$verbs_PREFIX],
-				[$verbs_LIBDIR],
-				[verbs_ibverbs_exp_happy=1],
-				[verbs_ibverbs_exp_happy=0])
-
 	       FI_CHECK_PACKAGE([verbs_rdmacm],
 				[rdma/rdma_cma.h],
 				[rdmacm],
@@ -42,28 +31,53 @@ AC_DEFUN([FI_VERBS_CONFIGURE],[
 				[$verbs_LIBDIR],
 				[verbs_rdmacm_happy=1],
 				[verbs_rdmacm_happy=0])
-	      ])
 
-	AC_COMPILE_IFELSE([AC_LANG_PROGRAM(
-			   [
-			    #include <infiniband/verbs_exp.h>
-			   ],
-			   [
-			    return (IBV_EXP_DEVICE_ATTR_ODP | IBV_EXP_DEVICE_ODP);
-			   ])
-			  ],
-			  [verbs_ibverbs_exp_happy=1],
-			  [verbs_ibverbs_exp_happy=0])
+	       FI_CHECK_PACKAGE([verbs_rdmacm_ex],
+				[rdma/rdma_cma.h],
+				[rdmacm],
+				[rdma_create_qp_ex],
+				[],
+				[$verbs_PREFIX],
+				[$verbs_LIBDIR],
+				[verbs_rdmacm_ex_happy=1],
+				[verbs_rdmacm_ex_happy=0])
+
+	      ])
 
 	AS_IF([test $verbs_ibverbs_happy -eq 1 && \
 	       test $verbs_rdmacm_happy -eq 1], [$1], [$2])
 
+	#See if we have extended verbs calls
+	VERBS_HAVE_QUERY_EX=0
+	AS_IF([test $verbs_ibverbs_happy -eq 1],[
+		AC_CHECK_DECL([ibv_query_device_ex],
+			[VERBS_HAVE_QUERY_EX=1],[],
+			[#include <infiniband/verbs.h>])
+		])
+	AC_DEFINE_UNQUOTED([VERBS_HAVE_QUERY_EX],[$VERBS_HAVE_QUERY_EX],
+		[Whether infiniband/verbs.h has ibv_query_device_ex() support or not])
+
+	#See if we have XRC support
+	VERBS_HAVE_XRC=0
 	AS_IF([test $verbs_ibverbs_happy -eq 1 && \
-	       test $verbs_rdmacm_happy -eq 1 && \
-	       test $verbs_ibverbs_exp_happy -eq 1],
-		[AC_DEFINE([HAVE_VERBS_EXP_H], [1],
-			   [Experimental verbs features support])],
-		[])
+	       test $verbs_rdmacm_ex_happy -eq 1],[
+		AC_CHECK_DECL([IBV_QPT_XRC_SEND],
+			[VERBS_HAVE_XRC=1],[],
+			[#include <infiniband/verbs.h>])
+		])
+	AC_DEFINE_UNQUOTED([VERBS_HAVE_XRC],[$VERBS_HAVE_XRC],
+		[Whether infiniband/verbs.h has XRC support or not])
+
+	#See if we have rdma-core rdma_establish support
+	VERBS_HAVE_RDMA_ESTABLISH=0
+	AS_IF([test $verbs_ibverbs_happy -eq 1 && \
+	       test $verbs_rdmacm_ex_happy -eq 1],[
+		AC_CHECK_DECL([rdma_establish],
+			[VERBS_HAVE_RDMA_ESTABLISH=1],[],
+			[#include <rdma/rdma_cma.h>])
+		])
+	AC_DEFINE_UNQUOTED([VERBS_HAVE_RDMA_ESTABLISH],[$VERBS_HAVE_RDMA_ESTABLISH],
+		[Whether rdma/rdma_cma.h has rdma_establish() support or not])
 
 	# Technically, verbs_ibverbs_CPPFLAGS and
 	# verbs_rdmacm_CPPFLAGS could be different, but it is highly

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2014 Intel Corporation.  All rights reserved.
+ * Copyright (c) 2013-2020 Intel Corporation.  All rights reserved.
  * Copyright (c) 2016 Cisco Systems, Inc.  All rights reserved.
  *
  * This software is available to you under the BSD license below:
@@ -19,7 +19,7 @@
  *
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
  * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AWV
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
  * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
  * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
  * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
@@ -33,6 +33,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <getopt.h>
+#include <ctype.h>
 
 #include <ofi_osd.h>
 
@@ -44,6 +45,7 @@ static char *node, *port;
 static int ver = 0;
 static int list_providers = 0;
 static int verbose = 0, env = 0;
+static char *envstr;
 
 /* options and matching help strings need to be kept in sync */
 
@@ -59,6 +61,7 @@ static const struct option longopts[] = {
 	{"addr_format", required_argument, NULL, 'a'},
 	{"provider", required_argument, NULL, 'p'},
 	{"env", no_argument, NULL, 'e'},
+	{"getenv", required_argument, NULL, 'g'},
 	{"list", no_argument, NULL, 'l'},
 	{"verbose", no_argument, NULL, 'v'},
 	{"version", no_argument, &ver, 1},
@@ -77,6 +80,7 @@ static const char *help_strings[][2] = {
 	{"FMT", "\t\tspecify accepted address format: FI_FORMAT_UNSPEC, FI_SOCKADDR..."},
 	{"PROV", "\t\tspecify provider explicitly"},
 	{"", "\t\tprint libfabric environment variables"},
+	{"", "\t\tprint libfabric environment variables with substr"},
 	{"", "\t\tlist available libfabric providers"},
 	{"", "\t\tverbose output"},
 	{"", "\t\tprint version info and exit"},
@@ -115,6 +119,7 @@ static int str2cap(char *inputstr, uint64_t *value)
 	ORCASE(FI_TAGGED);
 	ORCASE(FI_ATOMIC);
 	ORCASE(FI_MULTICAST);
+	ORCASE(FI_COLLECTIVE);
 
 	ORCASE(FI_READ);
 	ORCASE(FI_WRITE);
@@ -138,6 +143,7 @@ static int str2cap(char *inputstr, uint64_t *value)
 	ORCASE(FI_SOURCE);
 	ORCASE(FI_NAMED_RX_CTX);
 	ORCASE(FI_DIRECTED_RECV);
+	ORCASE(FI_HMEM);
 
 	fprintf(stderr, "error: Unrecognized capability: %s\n", inputstr);
 
@@ -187,6 +193,7 @@ static int str2addr_format(char *inputstr, uint32_t *value)
 	ORCASE(FI_ADDR_MLX);
 	ORCASE(FI_ADDR_STR);
 	ORCASE(FI_ADDR_PSMX2);
+	ORCASE(FI_ADDR_EFA);
 
 	fprintf(stderr, "error: Unrecognized address format: %s\n", inputstr);
 
@@ -219,6 +226,8 @@ static const char *param_type(enum fi_param_type type)
 		return "String";
 	case FI_PARAM_INT:
 		return "Integer";
+	case FI_PARAM_SIZE_T:
+		return "size_t";
 	case FI_PARAM_BOOL:
 		return "Boolean (0/1, on/off, true/false, yes/no)";
 	default:
@@ -237,13 +246,16 @@ static int print_vars(void)
 		return ret;
 
 	for (i = 0; i < count; ++i) {
+		if (envstr && !strcasestr(params[i].name, envstr))
+			continue;
+
 		printf("# %s: %s\n", params[i].name, param_type(params[i].type));
 		printf("# %s\n", params[i].help_string);
 
 		if (params[i].value) {
 			delim = strchr(params[i].value, ' ') ? '"' : '\0';
 			printf("%s=%c%s%c\n", params[i].name, delim,
-				params[i].value, delim);
+			       params[i].value, delim);
 		}
 
 		printf("\n");
@@ -306,7 +318,9 @@ static int run(struct fi_info *hints, char *node, char *port)
 		return ret;
 	}
 
-	if (verbose)
+	if (env)
+		ret = print_vars();
+	else if (verbose)
 		ret = print_long_info(info);
 	else if (list_providers)
 		ret = print_providers(info);
@@ -330,7 +344,7 @@ int main(int argc, char **argv)
 	hints->domain_attr->mode = ~0;
 	hints->domain_attr->mr_mode = ~(FI_MR_BASIC | FI_MR_SCALABLE);
 
-	while ((op = getopt_long(argc, argv, "n:P:c:m:t:a:p:d:f:elhv", longopts,
+	while ((op = getopt_long(argc, argv, "n:P:c:m:t:a:p:d:f:eg:lhv", longopts,
 				 &option_index)) != -1) {
 		switch (op) {
 		case 0:
@@ -391,6 +405,9 @@ int main(int argc, char **argv)
 			hints->fabric_attr->name = strdup(optarg);
 			use_hints = 1;
 			break;
+		case 'g':
+			envstr = optarg;
+			/* fall through */
 		case 'e':
 			env = 1;
 			break;
@@ -409,12 +426,8 @@ print_help:
 		}
 	}
 
-	if (env) {
-		ret = print_vars();
-		goto out;
-	}
-
 	ret = run(use_hints ? hints : NULL, node, port);
+
 out:
 	fi_freeinfo(hints);
 	return -ret;

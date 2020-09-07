@@ -33,11 +33,16 @@
 #include "smr.h"
 
 #define SMR_TX_CAPS (OFI_TX_MSG_CAPS | FI_TAGGED | OFI_TX_RMA_CAPS | FI_ATOMICS)
-#define SMR_RX_CAPS (FI_SOURCE | OFI_RX_MSG_CAPS | FI_TAGGED | \
-		     OFI_RX_RMA_CAPS | FI_ATOMICS)
+#define SMR_RX_CAPS (FI_SOURCE | FI_RMA_EVENT | OFI_RX_MSG_CAPS | FI_TAGGED | \
+		     OFI_RX_RMA_CAPS | FI_ATOMICS | FI_DIRECTED_RECV | \
+		     FI_MULTI_RECV)
+#define SMR_TX_OP_FLAGS (FI_COMPLETION | FI_INJECT_COMPLETE | \
+			 FI_TRANSMIT_COMPLETE | FI_DELIVERY_COMPLETE)
+#define SMR_RX_OP_FLAGS (FI_COMPLETION | FI_MULTI_RECV)
 
 struct fi_tx_attr smr_tx_attr = {
 	.caps = SMR_TX_CAPS,
+	.op_flags = SMR_TX_OP_FLAGS,
 	.comp_order = FI_ORDER_NONE,
 	.msg_order = SMR_RMA_ORDER | FI_ORDER_SAS,
 	.inject_size = SMR_INJECT_SIZE,
@@ -47,7 +52,8 @@ struct fi_tx_attr smr_tx_attr = {
 };
 
 struct fi_rx_attr smr_rx_attr = {
-	.caps = SMR_RX_CAPS | FI_MULTI_RECV,
+	.caps = SMR_RX_CAPS,
+	.op_flags = SMR_RX_OP_FLAGS,
 	.comp_order = FI_ORDER_STRICT,
 	.msg_order = SMR_RMA_ORDER | FI_ORDER_SAS,
 	.size = 1024,
@@ -74,10 +80,11 @@ struct fi_domain_attr smr_domain_attr = {
 	.data_progress = FI_PROGRESS_MANUAL,
 	.resource_mgmt = FI_RM_ENABLED,
 	.av_type = FI_AV_UNSPEC,
-	.mr_mode = FI_MR_SCALABLE,
+	.mr_mode = FI_MR_BASIC | FI_MR_SCALABLE,
+	.mr_key_size = sizeof_field(struct fi_rma_iov, key),
 	.cq_data_size = sizeof_field(struct smr_msg_hdr, data),
 	.cq_cnt = (1 << 10),
-	.ep_cnt = (1 << 10),
+	.ep_cnt = SMR_MAX_PEERS,
 	.tx_ctx_cnt = (1 << 10),
 	.rx_ctx_cnt = (1 << 10),
 	.max_ep_tx_ctx = 1,
@@ -88,7 +95,7 @@ struct fi_domain_attr smr_domain_attr = {
 
 struct fi_fabric_attr smr_fabric_attr = {
 	.name = "shm",
-	.prov_version = FI_VERSION(SMR_MAJOR_VERSION, SMR_MINOR_VERSION)
+	.prov_version = OFI_VERSION_DEF_PROV
 };
 
 struct fi_info smr_info = {

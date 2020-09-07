@@ -53,6 +53,7 @@
 #include "gnix_trigger.h"
 #include "gnix_vector.h"
 #include "gnix_xpmem.h"
+#include "gnix_cq.h"
 
 /*
  * forward declarations and local struct defs.
@@ -961,9 +962,12 @@ static int __gnix_vc_hndl_conn_req(struct gnix_cm_nic *cm_nic,
 
 				dlist_insert_tail(&vc->list, &ep->unmapped_vcs);
 
+				/*
+				 * see issue 4521 for the error_data size allocated
+				 */
 				if (vc->ep->caps & FI_SOURCE) {
 					error_data =
-						calloc(1, sizeof(*error_data));
+						calloc(1, GNIX_CQ_MAX_ERR_DATA_SIZE);
 					if (error_data == NULL) {
 						ret = -FI_ENOMEM;
 						goto err;
@@ -1506,6 +1510,7 @@ int _gnix_vc_alloc(struct gnix_fid_ep *ep_priv,
 	if (ret != FI_SUCCESS)
 		goto err;
 	vc_ptr->vc_id = remote_id;
+	vc_ptr->gnix_ep_name = NULL;
 
 	*vc = vc_ptr;
 
@@ -1636,6 +1641,11 @@ int _gnix_vc_destroy(struct gnix_vc *vc)
 		      fi_strerror(-ret));
 
 	_gnix_free_bitmap(&vc->flags);
+
+	if (vc->gnix_ep_name != NULL) {
+		free(vc->gnix_ep_name);
+		vc->gnix_ep_name = NULL;
+	}
 
 	/*
 	 * put VC back on the freelist

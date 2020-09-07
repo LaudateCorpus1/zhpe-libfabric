@@ -60,6 +60,12 @@ enum {
 enum {
 	FI_OPT_MIN_MULTI_RECV,		/* size_t */
 	FI_OPT_CM_DATA_SIZE,		/* size_t */
+	FI_OPT_BUFFERED_MIN,		/* size_t */
+	FI_OPT_BUFFERED_LIMIT,		/* size_t */
+	FI_OPT_SEND_BUF_SIZE,
+	FI_OPT_RECV_BUF_SIZE,
+	FI_OPT_TX_SIZE,
+	FI_OPT_RX_SIZE,
 };
 
 struct fi_ops_ep {
@@ -105,6 +111,7 @@ struct fi_ops_cm;
 struct fi_ops_rma;
 struct fi_ops_tagged;
 struct fi_ops_atomic;
+struct fi_ops_collective;
 
 /*
  * Calls which modify the properties of a endpoint (control, setopt, bind, ...)
@@ -123,6 +130,7 @@ struct fid_ep {
 	struct fi_ops_rma	*rma;
 	struct fi_ops_tagged	*tagged;
 	struct fi_ops_atomic	*atomic;
+	struct fi_ops_collective *collective;
 };
 
 struct fid_pep {
@@ -217,17 +225,17 @@ static inline int fi_ep_alias(struct fid_ep *ep, struct fid_ep **alias_ep,
 }
 
 static inline int
-fi_tx_context(struct fid_ep *ep, int index, struct fi_tx_attr *attr,
+fi_tx_context(struct fid_ep *ep, int idx, struct fi_tx_attr *attr,
 	      struct fid_ep **tx_ep, void *context)
 {
-	return ep->ops->tx_ctx(ep, index, attr, tx_ep, context);
+	return ep->ops->tx_ctx(ep, idx, attr, tx_ep, context);
 }
 
 static inline int
-fi_rx_context(struct fid_ep *ep, int index, struct fi_rx_attr *attr,
+fi_rx_context(struct fid_ep *ep, int idx, struct fi_rx_attr *attr,
 	      struct fid_ep **rx_ep, void *context)
 {
-	return ep->ops->rx_ctx(ep, index, attr, rx_ep, context);
+	return ep->ops->rx_ctx(ep, idx, attr, rx_ep, context);
 }
 
 static inline FI_DEPRECATED_FUNC ssize_t

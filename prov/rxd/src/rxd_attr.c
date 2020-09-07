@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2017 Intel Corporation. All rights reserved.
+ * Copyright (c) 2015-2018 Intel Corporation. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -32,21 +32,30 @@
 
 #include "rxd.h"
 
-#define RXD_EP_CAPS (FI_MSG | FI_TAGGED | FI_DIRECTED_RECV |	\
-		     FI_RECV | FI_SEND | FI_SOURCE)
+#define RXD_TX_CAPS (OFI_TX_MSG_CAPS | FI_TAGGED | OFI_TX_RMA_CAPS | FI_ATOMICS)
+#define RXD_RX_CAPS (FI_SOURCE | FI_RMA_EVENT | OFI_RX_MSG_CAPS | FI_TAGGED | \
+		     OFI_RX_RMA_CAPS | FI_ATOMICS | FI_DIRECTED_RECV | FI_MULTI_RECV)
+#define RXD_TX_OP_FLAGS (FI_INJECT | FI_INJECT_COMPLETE | FI_COMPLETION	|   \
+			 FI_TRANSMIT_COMPLETE | FI_DELIVERY_COMPLETE)
+#define RXD_RX_OP_FLAGS (FI_MULTI_RECV | FI_COMPLETION)
+#define RXD_DOMAIN_CAPS (FI_LOCAL_COMM | FI_REMOTE_COMM)
 
 struct fi_tx_attr rxd_tx_attr = {
-	.caps = RXD_EP_CAPS,
-	.comp_order = FI_ORDER_STRICT,
-	.inject_size = 0,
+	.caps = RXD_TX_CAPS,
+	.op_flags = RXD_TX_OP_FLAGS,
+	.comp_order = FI_ORDER_NONE,
+	.msg_order = FI_ORDER_SAS,
+	.inject_size = RXD_MAX_MTU_SIZE - sizeof(struct rxd_base_hdr),
 	.size = (1ULL << RXD_MAX_TX_BITS),
 	.iov_limit = RXD_IOV_LIMIT,
-	.rma_iov_limit = 0,
+	.rma_iov_limit = RXD_IOV_LIMIT,
 };
 
 struct fi_rx_attr rxd_rx_attr = {
-	.caps = RXD_EP_CAPS,
-	.comp_order = FI_ORDER_STRICT,
+	.caps = RXD_RX_CAPS,
+	.op_flags = RXD_RX_OP_FLAGS,
+	.comp_order = FI_ORDER_NONE,
+	.msg_order = FI_ORDER_SAS,
 	.total_buffered_recv = 0,
 	.size = (1ULL << RXD_MAX_RX_BITS),
 	.iov_limit = RXD_IOV_LIMIT
@@ -58,15 +67,21 @@ struct fi_ep_attr rxd_ep_attr = {
 	.protocol_version = 1,
 	.max_msg_size = SIZE_MAX,
 	.tx_ctx_cnt = 1,
-	.rx_ctx_cnt = 1
+	.rx_ctx_cnt = 1,
+	.max_order_raw_size = SIZE_MAX,
+	.max_order_waw_size = SIZE_MAX,
+	.mem_tag_format = FI_TAG_GENERIC,
 };
 
 struct fi_domain_attr rxd_domain_attr = {
+	.caps = RXD_DOMAIN_CAPS,
 	.threading = FI_THREAD_SAFE,
 	.control_progress = FI_PROGRESS_MANUAL,
 	.data_progress = FI_PROGRESS_MANUAL,
 	.resource_mgmt = FI_RM_ENABLED,
 	.av_type = FI_AV_UNSPEC,
+	.mr_mode = FI_MR_BASIC | FI_MR_SCALABLE,
+	.cq_data_size = sizeof_field(struct rxd_data_hdr, cq_data),
 	.mr_key_size = sizeof(uint64_t),
 	.cq_cnt = 128,
 	.ep_cnt = 128,
@@ -78,12 +93,12 @@ struct fi_domain_attr rxd_domain_attr = {
 };
 
 struct fi_fabric_attr rxd_fabric_attr = {
-	.prov_version = FI_VERSION(RXD_MAJOR_VERSION, RXD_MINOR_VERSION),
+	.prov_version = OFI_VERSION_DEF_PROV,
 };
 
 struct fi_info rxd_info = {
-	.caps = RXD_EP_CAPS,
-	.addr_format = FI_SOCKADDR,
+	.caps = RXD_DOMAIN_CAPS | RXD_TX_CAPS | RXD_RX_CAPS,
+	.addr_format = FI_FORMAT_UNSPEC,
 	.tx_attr = &rxd_tx_attr,
 	.rx_attr = &rxd_rx_attr,
 	.ep_attr = &rxd_ep_attr,

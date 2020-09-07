@@ -81,17 +81,21 @@ int fi_cntr_wait(struct fid_cntr *cntr, uint64_t threshold,
 
 Counters record the number of requested operations that have
 completed.  Counters can provide a light-weight completion mechanism
-by suppressing the generation of a full completion event.  They are
+by allowing the suppression of CQ completion entries.  They are
 useful for applications that only need to know the number of requests
 that have completed, and not details about each request.  For example,
 counters may be useful for implementing credit based flow control or
-tracking the number of remote processes which have responded to a
+tracking the number of remote processes that have responded to a
 request.
 
 Counters typically only count successful completions.  However, if an
 operation completes in error, it may increment an associated error
 value.  That is, a counter actually stores two distinct values, with
 error completions updating an error specific value.
+
+Counters are updated following the completion event semantics defined
+in [`fi_cq`(3)](fi_cq.3.html).  The timing of the update is based
+on the type of transfer and any specified operation flags.
 
 ## fi_cntr_open
 
@@ -127,8 +131,8 @@ struct fi_cntr_attr {
   object associated with a counter, in order to use it in other system
   calls.  The following values may be used to specify the type of wait
   object associated with a counter: FI_WAIT_NONE, FI_WAIT_UNSPEC,
-  FI_WAIT_SET, FI_WAIT_FD, and FI_WAIT_MUTEX_COND.  The default is
-  FI_WAIT_NONE.
+  FI_WAIT_SET, FI_WAIT_FD, FI_WAIT_MUTEX_COND, and FI_WAIT_YIELD. 
+  The default is FI_WAIT_NONE.
 
 - *FI_WAIT_NONE*
 : Used to indicate that the user will not block (wait) for events on
@@ -156,6 +160,10 @@ struct fi_cntr_attr {
 - *FI_WAIT_MUTEX_COND*
 : Specifies that the counter should use a pthread mutex and cond
   variable as a wait object.
+
+- *FI_WAIT_YIELD*
+: Indicates that the counter will wait without a wait object but instead
+  yield on every wait. Allows usage of fi_cntr_wait through a spin.
 
 *wait_set*
 : If wait_obj is FI_WAIT_SET, this field references a wait object to
@@ -258,8 +266,15 @@ counter values (e.g. fi_cntr_set or fi_cntr_add) may not be immediately
 visible to counter read operations (i.e. fi_cntr_read or fi_cntr_readerr).
 A small, but undefined, delay may occur between the counter changing and
 the reported value being updated.  However, a final updated value will
-eventually be reflected in the read counter value, with the order of the
-updates maintained.
+eventually be reflected in the read counter value.
+
+Additionally, applications should ensure that the value of a counter is
+stable and not subject to change prior to calling fi_cntr_set
+or fi_cntr_seterr.  Otherwise, the resulting value of the counter after
+fi_cntr_set / fi_cntr_seterr is undefined, as updates to the counter may
+be lost.  A counter value is considered stable if all previous
+updates using fi_cntr_set / fi_cntr_seterr and results of related operations
+are reflected in the observed value of the counter.
 
 # SEE ALSO
 

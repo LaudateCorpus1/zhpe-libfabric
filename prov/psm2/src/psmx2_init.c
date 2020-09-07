@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2018 Intel Corporation. All rights reserved.
+ * Copyright (c) 2013-2019 Intel Corporation. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -30,8 +30,8 @@
  * SOFTWARE.
  */
 
-#include "psmx2.h"
 #include "ofi_prov.h"
+#include "psmx2.h"
 #include <glob.h>
 #include <dlfcn.h>
 
@@ -39,18 +39,18 @@ static int psmx2_init_count = 0;
 static int psmx2_lib_initialized = 0;
 static pthread_mutex_t psmx2_lib_mutex;
 
+struct psmx2_hfi_info psmx2_hfi_info;
+
 struct psmx2_env psmx2_env = {
 	.name_server	= 1,
 	.tagged_rma	= 1,
 	.uuid		= PSMX2_DEFAULT_UUID,
 	.delay		= 0,
 	.timeout	= 5,
+	.conn_timeout	= 5,
 	.prog_interval	= -1,
 	.prog_affinity	= NULL,
 	.multi_ep	= 0,
-	.max_trx_ctxt	= 1,
-	.free_trx_ctxt	= 1,
-	.num_devunits	= 1,
 	.inject_size	= 64,
 	.lock_level	= 2,
 	.lazy_conn	= 0,
@@ -70,7 +70,7 @@ int	 psmx2_tag_layout_locked = 0;
 
 static void psmx2_init_env(void)
 {
-	if (getenv("OMPI_COMM_WORLD_RANK") || getenv("PMI_RANK"))
+	if (getenv("OMPI_COMM_WORLD_RANK") || getenv("PMI_RANK") || getenv("PMIX_RANK"))
 		psmx2_env.name_server = 0;
 
 	fi_param_get_bool(&psmx2_prov, "name_server", &psmx2_env.name_server);
@@ -78,6 +78,7 @@ static void psmx2_init_env(void)
 	fi_param_get_str(&psmx2_prov, "uuid", &psmx2_env.uuid);
 	fi_param_get_int(&psmx2_prov, "delay", &psmx2_env.delay);
 	fi_param_get_int(&psmx2_prov, "timeout", &psmx2_env.timeout);
+	fi_param_get_int(&psmx2_prov, "conn_timeout", &psmx2_env.conn_timeout);
 	fi_param_get_int(&psmx2_prov, "prog_interval", &psmx2_env.prog_interval);
 	fi_param_get_str(&psmx2_prov, "prog_affinity", &psmx2_env.prog_affinity);
 	fi_param_get_int(&psmx2_prov, "inject_size", &psmx2_env.inject_size);
@@ -188,6 +189,7 @@ static int psmx2_init_lib(void)
 {
 	int major, minor;
 	int ret = 0, err;
+	glob_t glob_buf;
 
 	if (psmx2_lib_initialized)
 		return 0;
@@ -196,6 +198,24 @@ static int psmx2_init_lib(void)
 
 	if (psmx2_lib_initialized)
 		goto out;
+
+	/*
+	* psm2_init() may wait for 15 seconds before return
+	* when /dev/hfi[0-9]_0 is not present. Check the existence of any hfi
+	* device interface first to avoid this delay. Note that the devices
+	* don't necessarily appear consecutively so we need to check all
+	* possible device names before returning "no device found" error.
+	* This also means if "/dev/hfi[0-9]_0" doesn't exist but other devices
+	* exist, we are still going to see the delay; but that's a rare case.
+	*/
+	if ((glob("/dev/hfi[0-9]_[0-9]", 0, NULL, &glob_buf) != 0) &&
+		(glob("/dev/hfi[0-9]_[0-9][0-9]", GLOB_APPEND, NULL, &glob_buf) != 0)) {
+		FI_INFO(&psmx2_prov, FI_LOG_CORE,
+			"no hfi device is found.\n");
+		ret = -FI_ENODEV;
+		goto out;
+	}
+	globfree(&glob_buf);
 
 	/* turn on multi-ep feature, but don't overwrite existing setting */
 	setenv("PSM2_MULTI_EP", "1", 0);
@@ -231,6 +251,7 @@ out:
 }
 
 #define PSMX2_SYSFS_PATH "/sys/class/infiniband/hfi1"
+#if !HAVE_PSM2_INFO_QUERY
 static int psmx2_read_sysfs_int(int unit, char *entry)
 {
 	char path[64];
@@ -252,21 +273,42 @@ static int psmx2_unit_active(int unit)
 {
 	return (4 == psmx2_read_sysfs_int(unit, "ports/1/state"));
 }
+#endif
 
-#define PSMX2_MAX_UNITS	4
-static int psmx2_active_units[PSMX2_MAX_UNITS];
-static int psmx2_num_active_units;
-
-static void psmx2_update_hfi_info(void)
+static int psmx2_update_hfi_info(void)
 {
-	int i;
+	unsigned short i;
 	int nctxts = 0;
 	int nfreectxts = 0;
 	int hfi_unit = -1;
 	int multirail = 0;
 	char *s;
+	char unit_name[8];
+	uint32_t cnt = 0;
+	int tmp_nctxts, tmp_nfreectxts;
 
-	assert(psmx2_env.num_devunits <= PSMX2_MAX_UNITS);
+#if HAVE_PSM2_INFO_QUERY
+	int unit_active;
+	int ret;
+	psm2_info_query_arg_t args[1];
+#endif
+
+	if (psmx2_hfi_info.num_units > 0)
+		return 0;
+
+#if HAVE_PSM2_INFO_QUERY
+	if (psm2_info_query(PSM2_INFO_QUERY_NUM_UNITS, &cnt, 0, NULL) || !cnt)
+#else
+	if (psm2_ep_num_devunits(&cnt) || !cnt)
+#endif
+	{
+		FI_INFO(&psmx2_prov, FI_LOG_CORE,
+			"no PSM2 device is found.\n");
+		return -FI_ENODEV;
+	}
+	psmx2_hfi_info.num_units = cnt;
+
+	assert(psmx2_hfi_info.num_units <= PSMX2_MAX_UNITS);
 
 	s = getenv("HFI_UNIT");
 	if (s)
@@ -276,8 +318,50 @@ static void psmx2_update_hfi_info(void)
 	if (s)
 		multirail = atoi(s);
 
-	psmx2_num_active_units = 0;
-	for (i = 0; i < psmx2_env.num_devunits; i++) {
+	psmx2_hfi_info.num_active_units = 0;
+	for (i = 0; i < psmx2_hfi_info.num_units; i++) {
+#if HAVE_PSM2_INFO_QUERY
+		args[0].unit = i;
+		ret = psm2_info_query(PSM2_INFO_QUERY_UNIT_STATUS, &unit_active, 1, args);
+		if (ret != PSM2_OK) {
+			FI_WARN(&psmx2_prov, FI_LOG_CORE,
+				"Failed to check active state of HFI unit %d\n",
+				i);
+			continue;
+		}
+
+		if (!unit_active) {
+			FI_WARN(&psmx2_prov, FI_LOG_CORE,
+				"HFI unit %d STATE = INACTIVE\n",
+				i);
+			continue;
+		}
+
+		if (hfi_unit >=0 && i != hfi_unit) {
+			FI_INFO(&psmx2_prov, FI_LOG_CORE,
+				"hfi %d skipped: HFI_UNIT=%d\n",
+				i, hfi_unit);
+			continue;
+		}
+
+		if (PSM2_OK != psm2_info_query(PSM2_INFO_QUERY_NUM_FREE_CONTEXTS,
+						&tmp_nfreectxts, 1, args) || (tmp_nfreectxts < 0))
+		{
+			FI_WARN(&psmx2_prov, FI_LOG_CORE,
+				"Failed to read number of free contexts from HFI unit %d\n",
+				i);
+			continue;
+		}
+
+		if (PSM2_OK != psm2_info_query(PSM2_INFO_QUERY_NUM_CONTEXTS,
+						&tmp_nctxts, 1, args) || (tmp_nctxts < 0))
+		{
+			FI_WARN(&psmx2_prov, FI_LOG_CORE,
+				"Failed to read number of contexts from HFI unit %d\n",
+				i);
+			continue;
+		}
+#else
 		if (!psmx2_unit_active(i)) {
 			FI_INFO(&psmx2_prov, FI_LOG_CORE,
 				"hfi %d skipped: inactive\n", i);
@@ -291,9 +375,22 @@ static void psmx2_update_hfi_info(void)
 			continue;
 		}
 
-		nctxts += psmx2_read_sysfs_int(i, "nctxts");
-		nfreectxts += psmx2_read_sysfs_int(i, "nfreectxts");
-		psmx2_active_units[psmx2_num_active_units++] = i;
+		tmp_nctxts = psmx2_read_sysfs_int(i, "nctxts");
+		tmp_nfreectxts = psmx2_read_sysfs_int(i, "nfreectxts");
+#endif
+
+		nctxts += tmp_nctxts;
+		nfreectxts += tmp_nfreectxts;
+
+		psmx2_hfi_info.unit_is_active[i] = 1;
+		psmx2_hfi_info.unit_nctxts[i] = tmp_nctxts;
+		psmx2_hfi_info.unit_nfreectxts[i] = tmp_nfreectxts;
+		psmx2_hfi_info.active_units[psmx2_hfi_info.num_active_units++] = i;
+
+		sprintf(unit_name, "hfi1_%hu", i);
+		if (psmx2_hfi_info.num_active_units > 1)
+			strcat(psmx2_hfi_info.default_domain_name, ";");
+		strcat(psmx2_hfi_info.default_domain_name, unit_name);
 
 		if (multirail)
 			break;
@@ -302,26 +399,89 @@ static void psmx2_update_hfi_info(void)
 	FI_INFO(&psmx2_prov, FI_LOG_CORE,
 		"hfi1 units: total %d, active %d; "
 		"hfi1 contexts: total %d, free %d\n",
-		psmx2_env.num_devunits, psmx2_num_active_units,
+		psmx2_hfi_info.num_units, psmx2_hfi_info.num_active_units,
 		nctxts, nfreectxts);
 
 	if (psmx2_env.multi_ep) {
-		psmx2_env.max_trx_ctxt = nctxts;
-		psmx2_env.free_trx_ctxt = nfreectxts;
-	} else if (nfreectxts == 0) {
-		psmx2_env.free_trx_ctxt = nfreectxts;
+		psmx2_hfi_info.max_trx_ctxt = nctxts;
+		psmx2_hfi_info.free_trx_ctxt = nfreectxts;
+	} else {
+		psmx2_hfi_info.max_trx_ctxt = 1;
+		psmx2_hfi_info.free_trx_ctxt = (nfreectxts == 0) ? 0 : 1;
 	}
 
 	FI_INFO(&psmx2_prov, FI_LOG_CORE,
 		"Tx/Rx contexts: %d in total, %d available.\n",
-		psmx2_env.max_trx_ctxt, psmx2_env.free_trx_ctxt);
+		psmx2_hfi_info.max_trx_ctxt, psmx2_hfi_info.free_trx_ctxt);
+
+	return 0;
 }
 
 int psmx2_get_round_robin_unit(int idx)
 {
-	return psmx2_num_active_units ?
-			psmx2_active_units[idx % psmx2_num_active_units] :
+	return psmx2_hfi_info.num_active_units ?
+			psmx2_hfi_info.active_units[idx % psmx2_hfi_info.num_active_units] :
 			-1;
+}
+
+static void psmx2_update_hfi_nic_info(struct fi_info *info)
+{
+        char *path;
+	char buffer[80];
+	char *s;
+	ssize_t n;
+	int a, b, c, d;
+	int unit;
+
+	for ( ; info; info = info->next) {
+		unit = ((struct psmx2_ep_name *)info->src_addr)->unit;
+
+		if (unit == PSMX2_DEFAULT_UNIT)
+			continue;
+
+		if (!info->nic) {
+			info->nic = ofi_nic_dup(NULL);
+			if (!info->nic) {
+				FI_WARN(&psmx2_prov, FI_LOG_CORE,
+					"Failed to allocate nic info for HFI unit %d\n", unit);
+				continue;
+			}
+		}
+
+		if (asprintf(&path, "%s_%d/%s", PSMX2_SYSFS_PATH, unit, "device") < 0) {
+			FI_WARN(&psmx2_prov, FI_LOG_CORE,
+				"Failed to read nic info for HFI unit %d\n", unit);
+			continue;
+		}
+
+		n = readlink(path, buffer, 80);
+		free(path);
+
+		if (n < 0) {
+			FI_WARN(&psmx2_prov, FI_LOG_CORE,
+				"Failed to read nic info for HFI unit %d\n", unit);
+			continue;
+		}
+
+		buffer[n] = '\0';
+		if ((s = strrchr(buffer, '/')))
+			s++;
+		else
+			s = buffer;
+
+		n = sscanf(s, "%x:%x:%x.%x", &a, &b, &c, &d);
+		if (n < 4) {
+			FI_WARN(&psmx2_prov, FI_LOG_CORE,
+				"Failed to read nic info for HFI unit %d\n", unit);
+			continue;
+		}
+
+		info->nic->bus_attr->bus_type = FI_BUS_PCI;
+		info->nic->bus_attr->attr.pci.domain_id = a;
+		info->nic->bus_attr->attr.pci.bus_id = b;
+		info->nic->bus_attr->attr.pci.device_id = c;
+		info->nic->bus_attr->attr.pci.function_id = d;
+	}
 }
 
 static int psmx2_getinfo(uint32_t api_version, const char *node,
@@ -335,8 +495,6 @@ static int psmx2_getinfo(uint32_t api_version, const char *node,
 	size_t len;
 	void *addr;
 	uint32_t fmt;
-	glob_t glob_buf;
-	uint32_t cnt = 0;
 
 	FI_INFO(&psmx2_prov, FI_LOG_CORE,"\n");
 
@@ -346,32 +504,10 @@ static int psmx2_getinfo(uint32_t api_version, const char *node,
 	if (psmx2_init_lib())
 		goto err_out;
 
-	/*
-	 * psm2_ep_num_devunits() may wait for 15 seconds before return
-	 * when /dev/hfi1_0 is not present. Check the existence of any hfi1
-	 * device interface first to avoid this delay. Note that the devices
-	 * don't necessarily appear consecutively so we need to check all
-	 * possible device names before returning "no device found" error.
-	 * This also means if "/dev/hfi1_0" doesn't exist but other devices
-	 * exist, we are still going to see the delay; but that's a rare case.
-	 */
-	if ((glob("/dev/hfi1_[0-9]", 0, NULL, &glob_buf) != 0) &&
-	    (glob("/dev/hfi1_[0-9][0-9]", GLOB_APPEND, NULL, &glob_buf) != 0)) {
-		FI_INFO(&psmx2_prov, FI_LOG_CORE,
-			"no hfi1 device is found.\n");
+	if (psmx2_update_hfi_info())
 		goto err_out;
-	}
-	globfree(&glob_buf);
 
-	if (psm2_ep_num_devunits(&cnt) || !cnt) {
-		FI_INFO(&psmx2_prov, FI_LOG_CORE,
-			"no PSM2 device is found.\n");
-		goto err_out;
-	}
-	psmx2_env.num_devunits = cnt;
-	psmx2_update_hfi_info();
-
-	if (!psmx2_num_active_units) {
+	if (!psmx2_hfi_info.num_active_units) {
 		FI_INFO(&psmx2_prov, FI_LOG_CORE,
 			"no PSM2 device is active.\n");
 		goto err_out;
@@ -421,6 +557,20 @@ static int psmx2_getinfo(uint32_t api_version, const char *node,
 		}
 	}
 
+	/* Check that the src address contains valid unit */
+	if (src_addr->unit != PSMX2_DEFAULT_UNIT) {
+		if (src_addr->unit < 0 || src_addr->unit > PSMX2_MAX_UNITS) {
+			FI_INFO(&psmx2_prov, FI_LOG_CORE,
+				"invalid source address: unit %d out of range\n", src_addr->unit);
+			goto err_out;
+		}
+		if (!psmx2_hfi_info.unit_is_active[src_addr->unit]) {
+			FI_INFO(&psmx2_prov, FI_LOG_CORE,
+				"invalid source address: unit %d is inactive\n", src_addr->unit);
+			goto err_out;
+		}
+	}
+
 	/* Resovle dest address using "node", "service" pair */
 	if (!dest_addr && node && !(flags & FI_SOURCE)) {
 		psm2_uuid_t uuid;
@@ -451,7 +601,7 @@ static int psmx2_getinfo(uint32_t api_version, const char *node,
 		}
 	}
 
-	/* Update prov info with resovled addresses and environment settings */
+	/* Update prov info with resovled addresses and hfi info */
 	psmx2_update_prov_info(prov_info, src_addr, dest_addr);
 
 	/* Remove prov info that don't match the hints */
@@ -460,7 +610,13 @@ static int psmx2_getinfo(uint32_t api_version, const char *node,
 
 	/* Apply hints to the prov info */
 	psmx2_alter_prov_info(api_version, hints, prov_info);
+
+	/* Set fi_nic struture */
+	psmx2_update_hfi_nic_info(prov_info);
+
 	*info = prov_info;
+	free(src_addr);
+	free(dest_addr);
 	return 0;
 
 err_out:
@@ -495,8 +651,8 @@ static void psmx2_fini(void)
 
 struct fi_provider psmx2_prov = {
 	.name = PSMX2_PROV_NAME,
-	.version = PSMX2_VERSION,
-	.fi_version = PSMX2_VERSION,
+	.version = OFI_VERSION_DEF_PROV,
+	.fi_version = OFI_VERSION_LATEST,
 	.getinfo = psmx2_getinfo,
 	.fabric = psmx2_fabric,
 	.cleanup = psmx2_fini
@@ -506,8 +662,9 @@ PROVIDER_INI
 {
 	FI_INFO(&psmx2_prov, FI_LOG_CORE, "build options: HAVE_PSM2_SRC=%d, "
 			"HAVE_PSM2_AM_REGISTER_HANDLERS_2=%d, "
+			"HAVE_PSM2_MQ_FP_MSG=%d, "
 			"PSMX2_USE_REQ_CONTEXT=%d\n", HAVE_PSM2_SRC,
-			HAVE_PSM2_AM_REGISTER_HANDLERS_2, PSMX2_USE_REQ_CONTEXT);
+			HAVE_PSM2_AM_REGISTER_HANDLERS_2, HAVE_PSM2_MQ_FP_MSG, PSMX2_USE_REQ_CONTEXT);
 
 	fi_param_define(&psmx2_prov, "name_server", FI_PARAM_BOOL,
 			"Whether to turn on the name server or not "
@@ -525,6 +682,9 @@ PROVIDER_INI
 
 	fi_param_define(&psmx2_prov, "timeout", FI_PARAM_INT,
 			"Timeout (seconds) for gracefully closing the PSM2 endpoint");
+
+	fi_param_define(&psmx2_prov, "conn_timeout", FI_PARAM_INT,
+			"Timeout (seconds) for establishing connection between two PSM2 endpoints");
 
 	fi_param_define(&psmx2_prov, "prog_interval", FI_PARAM_INT,
 			"Interval (microseconds) between progress calls made in the "
@@ -546,7 +706,7 @@ PROVIDER_INI
 			"How internal locking is used. 0 means no locking. (default: 2).");
 
 	fi_param_define(&psmx2_prov, "lazy_conn", FI_PARAM_BOOL,
-			"Whether to use lazy connection or not (default: no).");
+			"Whether to force lazy connection mode. (default: no).");
 
 	fi_param_define(&psmx2_prov, "disconnect", FI_PARAM_BOOL,
 			"Whether to issue disconnect request when process ends (default: no).");

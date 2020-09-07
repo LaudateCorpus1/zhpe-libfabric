@@ -76,7 +76,6 @@ extern struct fi_provider psmx_prov;
 
 extern int psmx_am_compat_mode;
 
-#define PSMX_VERSION	(FI_VERSION(1, 6))
 
 #define PSMX_OP_FLAGS	(FI_INJECT | FI_MULTI_RECV | FI_COMPLETION | \
 			 FI_TRIGGER | FI_INJECT_COMPLETE | \
@@ -97,8 +96,8 @@ extern int psmx_am_compat_mode;
 
 #define PSMX_MAX_MSG_SIZE	((0x1ULL << 32) - 1)
 #define PSMX_INJECT_SIZE	(64)
-#define PSMX_MSG_ORDER	(FI_ORDER_SAS | FI_ORDER_RAR | FI_ORDER_RAW | \
-			 FI_ORDER_WAR | FI_ORDER_WAW)
+#define PSMX_MSG_ORDER	(FI_ORDER_SAS | OFI_ORDER_RAR_SET | OFI_ORDER_RAW_SET | \
+			 OFI_ORDER_WAR_SET | OFI_ORDER_WAW_SET)
 #define PSMX_COMP_ORDER	FI_ORDER_NONE
 
 #define PSMX_MSG_BIT	(0x1ULL << 63)

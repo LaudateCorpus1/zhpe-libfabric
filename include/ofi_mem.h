@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2015-2016 Intel Corporation, Inc.  All rights reserved.
+ * Copyright (c) 2018 Amazon.com, Inc. or its affiliates. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -53,6 +54,27 @@
 #   define VALGRIND_MAKE_MEM_DEFINED(addr, len)
 #endif
 
+
+void ofi_mem_init(void);
+void ofi_mem_fini(void);
+
+enum {
+	OFI_PAGE_SIZE,
+	OFI_DEF_HUGEPAGE_SIZE,
+};
+
+extern size_t *page_sizes;
+extern size_t num_page_sizes;
+
+static inline long ofi_get_page_size()
+{
+	return ofi_sysconf(_SC_PAGESIZE);
+}
+ssize_t ofi_get_hugepage_size(void);
+
+size_t ofi_get_mem_size(void);
+
+
 /* We implement memdup to avoid external library dependency */
 static inline void *mem_dup(const void *src, size_t size)
 {
@@ -63,11 +85,33 @@ static inline void *mem_dup(const void *src, size_t size)
 	return dest;
 }
 
+static inline int ofi_str_dup(const char *src, char **dst)
+{
+	if (src) {
+		*dst = strdup(src);
+		if (!*dst)
+			return -FI_ENOMEM;
+	} else {
+		*dst = NULL;
+	}
+	return 0;
+}
 
 /*
  * Buffer pool (free stack) template
  */
 #define FREESTACK_EMPTY	NULL
+
+#define freestack_get_next(user_buf)	((char *)user_buf - sizeof(void *))
+#define freestack_get_user_buf(entry)	((char *)entry + sizeof(void *))
+
+#if ENABLE_DEBUG
+#define freestack_init_next(entry)	*((void **)entry) = NULL
+#define freestack_check_next(entry)	assert(*((void **)entry) == NULL)
+#else
+#define freestack_init_next(entry)
+#define freestack_check_next(entry)
+#endif
 
 #define FREESTACK_HEADER 					\
 	size_t		size;					\
@@ -76,52 +120,72 @@ static inline void *mem_dup(const void *src, size_t size)
 #define freestack_isempty(fs)	((fs)->next == FREESTACK_EMPTY)
 #define freestack_push(fs, p)					\
 do {								\
-	*(void **) p = (fs)->next;				\
-	(fs)->next = p;						\
+	freestack_check_next(freestack_get_next(p));		\
+	*(void **) (freestack_get_next(p)) = (fs)->next;	\
+	(fs)->next = (freestack_get_next(p));			\
 } while (0)
 #define freestack_pop(fs) freestack_pop_impl(fs, (fs)->next)
 
 static inline void* freestack_pop_impl(void *fs, void *fs_next)
 {
-	struct {
+	struct _freestack {
 		FREESTACK_HEADER
-	} *freestack = fs;
+	} *freestack = (struct _freestack *)fs;
 	assert(!freestack_isempty(freestack));
 	freestack->next = *((void **)fs_next);
-	return fs_next;
+	freestack_init_next(fs_next);
+	return freestack_get_user_buf(fs_next);
 }
 
 #define DECLARE_FREESTACK(entrytype, name)			\
+struct name ## _entry {						\
+	void		*next;					\
+	entrytype	buf;					\
+};								\
 struct name {							\
 	FREESTACK_HEADER					\
-	entrytype	buf[];					\
+	struct name ## _entry	entry[];			\
 };								\
 								\
-static inline void name ## _init(struct name *fs, size_t size)	\
+typedef void (*name ## _entry_init_func)(entrytype *buf,	\
+					 void *arg);		\
+								\
+static inline void						\
+name ## _init(struct name *fs, size_t size,			\
+	      name ## _entry_init_func init, void *arg)		\
 {								\
 	ssize_t i;						\
 	assert(size == roundup_power_of_two(size));		\
-	assert(sizeof(fs->buf[0]) >= sizeof(void *));		\
+	assert(sizeof(fs->entry[0].buf) >= sizeof(void *));	\
 	fs->size = size;					\
 	fs->next = FREESTACK_EMPTY;				\
-	for (i = size - 1; i >= 0; i--)				\
-		freestack_push(fs, &fs->buf[i]);		\
+	for (i = size - 1; i >= 0; i--) {			\
+		if (init)					\
+			init(&fs->entry[i].buf, arg);		\
+		freestack_push(fs, &fs->entry[i].buf);		\
+	}							\
 }								\
 								\
-static inline struct name * name ## _create(size_t size)	\
+static inline struct name *					\
+name ## _create(size_t size, name ## _entry_init_func init,	\
+		void *arg)					\
 {								\
 	struct name *fs;					\
-	fs = calloc(1, sizeof(*fs) + sizeof(entrytype) *	\
-		    (roundup_power_of_two(size)));		\
+	fs = (struct name*) calloc(1, sizeof(*fs) +		\
+		       sizeof(struct name ## _entry) *		\
+		       (roundup_power_of_two(size)));		\
 	if (fs)							\
-		name ##_init(fs, roundup_power_of_two(size));	\
+		name ##_init(fs, roundup_power_of_two(size),	\
+			     init, arg);			\
 	return fs;						\
 }								\
 								\
 static inline int name ## _index(struct name *fs,		\
-		entrytype *entry)				\
+				 entrytype *entry)		\
 {								\
-	return (int)(entry - fs->buf);				\
+	return (int)((struct name ## _entry *)			\
+			(freestack_get_next(entry))		\
+			- (struct name ## _entry *)fs->entry);	\
 }								\
 								\
 static inline void name ## _free(struct name *fs)		\
@@ -142,8 +206,10 @@ static inline void name ## _free(struct name *fs)		\
 #define smr_freestack_isempty(fs)	((fs)->next == SMR_FREESTACK_EMPTY)
 #define smr_freestack_push(fs, local_p)				\
 do {								\
-	void *p = (char **) fs->base_addr + ((char **) local_p - (char **) fs); \
-	*(void **) local_p = (fs)->next;				\
+	void *p = (char **) fs->base_addr +			\
+	    ((char **) freestack_get_next(local_p) -		\
+		(char **) fs);					\
+	*(void **) freestack_get_next(local_p) = (fs)->next;	\
 	(fs)->next = p;						\
 } while (0)
 #define smr_freestack_pop(fs) smr_freestack_pop_impl(fs, fs->next)
@@ -152,39 +218,46 @@ static inline void* smr_freestack_pop_impl(void *fs, void *next)
 {
 	void *local;
 
-	struct {
+	struct _freestack {
 		SMR_FREESTACK_HEADER
-	} *freestack = fs;
+	} *freestack = (struct _freestack*) fs;
 	assert(next != NULL);
 
 	local = (char **) fs + ((char **) next -
 		(char **) freestack->base_addr);
-	next = *((void **) local);
-	return local;
+
+	freestack->next = *((void **)local);
+	freestack_init_next(local);
+
+	return freestack_get_user_buf(local);
 }
 
 #define DECLARE_SMR_FREESTACK(entrytype, name)			\
+struct name ## _entry {						\
+	void		*next;					\
+	entrytype	buf;					\
+};								\
 struct name {							\
 	SMR_FREESTACK_HEADER					\
-	entrytype	buf[];					\
+	struct name ## _entry	entry[];			\
 };								\
 								\
 static inline void name ## _init(struct name *fs, size_t size)	\
 {								\
 	ssize_t i;						\
 	assert(size == roundup_power_of_two(size));		\
-	assert(sizeof(fs->buf[0]) >= sizeof(void *));		\
+	assert(sizeof(fs->entry[0].buf) >= sizeof(void *));	\
 	fs->size = size;					\
 	fs->next = SMR_FREESTACK_EMPTY;				\
 	fs->base_addr = fs;					\
 	for (i = size - 1; i >= 0; i--)				\
-		smr_freestack_push(fs, &fs->buf[i]);		\
+		smr_freestack_push(fs, &fs->entry[i].buf);	\
 }								\
 								\
 static inline struct name * name ## _create(size_t size)	\
 {								\
 	struct name *fs;					\
-	fs = calloc(1, sizeof(*fs) + sizeof(entrytype) *	\
+	fs = (struct name*) calloc(1, sizeof(*fs) + sizeof(entrytype) *	\
 		    (roundup_power_of_two(size)));		\
 	if (fs)							\
 		name ##_init(fs, roundup_power_of_two(size));	\
@@ -194,7 +267,9 @@ static inline struct name * name ## _create(size_t size)	\
 static inline int name ## _index(struct name *fs,		\
 		entrytype *entry)				\
 {								\
-	return (int)(entry - fs->buf);				\
+	return (int)((struct name ## _entry *)			\
+			(freestack_get_next(entry))		\
+			- (struct name ## _entry *)fs->entry);	\
 }								\
 								\
 static inline void name ## _free(struct name *fs)		\
@@ -206,147 +281,224 @@ static inline void name ## _free(struct name *fs)		\
 /*
  * Buffer Pool
  */
-struct util_buf_pool;
-typedef int (*util_buf_region_alloc_hndlr) (void *pool_ctx, void *addr, size_t len,
-					    void **context);
-typedef void (*util_buf_region_free_hndlr) (void *pool_ctx, void *context);
 
-struct util_buf_pool {
-	size_t data_sz;
-	size_t entry_sz;
-	size_t max_cnt;
-	size_t chunk_cnt;
-	size_t alignment;
-	size_t num_allocated;
-	struct slist buf_list;
-	struct slist region_list;
-	util_buf_region_alloc_hndlr alloc_hndlr;
-	util_buf_region_free_hndlr free_hndlr;
-	void *ctx;
+enum {
+	OFI_BUFPOOL_INDEXED		= 1 << 1,
+	OFI_BUFPOOL_NO_TRACK		= 1 << 2,
+	OFI_BUFPOOL_HUGEPAGES		= 1 << 3,
 };
 
-struct util_buf_region {
-	struct slist_entry entry;
-	char *mem_region;
-	void *context;
-#if ENABLE_DEBUG
-	size_t num_used;
+struct ofi_bufpool_region;
+
+struct ofi_bufpool_attr {
+	size_t 		size;
+	size_t 		alignment;
+	size_t	 	max_cnt;
+	size_t 		chunk_cnt;
+	int		(*alloc_fn)(struct ofi_bufpool_region *region);
+	void		(*free_fn)(struct ofi_bufpool_region *region);
+	void		(*init_fn)(struct ofi_bufpool_region *region, void *buf);
+	void 		*context;
+	int		flags;
+};
+
+struct ofi_bufpool {
+	union {
+		struct slist		entries;
+		struct dlist_entry	regions;
+	} free_list;
+
+	size_t 				entry_size;
+	size_t 				entry_cnt;
+
+	struct ofi_bufpool_region	**region_table;
+	size_t				region_cnt;
+	size_t				alloc_size;
+	size_t				region_size;
+	struct ofi_bufpool_attr		attr;
+#ifndef NDEBUG
+	size_t 				max_index;
 #endif
 };
 
-struct util_buf_footer {
-	struct util_buf_region *region;
-};
-
-union util_buf {
-	struct slist_entry entry;
-	uint8_t data[0];
-};
-
-/* create buffer pool with alloc/free handlers */
-int util_buf_pool_create_ex(struct util_buf_pool **pool,
-			    size_t size, size_t alignment,
-			    size_t max_cnt, size_t chunk_cnt,
-			    util_buf_region_alloc_hndlr alloc_hndlr,
-			    util_buf_region_free_hndlr free_hndlr,
-			    void *pool_ctx);
-
-/* create buffer pool */
-static inline int util_buf_pool_create(struct util_buf_pool **pool,
-				       size_t size, size_t alignment,
-				       size_t max_cnt, size_t chunk_cnt)
-{
-	return util_buf_pool_create_ex(pool, size, alignment,
-				       max_cnt, chunk_cnt,
-				       NULL, NULL, NULL);
-}
-
-static inline int util_buf_avail(struct util_buf_pool *pool)
-{
-	return !slist_empty(&pool->buf_list);
-}
-
-int util_buf_grow(struct util_buf_pool *pool);
-
-#if ENABLE_DEBUG
-
-void *util_buf_get(struct util_buf_pool *pool);
-void util_buf_release(struct util_buf_pool *pool, void *buf);
-
-#else
-
-static inline void *util_buf_get(struct util_buf_pool *pool)
-{
-	struct slist_entry *entry;
-	entry = slist_remove_head(&pool->buf_list);
-	return entry;
-}
-
-static inline void util_buf_release(struct util_buf_pool *pool, void *buf)
-{
-	union util_buf *util_buf = buf;
-	slist_insert_head(&util_buf->entry, &pool->buf_list);
-}
+struct ofi_bufpool_region {
+	struct dlist_entry		entry;
+	struct dlist_entry 		free_list;
+	char				*alloc_region;
+	char 				*mem_region;
+	size_t				index;
+	void 				*context;
+	struct ofi_bufpool 		*pool;
+	int				flags;
+#ifndef NDEBUG
+	size_t 				use_cnt;
 #endif
+};
 
-static inline void *util_buf_get_ex(struct util_buf_pool *pool, void **context)
+struct ofi_bufpool_hdr {
+	union {
+		struct slist_entry	slist;
+		struct dlist_entry	dlist;
+	} entry;
+	struct ofi_bufpool_region	*region;
+	size_t 				index;
+};
+
+int ofi_bufpool_create_attr(struct ofi_bufpool_attr *attr,
+			    struct ofi_bufpool **buf_pool);
+
+static inline int
+ofi_bufpool_create(struct ofi_bufpool **buf_pool,
+		   size_t size, size_t alignment,
+		   size_t max_cnt, size_t chunk_cnt, int flags)
 {
-	union util_buf *buf;
-	struct util_buf_footer *buf_ftr;
+	struct ofi_bufpool_attr attr = {
+		.size		= size,
+		.alignment 	= alignment,
+		.max_cnt	= max_cnt,
+		.chunk_cnt	= chunk_cnt,
+		.flags		= flags,
+	};
+	return ofi_bufpool_create_attr(&attr, buf_pool);
+}
 
-	buf = util_buf_get(pool);
-	buf_ftr = (struct util_buf_footer *) ((char *) buf + pool->data_sz);
-	assert(context);
-	*context = buf_ftr->region->context;
+void ofi_bufpool_destroy(struct ofi_bufpool *pool);
+
+int ofi_bufpool_grow(struct ofi_bufpool *pool);
+
+static inline struct ofi_bufpool_hdr *ofi_buf_hdr(void *buf)
+{
+	return (struct ofi_bufpool_hdr *)
+		((char *) buf - sizeof(struct ofi_bufpool_hdr));
+}
+
+static inline void *ofi_buf_data(struct ofi_bufpool_hdr *buf_hdr)
+{
+	return buf_hdr + 1;
+}
+
+static inline struct ofi_bufpool_region *ofi_buf_region(void *buf)
+{
+	assert(ofi_buf_hdr(buf)->region);
+	return ofi_buf_hdr(buf)->region;
+}
+
+static inline struct ofi_bufpool *ofi_buf_pool(void *buf)
+{
+	assert(ofi_buf_region(buf)->pool);
+	return ofi_buf_region(buf)->pool;
+}
+
+static inline void ofi_buf_free(void *buf)
+{
+	assert(ofi_buf_region(buf)->use_cnt--);
+	assert(!(ofi_buf_pool(buf)->attr.flags & OFI_BUFPOOL_INDEXED));
+	slist_insert_head(&ofi_buf_hdr(buf)->entry.slist,
+			  &ofi_buf_pool(buf)->free_list.entries);
+}
+
+int ofi_ibuf_is_lower(struct dlist_entry *item, const void *arg);
+int ofi_ibufpool_region_is_lower(struct dlist_entry *item, const void *arg);
+
+static inline void ofi_ibuf_free(void *buf)
+{
+	struct ofi_bufpool_hdr *buf_hdr;
+
+	assert(ofi_buf_pool(buf)->attr.flags & OFI_BUFPOOL_INDEXED);
+	assert(ofi_buf_region(buf)->use_cnt--);
+	buf_hdr = ofi_buf_hdr(buf);
+
+	dlist_insert_order(&buf_hdr->region->free_list,
+			   ofi_ibuf_is_lower, &buf_hdr->entry.dlist);
+
+	if (dlist_empty(&buf_hdr->region->entry)) {
+		dlist_insert_order(&buf_hdr->region->pool->free_list.regions,
+				   ofi_ibufpool_region_is_lower,
+				   &buf_hdr->region->entry);
+	}
+}
+
+static inline size_t ofi_buf_index(void *buf)
+{
+	return ofi_buf_hdr(buf)->index;
+}
+
+static inline void *ofi_bufpool_get_ibuf(struct ofi_bufpool *pool, size_t index)
+{
+	void *buf;
+
+	assert(index < pool->max_index);
+
+	buf = pool->region_table[(size_t)(index / pool->attr.chunk_cnt)]->
+		mem_region + (index % pool->attr.chunk_cnt) * pool->entry_size;
+
 	return buf;
 }
 
-static inline void *util_buf_alloc(struct util_buf_pool *pool)
+static inline int ofi_bufpool_empty(struct ofi_bufpool *pool)
 {
-	if (!util_buf_avail(pool)) {
-		if (util_buf_grow(pool))
-			return NULL;
-	}
-	return util_buf_get(pool);
+	return slist_empty(&pool->free_list.entries);
 }
 
-static inline void *util_buf_alloc_ex(struct util_buf_pool *pool, void **context)
+static inline int ofi_ibufpool_empty(struct ofi_bufpool *pool)
 {
-	union util_buf *buf;
-	struct util_buf_footer *buf_ftr;
+	return dlist_empty(&pool->free_list.regions);
+}
 
-	buf = util_buf_alloc(pool);
+static inline void *ofi_buf_alloc(struct ofi_bufpool *pool)
+{
+	struct ofi_bufpool_hdr *buf_hdr;
+
+	assert(!(pool->attr.flags & OFI_BUFPOOL_INDEXED));
+	if (OFI_UNLIKELY(ofi_bufpool_empty(pool))) {
+		if (ofi_bufpool_grow(pool))
+			return NULL;
+	}
+
+	slist_remove_head_container(&pool->free_list.entries,
+				struct ofi_bufpool_hdr, buf_hdr, entry.slist);
+	assert(++buf_hdr->region->use_cnt);
+	return ofi_buf_data(buf_hdr);
+}
+
+static inline void *ofi_buf_alloc_ex(struct ofi_bufpool *pool,
+				     void **context)
+{
+	void *buf = ofi_buf_alloc(pool);
+
+	assert(context);
 	if (OFI_UNLIKELY(!buf))
 		return NULL;
 
-	buf_ftr = (struct util_buf_footer *) ((char *) buf + pool->data_sz);
-	assert(context);
-	*context = buf_ftr->region->context;
+	*context = ofi_buf_region(buf)->context;
 	return buf;
 }
 
-#if ENABLE_DEBUG
-static inline int util_buf_use_ftr(struct util_buf_pool *pool)
+static inline void *ofi_ibuf_alloc(struct ofi_bufpool *pool)
 {
-	OFI_UNUSED(pool);
-	return 1;
-}
-#else
-static inline int util_buf_use_ftr(struct util_buf_pool *pool)
-{
-	return (pool->alloc_hndlr || pool->free_hndlr) ? 1 : 0;
-}
+	struct ofi_bufpool_hdr *buf_hdr;
+	struct ofi_bufpool_region *buf_region;
+
+	assert(pool->attr.flags & OFI_BUFPOOL_INDEXED);
+	if (OFI_UNLIKELY(ofi_ibufpool_empty(pool))) {
+		if (ofi_bufpool_grow(pool))
+			return NULL;
+	}
+
+	buf_region = container_of(pool->free_list.regions.next,
+				  struct ofi_bufpool_region, entry);
+	dlist_pop_front(&buf_region->free_list, struct ofi_bufpool_hdr,
+			buf_hdr, entry.dlist);
+	assert(++buf_hdr->region->use_cnt);
+
+	if (dlist_empty(&buf_region->free_list))
+		dlist_remove_init(&buf_region->entry);
+#ifndef NDEBUG
+	if (OFI_LIKELY(buf_hdr->index >= pool->max_index))
+		pool->max_index = buf_hdr->index + 1;
 #endif
-
-static inline void *util_buf_get_ctx(struct util_buf_pool *pool, void *buf)
-{
-	struct util_buf_footer *buf_ftr;
-	assert(util_buf_use_ftr(pool));
-	buf_ftr = (struct util_buf_footer *) ((char *) buf + pool->data_sz);
-	return buf_ftr->region->context;
+	return ofi_buf_data(buf_hdr);
 }
-
-void util_buf_pool_destroy(struct util_buf_pool *pool);
 
 
 /*

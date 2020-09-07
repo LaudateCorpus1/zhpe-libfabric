@@ -2,6 +2,7 @@
  * Copyright (c) 2015-2017 Cray Inc. All rights reserved.
  * Copyright (c) 2015-2017 Los Alamos National Security, LLC.
  *                         All rights reserved.
+ * Copyright (c) 2019 Triad National Security, LLC. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -351,6 +352,9 @@ ssize_t _gnix_cq_add_error(struct gnix_fid_cq *cq, void *op_context,
 
 	_gnix_queue_enqueue(cq->errors, &event->item);
 
+	if (cq->wait)
+		_gnix_signal_wait_obj(cq->wait);
+
 err:
 	COND_RELEASE(cq->requires_lock, &cq->lock);
 
@@ -455,7 +459,7 @@ static ssize_t __gnix_cq_readfrom(struct fid_cq *cq, void *buf,
 		assert(event->the_entry);
 		memcpy(buf, event->the_entry, cq_priv->entry_size);
 		if (src_addr)
-			memcpy(src_addr, &event->src_addr, sizeof(fi_addr_t));
+			memcpy(&src_addr[read_count], &event->src_addr, sizeof(fi_addr_t));
 
 		_gnix_queue_enqueue_free(cq_priv->events, &event->item);
 
@@ -582,7 +586,8 @@ DIRECT_FN STATIC ssize_t gnix_cq_readerr(struct fid_cq *cq,
 			if (buf->err_data == NULL)
 				return -FI_EINVAL;
 
-			err_data_cpylen = MIN(buf->err_data_size, sizeof(cq_priv->err_data));
+			err_data_cpylen = MIN(buf->err_data_size,
+						gnix_cq_err->err_data_size);
 			memcpy(buf->err_data, gnix_cq_err->err_data, err_data_cpylen);
 			buf->err_data_size = err_data_cpylen;
 		}

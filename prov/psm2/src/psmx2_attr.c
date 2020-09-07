@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2018 Intel Corporation. All rights reserved.
+ * Copyright (c) 2013-2019 Intel Corporation. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -46,7 +46,7 @@
  */
 
 static struct fi_tx_attr psmx2_tx_attr = {
-	.caps			= PSMX2_CAPS, /* PSMX2_RMA_CAPS */
+	.caps			= PSMX2_TX_CAPS, /* PSMX2_RMA_TX_CAPS */
 	.mode			= FI_CONTEXT, /* 0 */
 	.op_flags		= PSMX2_OP_FLAGS,
 	.msg_order		= PSMX2_MSG_ORDER,
@@ -58,7 +58,7 @@ static struct fi_tx_attr psmx2_tx_attr = {
 };
 
 static struct fi_rx_attr psmx2_rx_attr = {
-	.caps			= PSMX2_CAPS, /* PSMX2_RMA_CAPS */
+	.caps			= PSMX2_RX_CAPS, /* PSMX2_RMA_RX_CAPS */
 	.mode			= FI_CONTEXT, /* 0 */
 	.op_flags		= PSMX2_OP_FLAGS,
 	.msg_order		= PSMX2_MSG_ORDER,
@@ -72,9 +72,9 @@ static struct fi_ep_attr psmx2_ep_attr = {
 	.type			= FI_EP_RDM, /* FI_EP_DGRAM */
 	.protocol		= FI_PROTO_PSMX2,
 	.protocol_version	= PSM2_VERNO,
-	.max_msg_size		= PSMX2_MAX_MSG_SIZE,
+	.max_msg_size		= PSMX2_MAX_MSG_SIZE & ~0x0FFF,
 	.msg_prefix_size	= 0,
-	.max_order_raw_size	= PSMX2_MAX_MSG_SIZE,
+	.max_order_raw_size	= PSMX2_RMA_ORDER_SIZE,
 	.max_order_war_size	= PSMX2_RMA_ORDER_SIZE,
 	.max_order_waw_size	= PSMX2_RMA_ORDER_SIZE,
 	.mem_tag_format		= FI_TAG_GENERIC, /* >>= 4 */
@@ -97,11 +97,11 @@ static struct fi_domain_attr psmx2_domain_attr = {
 	.cq_data_size		= 0, /* 4, 8 */
 	.cq_cnt			= 65535,
 	.ep_cnt			= 65535,
-	.tx_ctx_cnt		= 1, /* psmx2_env.free_trx_ctxt */
-	.rx_ctx_cnt		= 1, /* psmx2_env.free_trx_ctxt */
-	.max_ep_tx_ctx		= 1, /* psmx2_env.max_trx_ctxt */
-	.max_ep_rx_ctx		= 1, /* psmx2_env.max_trx_ctxt */
-	.max_ep_stx_ctx		= 1, /* psmx2_env.max_trx_ctxt */
+	.tx_ctx_cnt		= 1, /* psmx2_hfi_info.free_trx_ctxt */
+	.rx_ctx_cnt		= 1, /* psmx2_hfi_info.free_trx_ctxt */
+	.max_ep_tx_ctx		= 1, /* psmx2_hfi_info.max_trx_ctxt */
+	.max_ep_rx_ctx		= 1, /* psmx2_hfi_info.max_trx_ctxt */
+	.max_ep_stx_ctx		= 1, /* psmx2_hfi_info.max_trx_ctxt */
 	.max_ep_srx_ctx		= 0,
 	.cntr_cnt		= 65535,
 	.mr_iov_limit		= 65535,
@@ -115,7 +115,7 @@ static struct fi_domain_attr psmx2_domain_attr = {
 
 static struct fi_fabric_attr psmx2_fabric_attr = {
 	.name			= PSMX2_FABRIC_NAME,
-	.prov_version		= PSMX2_VERSION,
+	.prov_version		= OFI_VERSION_DEF_PROV,
 };
 
 static struct fi_info psmx2_prov_info = {
@@ -182,7 +182,7 @@ int psmx2_init_prov_info(const struct fi_info *hints, struct fi_info **info)
 	}
 
 	if (hints->domain_attr && hints->domain_attr->name &&
-	    strcasecmp(hints->domain_attr->name, domain_attr->name)) {
+	    strncasecmp(hints->domain_attr->name, domain_attr->name, strlen(PSMX2_DOMAIN_NAME))) {
 		FI_INFO(&psmx2_prov, FI_LOG_CORE, "Unknown domain name\n");
 		FI_INFO_NAME(&psmx2_prov, domain_attr, hints->domain_attr);
 		return -FI_ENODATA;
@@ -244,9 +244,9 @@ alloc_info:
 			info_new->ep_attr->type = ep_type;
 			info_new->caps = PSMX2_RMA_CAPS;
 			info_new->mode = 0;
-			info_new->tx_attr->caps = PSMX2_RMA_CAPS;
+			info_new->tx_attr->caps = PSMX2_RMA_TX_CAPS;
 			info_new->tx_attr->mode = 0;
-			info_new->rx_attr->caps = PSMX2_RMA_CAPS;
+			info_new->rx_attr->caps = PSMX2_RMA_RX_CAPS;
 			info_new->rx_attr->mode = 0;
 			info_new->domain_attr->cq_data_size = 8;
 			info_out = info_new;
@@ -268,17 +268,13 @@ alloc_info:
 			"TAG60 instance included\n");
 	}
 
-	/*
-	 * Special arrangement to help auto tag layout selection.
-	 * See psmx2_alter_prov_info().
-	 */
-	if (!hints || !(hints->caps & FI_REMOTE_CQ_DATA)) {
+	if (!hints || !hints->domain_attr ||
+	    !hints->domain_attr->cq_data_size) {
 		info_new = fi_dupinfo(&psmx2_prov_info);
 		if (info_new) {
 			/* 64 bit tag, no CQ data */
 			info_new->addr_format = addr_format;
 			info_new->ep_attr->type = ep_type;
-			info_new->caps &= ~FI_REMOTE_CQ_DATA;
 			info_new->next = info_out;
 			info_out = info_new;
 			FI_INFO(&psmx2_prov, FI_LOG_CORE,
@@ -304,22 +300,78 @@ static void psmx2_dup_addr(int format, struct psmx2_ep_name *addr,
 	}
 }
 
+static void psmx2_expand_default_unit(struct fi_info *info)
+{
+	struct fi_info *p, *next;
+	struct psmx2_ep_name *src_addr;
+	int i;
+
+	p = info;
+	while (p) {
+		next = p->next;
+		src_addr = p->src_addr;
+		if (src_addr->unit == PSMX2_DEFAULT_UNIT) {
+			if (psmx2_hfi_info.num_active_units == 1) {
+				src_addr->unit = psmx2_hfi_info.active_units[0];
+			} else {
+				for (i = 0; i < psmx2_hfi_info.num_active_units; i++) {
+					p->next = fi_dupinfo(p);
+					if (!p->next) {
+						FI_WARN(&psmx2_prov, FI_LOG_CORE,
+							"Failed to duplicate info for HFI unit %d\n",
+							psmx2_hfi_info.active_units[i]);
+						break;
+					}
+					p = p->next;
+					src_addr = p->src_addr;
+					src_addr->unit = psmx2_hfi_info.active_units[i];
+				}
+			}
+		}
+		p->next = next;
+		p = next;
+	}
+}
+
 void psmx2_update_prov_info(struct fi_info *info,
 			    struct psmx2_ep_name *src_addr,
 			    struct psmx2_ep_name *dest_addr)
 {
-	for ( ; info; info = info->next) {
-		psmx2_dup_addr(info->addr_format, src_addr,
-			       &info->src_addr, &info->src_addrlen);
-		psmx2_dup_addr(info->addr_format, dest_addr,
-			       &info->dest_addr, &info->dest_addrlen);
+	struct fi_info *p;
 
-		info->domain_attr->tx_ctx_cnt = psmx2_env.free_trx_ctxt;
-		info->domain_attr->rx_ctx_cnt = psmx2_env.free_trx_ctxt;
-		info->domain_attr->max_ep_tx_ctx = psmx2_env.max_trx_ctxt;
-		info->domain_attr->max_ep_rx_ctx = psmx2_env.max_trx_ctxt;
-		info->domain_attr->max_ep_stx_ctx = psmx2_env.max_trx_ctxt;
-		info->tx_attr->inject_size = psmx2_env.inject_size;
+	for (p = info; p; p = p->next) {
+		psmx2_dup_addr(p->addr_format, src_addr,
+			       &p->src_addr, &p->src_addrlen);
+		psmx2_dup_addr(p->addr_format, dest_addr,
+			       &p->dest_addr, &p->dest_addrlen);
+	}
+
+	psmx2_expand_default_unit(info);
+
+	for (p = info; p; p = p->next) {
+		int unit = ((struct psmx2_ep_name *)p->src_addr)->unit;
+
+		if (unit == PSMX2_DEFAULT_UNIT || !psmx2_env.multi_ep) {
+			p->domain_attr->tx_ctx_cnt = psmx2_hfi_info.free_trx_ctxt;
+			p->domain_attr->rx_ctx_cnt = psmx2_hfi_info.free_trx_ctxt;
+			p->domain_attr->max_ep_tx_ctx = psmx2_hfi_info.max_trx_ctxt;
+			p->domain_attr->max_ep_rx_ctx = psmx2_hfi_info.max_trx_ctxt;
+			p->domain_attr->max_ep_stx_ctx = psmx2_hfi_info.max_trx_ctxt;
+		} else {
+			p->domain_attr->tx_ctx_cnt = psmx2_hfi_info.unit_nfreectxts[unit];
+			p->domain_attr->rx_ctx_cnt = psmx2_hfi_info.unit_nfreectxts[unit];
+			p->domain_attr->max_ep_tx_ctx = psmx2_hfi_info.unit_nctxts[unit];
+			p->domain_attr->max_ep_rx_ctx = psmx2_hfi_info.unit_nctxts[unit];
+			p->domain_attr->max_ep_stx_ctx = psmx2_hfi_info.unit_nctxts[unit];
+		}
+
+		free(p->domain_attr->name);
+		if (unit == PSMX2_DEFAULT_UNIT)
+			p->domain_attr->name = strdup(psmx2_hfi_info.default_domain_name);
+		else
+			asprintf(&p->domain_attr->name, "hfi1_%d", unit);
+
+		p->tx_attr->inject_size = psmx2_env.inject_size;
 	}
 }
 
@@ -386,18 +438,8 @@ void psmx2_alter_prov_info(uint32_t api_version,
 		if (hints && hints->caps && !(hints->caps & FI_TRIGGER))
 			info->caps &= ~FI_TRIGGER;
 
-		/*
-		 * Special arrangement for auto tag layout selection.
-		 * See psmx2_init_prov_info(). Set this flag to allow
-		 * follow-up fi_getinfo() calls to pick the same tag
-		 * layout by copying caps from this instance without
-		 * setting the cq_data_size field. Notice that the flag
-		 * may be cleared by ofi_alter_info().
-		 */
-		if (info->domain_attr->cq_data_size) {
-			info->caps |= FI_REMOTE_CQ_DATA;
+		if (info->domain_attr->cq_data_size)
 			cq_data_cnt++;
-		}
 
 		cnt++;
 	}

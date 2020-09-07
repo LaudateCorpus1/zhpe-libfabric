@@ -1,7 +1,8 @@
 /*
- * Copyright (c) 2015-2017 Cray Inc. All rights reserved.
+ * Copyright (c) 2015-2019 Cray Inc. All rights reserved.
  * Copyright (c) 2015-2018 Los Alamos National Security, LLC.
  *                         All rights reserved.
+ * Copyright (c) 2019 Triad National Security, LLC. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -2888,6 +2889,8 @@ DIRECT_FN STATIC ssize_t gnix_ep_cancel(fid_t fid, void *context)
 ssize_t gnix_cancel(fid_t fid, void *context)
 {
 	ssize_t ret;
+	struct gnix_fid_ep *ep;
+	struct gnix_fid_trx *trx_ep;
 
 	GNIX_TRACE(FI_LOG_EP_CTRL, "\n");
 
@@ -2896,10 +2899,14 @@ ssize_t gnix_cancel(fid_t fid, void *context)
 		ret = gnix_ep_cancel(fid, context);
 		break;
 
-	/* not supported yet */
 	case FI_CLASS_RX_CTX:
-	case FI_CLASS_SRX_CTX:
 	case FI_CLASS_TX_CTX:
+		trx_ep = container_of(fid, struct gnix_fid_trx, ep_fid);
+		ep = trx_ep->ep;
+		ret = gnix_ep_cancel(&ep->ep_fid.fid, context);
+		break;
+	/* not supported yet */
+	case FI_CLASS_SRX_CTX:
 	case FI_CLASS_STX_CTX:
 		return -FI_ENOENT;
 
@@ -3017,11 +3024,6 @@ DIRECT_FN STATIC int gnix_ep_getopt(fid_t fid, int level, int optname,
 {
 	struct gnix_fid_ep *gnix_ep;
 
-	if (!fid || !optval || !optlen)
-		return -FI_EINVAL;
-	else if (level != FI_OPT_ENDPOINT)
-		return -FI_ENOPROTOOPT;
-
 	gnix_ep = container_of(fid, struct gnix_fid_ep, ep_fid.fid);
 
 	switch (optname) {
@@ -3040,15 +3042,49 @@ DIRECT_FN STATIC int gnix_ep_getopt(fid_t fid, int level, int optname,
 	return 0;
 }
 
+int gnix_getopt(fid_t fid, int level, int optname,
+				    void *optval, size_t *optlen)
+{
+        ssize_t ret;
+        struct gnix_fid_ep *ep;
+        struct gnix_fid_trx *trx_ep;
+
+        GNIX_TRACE(FI_LOG_EP_CTRL, "\n");
+
+	if (!fid || !optval || !optlen)
+		return -FI_EINVAL;
+	else if (level != FI_OPT_ENDPOINT)
+		return -FI_ENOPROTOOPT;
+
+        switch (fid->fclass) {
+        case FI_CLASS_EP:
+                ret = gnix_ep_getopt(fid, level, optname, optval, optlen);
+                break;
+
+        case FI_CLASS_RX_CTX:
+        case FI_CLASS_TX_CTX:
+                trx_ep = container_of(fid, struct gnix_fid_trx, ep_fid);
+                ep = trx_ep->ep;
+                ret = gnix_ep_getopt(&ep->ep_fid.fid, level, optname, optval,
+                        optlen);
+                break;
+        /* not supported yet */
+        case FI_CLASS_SRX_CTX:
+        case FI_CLASS_STX_CTX:
+                return -FI_ENOENT;
+
+        default:
+                GNIX_WARN(FI_LOG_EP_CTRL, "Invalid fid type\n");
+                return -FI_EINVAL;
+        }
+
+        return ret;
+}
+
 DIRECT_FN STATIC int gnix_ep_setopt(fid_t fid, int level, int optname,
 				    const void *optval, size_t optlen)
 {
 	struct gnix_fid_ep *gnix_ep;
-
-	if (!fid || !optval)
-		return -FI_EINVAL;
-	else if (level != FI_OPT_ENDPOINT)
-		return -FI_ENOPROTOOPT;
 
 	gnix_ep = container_of(fid, struct gnix_fid_ep, ep_fid.fid);
 
@@ -3057,7 +3093,7 @@ DIRECT_FN STATIC int gnix_ep_setopt(fid_t fid, int level, int optname,
 		if (optlen != sizeof(size_t))
 			return -FI_EINVAL;
 		/*
-		 * see issue 1120
+		 * see https://github.com/ofi-cray/libfabric-cray/issues/1120
 		 */
 		if (*(size_t *)optval == 0UL)
 			return -FI_EINVAL;
@@ -3068,6 +3104,45 @@ DIRECT_FN STATIC int gnix_ep_setopt(fid_t fid, int level, int optname,
 	}
 
 	return 0;
+}
+
+int gnix_setopt(fid_t fid, int level, int optname,
+				    const void *optval, size_t optlen)
+{
+        ssize_t ret;
+        struct gnix_fid_ep *ep;
+        struct gnix_fid_trx *trx_ep;
+
+        GNIX_TRACE(FI_LOG_EP_CTRL, "\n");
+
+	if (!fid || !optval)
+		return -FI_EINVAL;
+	else if (level != FI_OPT_ENDPOINT)
+		return -FI_ENOPROTOOPT;
+
+        switch (fid->fclass) {
+        case FI_CLASS_EP:
+                ret = gnix_ep_setopt(fid, level, optname, optval, optlen);
+                break;
+
+        case FI_CLASS_RX_CTX:
+        case FI_CLASS_TX_CTX:
+                trx_ep = container_of(fid, struct gnix_fid_trx, ep_fid);
+                ep = trx_ep->ep;
+                ret = gnix_ep_setopt(&ep->ep_fid.fid, level, optname, optval,
+                        optlen);
+                break;
+        /* not supported yet */
+        case FI_CLASS_SRX_CTX:
+        case FI_CLASS_STX_CTX:
+                return -FI_ENOENT;
+
+        default:
+                GNIX_WARN(FI_LOG_EP_CTRL, "Invalid fid type\n");
+                return -FI_EINVAL;
+        }
+
+        return ret;
 }
 
 DIRECT_FN STATIC ssize_t gnix_ep_rx_size_left(struct fid_ep *ep)
@@ -3160,8 +3235,8 @@ static struct fi_ops gnix_ep_fi_ops = {
 static struct fi_ops_ep gnix_ep_ops = {
 	.size = sizeof(struct fi_ops_ep),
 	.cancel = gnix_cancel,
-	.getopt = gnix_ep_getopt,
-	.setopt = gnix_ep_setopt,
+	.getopt = gnix_getopt,
+	.setopt = gnix_setopt,
 	.tx_ctx = fi_no_tx_ctx,
 	.rx_ctx = fi_no_rx_ctx,
 	.rx_size_left = gnix_ep_rx_size_left,

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2018 Intel Corporation. All rights reserved.
+ * Copyright (c) 2013-2019 Intel Corporation. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -44,7 +44,6 @@ ssize_t psmx2_recv_generic(struct fid_ep *ep, void *buf, size_t len,
 	psm2_mq_tag_t psm2_tag, psm2_tagsel;
 	struct fi_context *fi_context;
 	int recv_flag = 0;
-	size_t idx;
 	int err;
 	int enable_completion;
 
@@ -56,17 +55,8 @@ ssize_t psmx2_recv_generic(struct fid_ep *ep, void *buf, size_t len,
 
 	if ((ep_priv->caps & FI_DIRECTED_RECV) && src_addr != FI_ADDR_UNSPEC) {
 		av = ep_priv->av;
-		if (av && PSMX2_SEP_ADDR_TEST(src_addr)) {
-			psm2_epaddr = psmx2_av_translate_sep(av, ep_priv->rx, src_addr);
-		} else if (av && av->type == FI_AV_TABLE) {
-			idx = (size_t)src_addr;
-			if ((err = psmx2_av_check_table_idx(av, ep_priv->rx, idx)))
-				return err;
-
-			psm2_epaddr = av->tables[ep_priv->rx->id].epaddrs[idx];
-		} else {
-			psm2_epaddr = PSMX2_ADDR_TO_EP(src_addr);
-		}
+		assert(av);
+		psm2_epaddr = psmx2_av_translate_addr(av, ep_priv->rx, src_addr, av->type);
 	} else {
 		psm2_epaddr = 0;
 	}
@@ -136,7 +126,8 @@ ssize_t psmx2_recv_generic(struct fid_ep *ep, void *buf, size_t len,
 	return 0;
 }
 
-static ssize_t psmx2_recv(struct fid_ep *ep, void *buf, size_t len,
+DIRECT_FN
+STATIC ssize_t psmx2_recv(struct fid_ep *ep, void *buf, size_t len,
 			  void *desc, fi_addr_t src_addr, void *context)
 {
 	struct psmx2_fid_ep *ep_priv;
@@ -147,7 +138,8 @@ static ssize_t psmx2_recv(struct fid_ep *ep, void *buf, size_t len,
 				  ep_priv->rx_flags);
 }
 
-static ssize_t psmx2_recvmsg(struct fid_ep *ep, const struct fi_msg *msg,
+DIRECT_FN
+STATIC ssize_t psmx2_recvmsg(struct fid_ep *ep, const struct fi_msg *msg,
 			     uint64_t flags)
 {
 	void *buf;
@@ -170,7 +162,8 @@ static ssize_t psmx2_recvmsg(struct fid_ep *ep, const struct fi_msg *msg,
 				  msg->addr, msg->context, flags);
 }
 
-static ssize_t psmx2_recvv(struct fid_ep *ep, const struct iovec *iov,
+DIRECT_FN
+STATIC ssize_t psmx2_recvv(struct fid_ep *ep, const struct iovec *iov,
 			   void **desc, size_t count, fi_addr_t src_addr,
 			   void *context)
 {
@@ -204,7 +197,6 @@ ssize_t psmx2_send_generic(struct fid_ep *ep, const void *buf, size_t len,
 	struct fi_context * fi_context;
 	int send_flag = 0;
 	int err;
-	size_t idx;
 	int no_completion = 0;
 	struct psmx2_cq_event *event;
 	int have_data = (flags & FI_REMOTE_CQ_DATA) > 0;
@@ -216,19 +208,13 @@ ssize_t psmx2_send_generic(struct fid_ep *ep, const void *buf, size_t len,
 						context, flags, data);
 
 	av = ep_priv->av;
-	if (av && PSMX2_SEP_ADDR_TEST(dest_addr)) {
-		psm2_epaddr = psmx2_av_translate_sep(av, ep_priv->tx, dest_addr);
-	} else if (av && av->type == FI_AV_TABLE) {
-		idx = (size_t)dest_addr;
-		if ((err = psmx2_av_check_table_idx(av, ep_priv->tx, idx)))
-			return err;
+	assert(av);
+	psm2_epaddr = psmx2_av_translate_addr(av, ep_priv->tx, dest_addr, av->type);
 
-		psm2_epaddr = av->tables[ep_priv->tx->id].epaddrs[idx];
-	} else  {
-		psm2_epaddr = PSMX2_ADDR_TO_EP(dest_addr);
-	}
-
-	PSMX2_SET_TAG(psm2_tag, 0, data, PSMX2_TYPE_MSG | PSMX2_IMM_BIT_SET(have_data));
+	if (have_data)
+		PSMX2_SET_TAG(psm2_tag, 0, data, PSMX2_TYPE_MSG | PSMX2_IMM_BIT);
+	else
+		PSMX2_SET_TAG(psm2_tag, 0, ep_priv->sep_id, PSMX2_TYPE_MSG);
 
 	if ((flags & PSMX2_NO_COMPLETION) ||
 	    (ep_priv->send_selective_completion && !(flags & FI_COMPLETION)))
@@ -301,7 +287,6 @@ ssize_t psmx2_sendv_generic(struct fid_ep *ep, const struct iovec *iov,
 	struct fi_context * fi_context;
 	int send_flag = 0;
 	int err;
-	size_t idx;
 	int no_completion = 0;
 	struct psmx2_cq_event *event;
 	size_t real_count;
@@ -337,8 +322,6 @@ ssize_t psmx2_sendv_generic(struct fid_ep *ep, const struct iovec *iov,
 	if (!req)
 		return -FI_ENOMEM;
 
-	PSMX2_STATUS_INIT(req->status);
-
 	if (total_len <= PSMX2_IOV_BUF_SIZE) {
 		req->iov_protocol = PSMX2_IOV_PROTO_PACK;
 		p = req->buf;
@@ -370,24 +353,15 @@ ssize_t psmx2_sendv_generic(struct fid_ep *ep, const struct iovec *iov,
 	}
 
 	av = ep_priv->av;
-	if (av && PSMX2_SEP_ADDR_TEST(dest_addr)) {
-		psm2_epaddr = psmx2_av_translate_sep(av, ep_priv->tx, dest_addr);
-	} else if (av && av->type == FI_AV_TABLE) {
-		idx = (size_t)dest_addr;
-		if ((err = psmx2_av_check_table_idx(av, ep_priv->tx, idx))) {
-			free(req);
-			return err;
-		}
+	assert(av);
+	psm2_epaddr = psmx2_av_translate_addr(av, ep_priv->tx, dest_addr, av->type);
 
-		psm2_epaddr = av->tables[ep_priv->tx->id].epaddrs[idx];
-	} else  {
-		psm2_epaddr = PSMX2_ADDR_TO_EP(dest_addr);
-	}
-
-	if (flags & FI_REMOTE_CQ_DATA)
+	if (flags & FI_REMOTE_CQ_DATA) {
 		msg_flags |= PSMX2_IMM_BIT;
-
-	PSMX2_SET_TAG(psm2_tag, 0ULL, data, msg_flags);
+		PSMX2_SET_TAG(psm2_tag, 0ULL, data, msg_flags);
+	} else {
+		PSMX2_SET_TAG(psm2_tag, 0ULL, ep_priv->sep_id, msg_flags);
+	}
 
 	if ((flags & PSMX2_NO_COMPLETION) ||
 	    (ep_priv->send_selective_completion && !(flags & FI_COMPLETION)))
@@ -564,7 +538,8 @@ int psmx2_handle_sendv_req(struct psmx2_fid_ep *ep,
 	return 0;
 }
 
-static ssize_t psmx2_send(struct fid_ep *ep, const void *buf, size_t len,
+DIRECT_FN
+STATIC ssize_t psmx2_send(struct fid_ep *ep, const void *buf, size_t len,
 			  void *desc, fi_addr_t dest_addr, void *context)
 {
 	struct psmx2_fid_ep *ep_priv;
@@ -575,7 +550,8 @@ static ssize_t psmx2_send(struct fid_ep *ep, const void *buf, size_t len,
 				  ep_priv->tx_flags, 0);
 }
 
-static ssize_t psmx2_sendmsg(struct fid_ep *ep, const struct fi_msg *msg,
+DIRECT_FN
+STATIC ssize_t psmx2_sendmsg(struct fid_ep *ep, const struct fi_msg *msg,
 			     uint64_t flags)
 {
 	void *buf;
@@ -604,7 +580,8 @@ static ssize_t psmx2_sendmsg(struct fid_ep *ep, const struct fi_msg *msg,
 				  msg->data);
 }
 
-static ssize_t psmx2_sendv(struct fid_ep *ep, const struct iovec *iov,
+DIRECT_FN
+STATIC ssize_t psmx2_sendv(struct fid_ep *ep, const struct iovec *iov,
 			   void **desc, size_t count, fi_addr_t dest_addr,
 			   void *context)
 {
@@ -632,7 +609,8 @@ static ssize_t psmx2_sendv(struct fid_ep *ep, const struct iovec *iov,
 			  dest_addr, context);
 }
 
-static ssize_t psmx2_inject(struct fid_ep *ep, const void *buf, size_t len,
+DIRECT_FN
+STATIC ssize_t psmx2_inject(struct fid_ep *ep, const void *buf, size_t len,
 			    fi_addr_t dest_addr)
 {
 	struct psmx2_fid_ep *ep_priv;
@@ -644,7 +622,8 @@ static ssize_t psmx2_inject(struct fid_ep *ep, const void *buf, size_t len,
 				  0);
 }
 
-static ssize_t psmx2_senddata(struct fid_ep *ep, const void *buf, size_t len,
+DIRECT_FN
+STATIC ssize_t psmx2_senddata(struct fid_ep *ep, const void *buf, size_t len,
 			      void *desc, uint64_t data, fi_addr_t dest_addr,
 			      void *context)
 {
@@ -656,7 +635,8 @@ static ssize_t psmx2_senddata(struct fid_ep *ep, const void *buf, size_t len,
 				  ep_priv->tx_flags | FI_REMOTE_CQ_DATA, data);
 }
 
-static ssize_t psmx2_injectdata(struct fid_ep *ep, const void *buf, size_t len,
+DIRECT_FN
+STATIC ssize_t psmx2_injectdata(struct fid_ep *ep, const void *buf, size_t len,
 				uint64_t data, fi_addr_t dest_addr)
 {
 	struct psmx2_fid_ep *ep_priv;

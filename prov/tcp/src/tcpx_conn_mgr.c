@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017 Intel Corporation. All rights reserved.
+ * Copyright (c) 2017-2020 Intel Corporation. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -38,522 +38,536 @@
 #include <sys/types.h>
 #include <ofi_util.h>
 
-static int poll_fd_resize(struct poll_fd_mgr *poll_mgr, int size)
+
+static int rx_cm_data(SOCKET fd, struct ofi_ctrl_hdr *hdr,
+		      int type, struct tcpx_cm_context *cm_ctx)
 {
-	struct pollfd *new_poll_fds;
-	struct poll_fd_info *new_poll_info;
+	size_t data_size = 0;
+	ssize_t ret;
 
-	new_poll_fds = calloc(size, sizeof(*new_poll_fds));
-	if (!new_poll_fds)
-		return -FI_ENOMEM;
-
-	new_poll_info = calloc(size, sizeof(*new_poll_info));
-	if (!new_poll_info) {
-		free(new_poll_fds);
-		return -FI_ENOMEM;
-	}
-
-	if (poll_mgr->max_nfds) {
-		memcpy(new_poll_fds, poll_mgr->poll_fds,
-		       poll_mgr->max_nfds * sizeof(*new_poll_fds));
-		free(poll_mgr->poll_fds);
-
-		memcpy(new_poll_info, poll_mgr->poll_info,
-		       poll_mgr->max_nfds * sizeof(*new_poll_info));
-		free(poll_mgr->poll_info);
-	}
-
-	poll_mgr->poll_fds = new_poll_fds;
-	poll_mgr->poll_info = new_poll_info;
-	poll_mgr->max_nfds = size;
-
-	return 0;
-}
-
-static void poll_fds_swap_del_last(struct poll_fd_mgr *poll_mgr, int index)
-{
-	poll_mgr->poll_fds[index] = poll_mgr->poll_fds[(poll_mgr->nfds) - 1];
-	poll_mgr->poll_info[index] = poll_mgr->poll_info[(poll_mgr->nfds) - 1];
-	poll_mgr->nfds--;
-}
-
-static int poll_fds_find_dup(struct poll_fd_mgr *poll_mgr,
-			     struct poll_fd_info *fd_info_entry)
-{
-	struct tcpx_ep *tcpx_ep;
-	struct tcpx_pep *tcpx_pep;
-	int i;
-
-	for (i = 1 ; i < poll_mgr->nfds ; i++) {
-		switch (fd_info_entry->fid->fclass) {
-		case FI_CLASS_EP:
-			tcpx_ep = container_of(fd_info_entry->fid, struct tcpx_ep,
-					       util_ep.ep_fid.fid);
-			if (poll_mgr->poll_fds[i].fd == tcpx_ep->conn_fd)
-				return i;
-			break;
-		case FI_CLASS_PEP:
-			tcpx_pep = container_of(fd_info_entry->fid, struct tcpx_pep,
-						util_pep.pep_fid.fid);
-			if (poll_mgr->poll_fds[i].fd == tcpx_pep->sock)
-				return i;
-			break;
-		default:
-			continue;
-		}
-	}
-	return -1;
-}
-
-static int poll_fds_add_item(struct poll_fd_mgr *poll_mgr,
-			     struct poll_fd_info *poll_info)
-{
-	struct tcpx_ep *tcpx_ep;
-	struct tcpx_pep *tcpx_pep;
-	int ret;
-
-	if (poll_mgr->nfds >= poll_mgr->max_nfds) {
-		ret = poll_fd_resize(poll_mgr, poll_mgr->max_nfds << 1);
+	ret = ofi_recv_socket(fd, hdr, sizeof(*hdr), MSG_WAITALL);
+	if (ret != sizeof(*hdr)) {
 		FI_WARN(&tcpx_prov, FI_LOG_EP_CTRL,
-			"memory allocation failed\n");
-		return ret;
+			"Failed to read cm header\n");
+		ret = ofi_sockerr() ? -ofi_sockerr() : -FI_EIO;
+		goto out;
 	}
 
-	poll_mgr->poll_info[poll_mgr->nfds] = *poll_info;
-	poll_mgr->poll_fds[poll_mgr->nfds].revents = 0;
-
-	switch (poll_mgr->poll_info[poll_mgr->nfds].type) {
-	case CONNECT_SOCK:
-	case ACCEPT_SOCK:
-		tcpx_ep = container_of(poll_info->fid, struct tcpx_ep,
-				       util_ep.ep_fid.fid);
-		poll_mgr->poll_fds[poll_mgr->nfds].fd = tcpx_ep->conn_fd;
-		poll_mgr->poll_fds[poll_mgr->nfds].events = POLLOUT;
-		break;
-	case PASSIVE_SOCK:
-		tcpx_pep = container_of(poll_info->fid, struct tcpx_pep,
-					util_pep.pep_fid.fid);
-
-		poll_mgr->poll_fds[poll_mgr->nfds].fd = tcpx_pep->sock;
-		poll_mgr->poll_fds[poll_mgr->nfds].events = POLLIN;
-		break;
-	default:
+	if (hdr->version != TCPX_CTRL_HDR_VERSION) {
 		FI_WARN(&tcpx_prov, FI_LOG_EP_CTRL,
-			"invalid fd\n");
-		return -FI_EINVAL;
+			"cm protocol version mismatch\n");
+		ret = -FI_ENOPROTOOPT;
+		goto out;
 	}
-	poll_mgr->nfds++;
-	return 0;
-}
 
-static int handle_poll_list(struct poll_fd_mgr *poll_mgr)
-{
-	struct poll_fd_info *poll_item;
-	int ret = FI_SUCCESS;
-	int id = 0;
+	if (hdr->type != type) {
+		FI_WARN(&tcpx_prov, FI_LOG_EP_CTRL,
+			"unexpected cm message type\n");
+		ret = -FI_ECONNREFUSED;
+		goto out;
+	}
 
-	fastlock_acquire(&poll_mgr->lock);
-	while (!dlist_empty(&poll_mgr->list)) {
-		poll_item = container_of(poll_mgr->list.next,
-					 struct poll_fd_info, entry);
-		dlist_remove_init(&poll_item->entry);
-
-		if (poll_item->flags & POLL_MGR_DEL) {
-			id = poll_fds_find_dup(poll_mgr, poll_item);
-			assert(id > 0);
-			if (id <= 0) {
-				ret = -FI_EINVAL;
-				goto err;
-			}
-
-			poll_fds_swap_del_last(poll_mgr, id);
-			poll_item->flags |= POLL_MGR_ACK;
-		} else {
-			assert(poll_fds_find_dup(poll_mgr, poll_item) < 0);
-			ret = poll_fds_add_item(poll_mgr, poll_item);
-			if (ret) {
-				FI_WARN(&tcpx_prov, FI_LOG_EP_CTRL,
-					"Failed to add fd to event polling\n");
-			}
+	data_size = MIN(ntohs(hdr->seg_size), TCPX_MAX_CM_DATA_SIZE);
+	if (data_size) {
+		ret = ofi_recv_socket(fd, cm_ctx->cm_data, data_size,
+				      MSG_WAITALL);
+		if ((size_t) ret != data_size) {
+			FI_WARN(&tcpx_prov, FI_LOG_EP_CTRL,
+				"Failed to read cm data\n");
+			ret = ofi_sockerr() ? -ofi_sockerr() : -FI_EIO;
+			data_size = 0;
+			goto out;
 		}
 
-		if (poll_item->flags & POLL_MGR_FREE)
-			free(poll_item);
-		else
-			poll_item->flags |= POLL_MGR_ACK;
+		if (ntohs(hdr->seg_size) > TCPX_MAX_CM_DATA_SIZE) {
+			FI_WARN(&tcpx_prov, FI_LOG_EP_CTRL,
+				"Discarding unexpected cm data\n");
+			ofi_discard_socket(fd, ntohs(hdr->seg_size) -
+					   TCPX_MAX_CM_DATA_SIZE);
+		}
 	}
-err:
-	fastlock_release(&poll_mgr->lock);
+	ret = 0;
+out:
+	cm_ctx->cm_data_sz = data_size;
 	return ret;
 }
 
-static int rx_cm_data(SOCKET fd, struct ofi_ctrl_hdr *hdr,
-		      int type, struct poll_fd_info *poll_info)
-{
-	ssize_t ret;
-
-	ret = ofi_recv_socket(fd, hdr,
-			      sizeof(*hdr), MSG_WAITALL);
-	if (ret != sizeof(*hdr))
-		return -FI_EIO;
-
-	if (hdr->type != type)
-		return -FI_ECONNREFUSED;
-
-	if (hdr->version != OFI_CTRL_VERSION)
-		return -FI_ENOPROTOOPT;
-
-	poll_info->cm_data_sz = ntohs(hdr->seg_size);
-	if (poll_info->cm_data_sz) {
-		if (poll_info->cm_data_sz > TCPX_MAX_CM_DATA_SIZE)
-			return -FI_EINVAL;
-
-		ret = ofi_recv_socket(fd, poll_info->cm_data,
-				      poll_info->cm_data_sz, MSG_WAITALL);
-		if ((size_t) ret != poll_info->cm_data_sz)
-			return -FI_EIO;
-	}
-	return FI_SUCCESS;
-}
-
-static int tx_cm_data(SOCKET fd, uint8_t type, struct poll_fd_info *poll_info)
+static int tx_cm_data(SOCKET fd, uint8_t type, struct tcpx_cm_context *cm_ctx)
 {
 	struct ofi_ctrl_hdr hdr;
 	ssize_t ret;
 
 	memset(&hdr, 0, sizeof(hdr));
-	hdr.version = OFI_CTRL_VERSION;
+	hdr.version = TCPX_CTRL_HDR_VERSION;
 	hdr.type = type;
-	hdr.seg_size = htons((uint16_t) poll_info->cm_data_sz);
+	hdr.seg_size = htons((uint16_t) cm_ctx->cm_data_sz);
+	hdr.conn_data = 1; /* For testing endianess mismatch at peer */
 
 	ret = ofi_send_socket(fd, &hdr, sizeof(hdr), MSG_NOSIGNAL);
 	if (ret != sizeof(hdr))
-		return -FI_EIO;
+		goto err;
 
-	if (poll_info->cm_data_sz) {
-		ret = ofi_send_socket(fd, poll_info->cm_data,
-				      poll_info->cm_data_sz, MSG_NOSIGNAL);
-		if ((size_t) ret != poll_info->cm_data_sz)
-			return -FI_EIO;
+	if (cm_ctx->cm_data_sz) {
+		ret = ofi_send_socket(fd, cm_ctx->cm_data,
+				      cm_ctx->cm_data_sz, MSG_NOSIGNAL);
+		if ((size_t) ret != cm_ctx->cm_data_sz)
+			goto err;
 	}
+
 	return FI_SUCCESS;
+err:
+	return ofi_sockerr() ? -ofi_sockerr() : -FI_EIO;
 }
 
-static int send_conn_req(struct poll_fd_mgr *poll_mgr,
-			 struct poll_fd_info *poll_info,
-			 struct tcpx_ep *ep,
-			 int index)
+static int tcpx_ep_enable_xfers(struct tcpx_ep *ep)
 {
-	socklen_t len;
-	int status, ret = FI_SUCCESS;
+	int ret;
 
-	assert(poll_mgr->poll_fds[index].revents == POLLOUT);
-
-	len = sizeof(status);
-	ret = getsockopt(ep->conn_fd, SOL_SOCKET, SO_ERROR, (char *) &status, &len);
-	if (ret < 0 || status) {
-		FI_WARN(&tcpx_prov, FI_LOG_EP_CTRL, "connection failure\n");
-		return (ret < 0)? -errno : status;
+	fastlock_acquire(&ep->lock);
+	if (ep->cm_state != TCPX_EP_CONNECTING) {
+		FI_WARN(&tcpx_prov, FI_LOG_EP_CTRL,
+			"ep is in invalid state\n");
+		ret = -FI_EINVAL;
+		goto unlock;
 	}
 
-	ret = tx_cm_data(ep->conn_fd, ofi_ctrl_connreq, poll_info);
+	ret = fi_fd_nonblock(ep->sock);
+	if (ret) {
+		FI_WARN(&tcpx_prov, FI_LOG_EP_CTRL,
+			"failed to set socket to nonblocking\n");
+		goto unlock;
+	}
+	ep->cm_state = TCPX_EP_CONNECTED;
+	fastlock_release(&ep->lock);
+
+	if (ep->util_ep.rx_cq) {
+		ret = ofi_wait_add_fd(ep->util_ep.rx_cq->wait,
+				      ep->sock, POLLIN, tcpx_try_func,
+				      (void *) &ep->util_ep,
+				      &ep->util_ep.ep_fid.fid);
+		if (ret) {
+			FI_WARN(&tcpx_prov, FI_LOG_EP_CTRL,
+				"Failed to add fd to rx_cq\n");
+			return ret;
+		}
+	}
+
+	if (ep->util_ep.tx_cq) {
+		ret = ofi_wait_add_fd(ep->util_ep.tx_cq->wait,
+				      ep->sock, POLLIN, tcpx_try_func,
+				      (void *) &ep->util_ep,
+				      &ep->util_ep.ep_fid.fid);
+		if (ret) {
+			FI_WARN(&tcpx_prov, FI_LOG_EP_CTRL,
+				"Failed to add fd to tx_cq\n");
+			return ret;
+		}
+	}
+
+	return ret;
+unlock:
+	fastlock_release(&ep->lock);
 	return ret;
 }
 
-static int proc_conn_resp(struct poll_fd_mgr *poll_mgr,
-			  struct poll_fd_info *poll_info,
-			  struct tcpx_ep *ep,
-			  int index)
+static int proc_conn_resp(struct tcpx_cm_context *cm_ctx,
+			  struct tcpx_ep *ep)
 {
 	struct ofi_ctrl_hdr conn_resp;
 	struct fi_eq_cm_entry *cm_entry;
+	ssize_t len;
 	int ret = FI_SUCCESS;
 
-	assert(poll_mgr->poll_fds[index].revents == POLLIN);
-	ret = rx_cm_data(ep->conn_fd, &conn_resp, ofi_ctrl_connresp, poll_info);
-	if (ret)
+	ret = rx_cm_data(ep->sock, &conn_resp, ofi_ctrl_connresp, cm_ctx);
+	if (ret) {
+		FI_WARN(&tcpx_prov, FI_LOG_EP_CTRL,
+			"Failed to receive connect response\n");
 		return ret;
+	}
 
-	cm_entry = calloc(1, sizeof(*cm_entry) + poll_info->cm_data_sz);
-	if (!cm_entry) {
-		FI_WARN(&tcpx_prov, FI_LOG_EP_CTRL, "mem alloc failed\n");
+	cm_entry = calloc(1, sizeof(*cm_entry) + cm_ctx->cm_data_sz);
+	if (!cm_entry)
 		return -FI_ENOMEM;
-	}
 
-	cm_entry->fid = poll_info->fid;
-	memcpy(cm_entry->data, poll_info->cm_data, poll_info->cm_data_sz);
+	cm_entry->fid = cm_ctx->fid;
+	memcpy(cm_entry->data, cm_ctx->cm_data, cm_ctx->cm_data_sz);
 
-	ret = (int) fi_eq_write(&ep->util_ep.eq->eq_fid, FI_CONNECTED, cm_entry,
-				sizeof(*cm_entry) + poll_info->cm_data_sz, 0);
-	if (ret < 0) {
-		FI_WARN(&tcpx_prov, FI_LOG_EP_CTRL, "Error writing to EQ\n");
+	ep->hdr_bswap = (conn_resp.conn_data == 1) ?
+			tcpx_hdr_none : tcpx_hdr_bswap;
+
+	ret = tcpx_ep_enable_xfers(ep);
+	if (ret)
 		goto err;
-	}
-	ret = fi_fd_nonblock(ep->conn_fd);
+
+	len = fi_eq_write(&ep->util_ep.eq->eq_fid, FI_CONNECTED, cm_entry,
+			  sizeof(*cm_entry) + cm_ctx->cm_data_sz, 0);
+	if (len < 0)
+		ret = (int) len;
+
 err:
 	free(cm_entry);
 	return ret;
 }
 
-static void handle_connect(struct poll_fd_mgr *poll_mgr,
-			   int index)
+int tcpx_eq_wait_try_func(void *arg)
 {
-	struct tcpx_ep *ep;
-	struct poll_fd_info *poll_info = &poll_mgr->poll_info[index];
+	return FI_SUCCESS;
+}
+
+static void client_recv_connresp(struct util_wait *wait,
+				 struct tcpx_cm_context *cm_ctx)
+{
 	struct fi_eq_err_entry err_entry;
-	int ret;
+	struct tcpx_ep *ep;
+	ssize_t ret;
 
-	assert(poll_info->fid->fclass == FI_CLASS_EP);
-	ep = container_of(poll_info->fid, struct tcpx_ep, util_ep.ep_fid.fid);
+	FI_DBG(&tcpx_prov, FI_LOG_EP_CTRL, "Handling accept from server\n");
+	assert(cm_ctx->fid->fclass == FI_CLASS_EP);
+	ep = container_of(cm_ctx->fid, struct tcpx_ep, util_ep.ep_fid.fid);
 
-	switch (poll_info->state) {
-	case ESTABLISH_CONN:
-		ret = send_conn_req(poll_mgr, poll_info, ep, index);
-		if (ret)
-			goto err;
-
-		poll_info->state = RCV_RESP;
-		poll_mgr->poll_fds[index].events = POLLIN;
-		break;
-	case RCV_RESP:
-		ret = proc_conn_resp(poll_mgr, poll_info, ep, index);
-		if (ret)
-			goto err;
-
-		poll_info->state = CONNECT_DONE;
-		break;
-	default:
-		FI_WARN(&tcpx_prov, FI_LOG_EP_CTRL, "Invalid connection state\n");
-		ret = -FI_EINVAL;
+	ret = ofi_wait_del_fd(wait, ep->sock);
+	if (ret) {
+		FI_WARN(&tcpx_prov, FI_LOG_EP_CTRL,
+			"Could not remove fd from wait\n");
 		goto err;
 	}
+
+	ret = proc_conn_resp(cm_ctx, ep);
+	if (ret)
+		goto err;
+
+	free(cm_ctx);
 	return;
 err:
 	memset(&err_entry, 0, sizeof err_entry);
-	err_entry.fid = poll_info->fid;
-	err_entry.context = poll_info->fid->context;
+	err_entry.fid = cm_ctx->fid;
+	err_entry.context = cm_ctx->fid->context;
+	err_entry.err = -ret;
+	if (cm_ctx->cm_data_sz) {
+		err_entry.err_data = calloc(1, cm_ctx->cm_data_sz);
+		if (err_entry.err_data) {
+			memcpy(err_entry.err_data, cm_ctx->cm_data,
+			       cm_ctx->cm_data_sz);
+			err_entry.err_data_size = cm_ctx->cm_data_sz;
+		}
+	}
+	free(cm_ctx);
+
+	FI_WARN(&tcpx_prov, FI_LOG_EP_CTRL, "Sending shutdown, err: %d (%s)\n",
+		err_entry.err, fi_strerror(err_entry.err));
+
+	/* `err_entry.err_data` must live until it is passed to user */
+	ret = fi_eq_write(&ep->util_ep.eq->eq_fid, FI_SHUTDOWN,
+			  &err_entry, sizeof(err_entry), UTIL_FLAG_ERROR);
+	if (ret < 0)
+		free(err_entry.err_data);
+}
+
+static void server_send_cm_accept(struct util_wait *wait,
+				  struct tcpx_cm_context *cm_ctx)
+{
+	struct fi_eq_cm_entry cm_entry = {0};
+	struct fi_eq_err_entry err_entry;
+	struct tcpx_ep *ep;
+	int ret, del_ret;
+
+	assert(cm_ctx->fid->fclass == FI_CLASS_EP);
+	ep = container_of(cm_ctx->fid, struct tcpx_ep, util_ep.ep_fid.fid);
+
+	FI_DBG(&tcpx_prov, FI_LOG_EP_CTRL, "Send connect (accept) response\n");
+	ret = tx_cm_data(ep->sock, ofi_ctrl_connresp, cm_ctx);
+	if (ret) {
+		FI_WARN(&tcpx_prov, FI_LOG_EP_CTRL,
+			"Failed to send connect (accept) response\n");
+		goto err_del;
+	}
+
+	cm_entry.fid =  cm_ctx->fid;
+	ret = (int) fi_eq_write(&ep->util_ep.eq->eq_fid, FI_CONNECTED,
+				&cm_entry, sizeof(cm_entry), 0);
+	if (ret < 0)
+		FI_WARN(&tcpx_prov, FI_LOG_EP_CTRL, "Error writing to EQ\n");
+
+	ret = ofi_wait_del_fd(wait, ep->sock);
+	if (ret) {
+		FI_WARN(&tcpx_prov, FI_LOG_EP_CTRL,
+			"Could not remove fd from wait\n");
+		goto err_report;
+	}
+
+	ret = tcpx_ep_enable_xfers(ep);
+	if (ret)
+		goto err_report;
+
+	FI_DBG(&tcpx_prov, FI_LOG_EP_CTRL, "Connection Accept Successful\n");
+	free(cm_ctx);
+	return;
+
+err_del:
+	del_ret = ofi_wait_del_fd(wait, ep->sock);
+	if (del_ret)
+		FI_WARN(&tcpx_prov, FI_LOG_EP_CTRL,
+			"Could not remove fd from wait: %s\n",
+			fi_strerror(-del_ret));
+
+err_report:
+	memset(&err_entry, 0, sizeof err_entry);
+	err_entry.fid = cm_ctx->fid;
+	err_entry.context = cm_ctx->fid->context;
 	err_entry.err = -ret;
 
-	poll_info->state = CONNECT_DONE;
+	free(cm_ctx);
+
+	FI_WARN(&tcpx_prov, FI_LOG_EP_CTRL, "Sending shutdown, err: %d (%s)\n",
+		err_entry.err, fi_strerror(err_entry.err));
+
 	fi_eq_write(&ep->util_ep.eq->eq_fid, FI_SHUTDOWN,
 		    &err_entry, sizeof(err_entry), UTIL_FLAG_ERROR);
 }
 
-static void handle_connreq(struct poll_fd_mgr *poll_mgr,
-			   struct poll_fd_info *poll_info)
+static void server_recv_connreq(struct util_wait *wait,
+				struct tcpx_cm_context *cm_ctx)
 {
 	struct tcpx_conn_handle *handle;
-	struct tcpx_pep *pep;
 	struct fi_eq_cm_entry *cm_entry;
 	struct ofi_ctrl_hdr conn_req;
+	socklen_t len;
+	int ret;
+
+	assert(cm_ctx->fid->fclass == FI_CLASS_CONNREQ);
+	handle  = container_of(cm_ctx->fid, struct tcpx_conn_handle, handle);
+
+	FI_DBG(&tcpx_prov, FI_LOG_EP_CTRL, "Server receive connect request\n");
+	ret = rx_cm_data(handle->sock, &conn_req, ofi_ctrl_connreq, cm_ctx);
+	if (ret)
+		goto err1;
+
+	cm_entry = calloc(1, sizeof(*cm_entry) + cm_ctx->cm_data_sz);
+	if (!cm_entry)
+		goto err1;
+
+	cm_entry->fid = &handle->pep->util_pep.pep_fid.fid;
+	cm_entry->info = fi_dupinfo(handle->pep->info);
+	if (!cm_entry->info)
+		goto err2;
+
+	len = cm_entry->info->dest_addrlen = handle->pep->info->src_addrlen;
+	cm_entry->info->dest_addr = malloc(len);
+	if (!cm_entry->info->dest_addr)
+		goto err3;
+
+	ret = ofi_getpeername(handle->sock, cm_entry->info->dest_addr, &len);
+	if (ret)
+		goto err3;
+
+	handle->endian_match = (conn_req.conn_data == 1);
+	cm_entry->info->handle = &handle->handle;
+	memcpy(cm_entry->data, cm_ctx->cm_data, cm_ctx->cm_data_sz);
+
+	ret = (int) fi_eq_write(&handle->pep->util_pep.eq->eq_fid, FI_CONNREQ, cm_entry,
+				sizeof(*cm_entry) + cm_ctx->cm_data_sz, 0);
+	if (ret < 0) {
+		FI_WARN(&tcpx_prov, FI_LOG_EP_CTRL, "Error writing to EQ\n");
+		goto err3;
+	}
+	ret = ofi_wait_del_fd(wait, handle->sock);
+	if (ret)
+		FI_WARN(&tcpx_prov, FI_LOG_EP_CTRL,
+			"fd deletion from ofi_wait failed\n");
+	free(cm_entry);
+	free(cm_ctx);
+	return;
+err3:
+	fi_freeinfo(cm_entry->info);
+err2:
+	free(cm_entry);
+err1:
+	ofi_wait_del_fd(wait, handle->sock);
+	ofi_close_socket(handle->sock);
+	free(cm_ctx);
+	free(handle);
+}
+
+static void client_send_connreq(struct util_wait *wait,
+				struct tcpx_cm_context *cm_ctx)
+{
+	struct tcpx_ep *ep;
+	struct fi_eq_err_entry err_entry;
+	socklen_t len;
+	int status, ret = FI_SUCCESS;
+	int del_ret;
+
+	FI_DBG(&tcpx_prov, FI_LOG_EP_CTRL, "client send connreq\n");
+	assert(cm_ctx->fid->fclass == FI_CLASS_EP);
+
+	ep = container_of(cm_ctx->fid, struct tcpx_ep, util_ep.ep_fid.fid);
+
+	len = sizeof(status);
+	ret = getsockopt(ep->sock, SOL_SOCKET, SO_ERROR, (char *) &status, &len);
+	if (ret < 0 || status) {
+		ret = (ret < 0)? -ofi_sockerr() : status;
+		FI_WARN(&tcpx_prov, FI_LOG_EP_CTRL, "connection failure\n");
+		goto err_del;
+	}
+
+	ret = tx_cm_data(ep->sock, ofi_ctrl_connreq, cm_ctx);
+	if (ret)
+		goto err_del;
+
+	ret = ofi_wait_del_fd(wait, ep->sock);
+	if (ret) {
+		FI_WARN(&tcpx_prov, FI_LOG_EP_CTRL,
+			"Could not remove fd from wait: %s\n",
+			fi_strerror(-ret));
+		goto err_report;
+	}
+
+	cm_ctx->type = CLIENT_RECV_CONNRESP;
+	ret = ofi_wait_add_fd(wait, ep->sock, POLLIN,
+			      tcpx_eq_wait_try_func, NULL, cm_ctx);
+	if (ret)
+		goto err_report;
+
+	return;
+
+err_del:
+	del_ret = ofi_wait_del_fd(wait, ep->sock);
+	if (del_ret)
+		FI_WARN(&tcpx_prov, FI_LOG_EP_CTRL,
+			"Could not remove fd from wait: %s\n",
+			fi_strerror(-del_ret));
+err_report:
+	memset(&err_entry, 0, sizeof err_entry);
+	err_entry.fid = cm_ctx->fid;
+	err_entry.context = cm_ctx->fid->context;
+	err_entry.err = -ret;
+
+	/* cm_ctx must only be freed once its wait fd was
+	 * removed from polling, otherwise next poll round will trigger a
+	 * use-after-free
+	 */
+	free(cm_ctx);
+
+	FI_WARN(&tcpx_prov, FI_LOG_EP_CTRL, "Sending shutdown, err: %d (%s)\n",
+		err_entry.err, fi_strerror(err_entry.err));
+
+	fi_eq_write(&ep->util_ep.eq->eq_fid, FI_SHUTDOWN,
+		    &err_entry, sizeof(err_entry), UTIL_FLAG_ERROR);
+}
+
+static void server_sock_accept(struct util_wait *wait,
+			       struct tcpx_cm_context *cm_ctx)
+{
+	struct tcpx_conn_handle *handle;
+	struct tcpx_cm_context *rx_req_cm_ctx;
+	struct tcpx_pep *pep;
 	SOCKET sock;
 	int ret;
 
-	assert(poll_info->fid->fclass == FI_CLASS_PEP);
-	pep = container_of(poll_info->fid, struct tcpx_pep, util_pep.pep_fid.fid);
+	FI_DBG(&tcpx_prov, FI_LOG_EP_CTRL, "Received Connreq\n");
+	assert(cm_ctx->fid->fclass == FI_CLASS_PEP);
+	pep = container_of(cm_ctx->fid, struct tcpx_pep, util_pep.pep_fid.fid);
 
 	sock = accept(pep->sock, NULL, 0);
 	if (sock < 0) {
-		FI_WARN(&tcpx_prov, FI_LOG_EP_CTRL, "accept error: %d\n",
-			ofi_sockerr());
+		FI_WARN(&tcpx_prov, FI_LOG_EP_CTRL,
+			"accept error: %d\n", ofi_sockerr());
 		return;
-	}
-	ret = rx_cm_data(sock, &conn_req, ofi_ctrl_connreq, poll_info);
-	if (ret) {
-		FI_WARN(&tcpx_prov, FI_LOG_EP_CTRL, "cm data recv failed \n");
-		goto err1;
 	}
 
 	handle = calloc(1, sizeof(*handle));
-	if (!handle)
+	if (!handle) {
+		FI_WARN(&tcpx_prov, FI_LOG_EP_CTRL,
+			"cannot allocate memory \n");
 		goto err1;
-
-	cm_entry = calloc(1, sizeof(*cm_entry) + poll_info->cm_data_sz);
-	if (!cm_entry)
-		goto err2;
-
-	handle->conn_fd = sock;
-	cm_entry->fid = poll_info->fid;
-	cm_entry->info = fi_dupinfo(&pep->info);
-	if (!cm_entry->info)
-		goto err3;
-
-	cm_entry->info->handle = &handle->handle;
-	memcpy(cm_entry->data, poll_info->cm_data, poll_info->cm_data_sz);
-
-	ret = (int) fi_eq_write(&pep->util_pep.eq->eq_fid, FI_CONNREQ, cm_entry,
-				sizeof(*cm_entry) + poll_info->cm_data_sz, 0);
-	if (ret < 0) {
-		FI_WARN(&tcpx_prov, FI_LOG_EP_CTRL, "Error writing to EQ\n");
-		goto err4;
 	}
 
-	free(cm_entry);
+	rx_req_cm_ctx = calloc(1, sizeof(*rx_req_cm_ctx));
+	if (!rx_req_cm_ctx)
+		goto err2;
+
+	handle->sock = sock;
+	handle->handle.fclass = FI_CLASS_CONNREQ;
+	handle->pep = pep;
+	rx_req_cm_ctx->fid = &handle->handle;
+	rx_req_cm_ctx->type = SERVER_RECV_CONNREQ;
+
+	ret = ofi_wait_add_fd(wait, sock, POLLIN,
+			      tcpx_eq_wait_try_func,
+			      NULL, (void *) rx_req_cm_ctx);
+	if (ret)
+		goto err3;
+
 	return;
-err4:
-	fi_freeinfo(cm_entry->info);
 err3:
-	free(cm_entry);
+	free(rx_req_cm_ctx);
 err2:
 	free(handle);
 err1:
 	ofi_close_socket(sock);
 }
 
-static void handle_accept_conn(struct poll_fd_mgr *poll_mgr,
-			       struct poll_fd_info *poll_info)
+static void process_cm_ctx(struct util_wait *wait,
+			   struct tcpx_cm_context *cm_ctx)
 {
-	struct fi_eq_cm_entry cm_entry;
-	struct fi_eq_err_entry err_entry;
-	struct tcpx_ep *ep;
-	int ret;
-
-	assert(poll_info->fid->fclass == FI_CLASS_EP);
-	ep = container_of(poll_info->fid, struct tcpx_ep, util_ep.ep_fid.fid);
-
-	ret = tx_cm_data(ep->conn_fd, ofi_ctrl_connresp, poll_info);
-	if (ret)
-		goto err;
-
-	cm_entry.fid =  poll_info->fid;
-
-	ret = (int) fi_eq_write(&ep->util_ep.eq->eq_fid, FI_CONNECTED,
-				&cm_entry, sizeof(cm_entry), 0);
-	if (ret < 0) {
-		FI_WARN(&tcpx_prov, FI_LOG_EP_CTRL, "Error writing to EQ\n");
+	switch (cm_ctx->type) {
+	case SERVER_SOCK_ACCEPT:
+		server_sock_accept(wait,cm_ctx);
+		break;
+	case CLIENT_SEND_CONNREQ:
+		client_send_connreq(wait, cm_ctx);
+		break;
+	case SERVER_RECV_CONNREQ:
+		server_recv_connreq(wait, cm_ctx);
+		break;
+	case SERVER_SEND_CM_ACCEPT:
+		server_send_cm_accept(wait, cm_ctx);
+		break;
+	case CLIENT_RECV_CONNRESP:
+		client_recv_connresp(wait, cm_ctx);
+		break;
+	default:
+		FI_WARN(&tcpx_prov, FI_LOG_EP_CTRL,
+			"should never end up here\n");
 	}
-
-	ret = fi_fd_nonblock(ep->conn_fd);
-	return;
-err:
-	memset(&err_entry, 0, sizeof err_entry);
-	err_entry.fid = poll_info->fid;
-	err_entry.context = poll_info->fid->context;
-	err_entry.err = ret;
-
-	fi_eq_write(&ep->util_ep.eq->eq_fid, FI_SHUTDOWN,
-		    &err_entry, sizeof(err_entry), UTIL_FLAG_ERROR);
 }
 
-static void handle_fd_events(struct poll_fd_mgr *poll_mgr)
+/* The implementation assumes that the EQ does not share a wait set with
+ * a CQ.  This is true for internally created wait sets, but not if the
+ * application manages the wait set.  To fix, we need to distinguish
+ * whether the wait_context references a fid or tcpx_cm_context.
+ */
+void tcpx_conn_mgr_run(struct util_eq *eq)
 {
-	int i;
+	struct util_wait_fd *wait_fd;
+	struct tcpx_eq *tcpx_eq;
+	void *wait_contexts[MAX_POLL_EVENTS];
+	int num_fds = 0, i;
 
-	/* Process the fd array from end to start.  This allows us to handle
-	 * removing entries from the array. Also ignore the signal fd at index 0.
-	 */
-	for (i = poll_mgr->nfds-1; i > 0; i--) {
-		if (!poll_mgr->poll_fds[i].revents)
+	assert(eq->wait != NULL);
+
+	wait_fd = container_of(eq->wait, struct util_wait_fd,
+			       util_wait);
+
+	tcpx_eq = container_of(eq, struct tcpx_eq, util_eq);
+	fastlock_acquire(&tcpx_eq->close_lock);
+	num_fds = (wait_fd->util_wait.wait_obj == FI_WAIT_FD) ?
+		  ofi_epoll_wait(wait_fd->epoll_fd, wait_contexts,
+				 MAX_POLL_EVENTS, 0) :
+		  ofi_pollfds_wait(wait_fd->pollfds, wait_contexts,
+				   MAX_POLL_EVENTS, 0);
+	if (num_fds < 0) {
+		fastlock_release(&tcpx_eq->close_lock);
+		return;
+	}
+
+	for ( i = 0; i < num_fds; i++) {
+		/* skip wake up signals */
+		if (&wait_fd->util_wait.wait_fid.fid == wait_contexts[i])
 			continue;
 
-		switch (poll_mgr->poll_info[i].type) {
-		case CONNECT_SOCK:
-			handle_connect(poll_mgr, i);
-
-			if (poll_mgr->poll_info[i].state == CONNECT_DONE)
-				poll_fds_swap_del_last(poll_mgr, i);
-			break;
-		case PASSIVE_SOCK:
-			handle_connreq(poll_mgr, &poll_mgr->poll_info[i]);
-			break;
-		case ACCEPT_SOCK:
-			handle_accept_conn(poll_mgr, &poll_mgr->poll_info[i]);
-			poll_fds_swap_del_last(poll_mgr, i);
-			break;
-		default:
-			FI_WARN(&tcpx_prov, FI_LOG_EP_CTRL,
-				"should never end up here\n");
-		}
+		process_cm_ctx(eq->wait, (struct tcpx_cm_context *)
+			       wait_contexts[i]);
 	}
-}
-
-static void *tcpx_conn_mgr_thread(void *data)
-{
-	struct tcpx_fabric *tcpx_fabric = (struct tcpx_fabric *) data;
-	struct poll_fd_mgr *poll_mgr = &tcpx_fabric->poll_mgr;
-	int ret;
-
-	ret = poll_fd_resize(poll_mgr, 64);
-	if (ret) {
-		FI_WARN(&tcpx_prov, FI_LOG_EP_CTRL,
-			"poll_fd memory alloc failed\n");
-		return NULL;
-	}
-
-	poll_mgr->poll_fds[0].fd = poll_mgr->signal.fd[FI_READ_FD];
-	poll_mgr->poll_fds[0].events = POLLIN;
-	poll_mgr->nfds = 1;
-
-	while (poll_mgr->run) {
-		ret = poll(poll_mgr->poll_fds, poll_mgr->nfds, -1);
-		if (ret < 0) {
-			FI_WARN(&tcpx_prov, FI_LOG_EP_CTRL,
-				"Poll failed\n");
-			break;
-		}
-
-		if (poll_mgr->poll_fds[0].revents & POLLIN) {
-			fd_signal_reset(&poll_mgr->signal);
-			if (handle_poll_list(poll_mgr)) {
-				FI_WARN(&tcpx_prov, FI_LOG_EP_CTRL,
-					"fd list add or remove failed\n");
-			}
-		}
-		handle_fd_events(poll_mgr);
-	}
-	return NULL;
-}
-
-void tcpx_conn_mgr_close(struct tcpx_fabric *tcpx_fabric)
-{
-	struct poll_fd_info *poll_info;
-
-	tcpx_fabric->poll_mgr.run = 0;
-	fd_signal_set(&tcpx_fabric->poll_mgr.signal);
-
-	if (tcpx_fabric->conn_mgr_thread &&
-	    pthread_join(tcpx_fabric->conn_mgr_thread, NULL)) {
-		FI_DBG(&tcpx_prov, FI_LOG_FABRIC,
-		       "cm thread failed to join\n");
-	}
-
-	while (!dlist_empty(&tcpx_fabric->poll_mgr.list)) {
-		poll_info = container_of(tcpx_fabric->poll_mgr.list.next,
-					 struct poll_fd_info, entry);
-		dlist_remove(&poll_info->entry);
-		assert(poll_info->flags & POLL_MGR_FREE);
-		free(poll_info);
-	}
-
-	fastlock_destroy(&tcpx_fabric->poll_mgr.lock);
-	fd_signal_free(&tcpx_fabric->poll_mgr.signal);
-}
-
-int tcpx_conn_mgr_init(struct tcpx_fabric *tcpx_fabric)
-{
-	int ret;
-
-	dlist_init(&tcpx_fabric->poll_mgr.list);
-	fastlock_init(&tcpx_fabric->poll_mgr.lock);
-	ret = fd_signal_init(&tcpx_fabric->poll_mgr.signal);
-	if (ret) {
-		FI_WARN(&tcpx_prov, FI_LOG_FABRIC,"signal init failed\n");
-		goto err;
-	}
-
-	tcpx_fabric->poll_mgr.run = 1;
-	ret = pthread_create(&tcpx_fabric->conn_mgr_thread, 0,
-			     tcpx_conn_mgr_thread, (void *) tcpx_fabric);
-	if (ret) {
-		FI_WARN(&tcpx_prov, FI_LOG_FABRIC,
-			"Failed creating tcpx connection manager thread");
-
-		goto err1;
-	}
-	return 0;
-err1:
-	fd_signal_free(&tcpx_fabric->poll_mgr.signal);
-err:
-	fastlock_destroy(&tcpx_fabric->poll_mgr.lock);
-	return ret;
+	fastlock_release(&tcpx_eq->close_lock);
 }

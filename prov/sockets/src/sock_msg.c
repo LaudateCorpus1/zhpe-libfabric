@@ -135,6 +135,7 @@ ssize_t sock_ep_recvmsg(struct fid_ep *ep, const struct fi_msg *msg,
 	SOCK_LOG_DBG("New rx_entry: %p (ctx: %p)\n", rx_entry, rx_ctx);
 	fastlock_acquire(&rx_ctx->lock);
 	dlist_insert_tail(&rx_entry->entry, &rx_ctx->rx_entry_list);
+	rx_ctx->progress_start = &rx_ctx->rx_buffered_list;
 	fastlock_release(&rx_ctx->lock);
 	return 0;
 }
@@ -262,8 +263,9 @@ ssize_t sock_ep_sendmsg(struct fid_ep *ep, const struct fi_msg *msg,
 	}
 
 	sock_tx_ctx_write_op_send(tx_ctx, &tx_op, flags, (uintptr_t) msg->context,
-			msg->addr, (uintptr_t) msg->msg_iov[0].iov_base,
-			ep_attr, conn);
+				  msg->addr, (uintptr_t) ((msg->iov_count > 0) ?
+				  msg->msg_iov[0].iov_base : NULL),
+				  ep_attr, conn);
 
 	if (flags & FI_REMOTE_CQ_DATA)
 		sock_tx_ctx_write(tx_ctx, &msg->data, sizeof(msg->data));
@@ -478,6 +480,7 @@ ssize_t sock_ep_trecvmsg(struct fid_ep *ep,
 	fastlock_acquire(&rx_ctx->lock);
 	SOCK_LOG_DBG("New rx_entry: %p (ctx: %p)\n", rx_entry, rx_ctx);
 	dlist_insert_tail(&rx_entry->entry, &rx_ctx->rx_entry_list);
+	rx_ctx->progress_start = &rx_ctx->rx_buffered_list;
 	fastlock_release(&rx_ctx->lock);
 	return 0;
 }
@@ -605,9 +608,10 @@ ssize_t sock_ep_tsendmsg(struct fid_ep *ep,
 	}
 
 	sock_tx_ctx_write_op_tsend(tx_ctx, &tx_op, flags,
-			(uintptr_t) msg->context, msg->addr,
-			(uintptr_t) msg->msg_iov[0].iov_base,
-			ep_attr, conn, msg->tag);
+				   (uintptr_t) msg->context, msg->addr,
+				   (uintptr_t) ((msg->iov_count > 0) ?
+				    msg->msg_iov[0].iov_base : NULL),
+				    ep_attr, conn, msg->tag);
 
 	if (flags & FI_REMOTE_CQ_DATA)
 		sock_tx_ctx_write(tx_ctx, &msg->data, sizeof(msg->data));

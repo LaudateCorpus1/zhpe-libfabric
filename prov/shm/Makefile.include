@@ -5,6 +5,7 @@ _shm_files = \
 	prov/shm/src/smr_domain.c	\
 	prov/shm/src/smr_progress.c	\
 	prov/shm/src/smr_comp.c		\
+	prov/shm/src/smr_cntr.c		\
 	prov/shm/src/smr_msg.c		\
 	prov/shm/src/smr_rma.c		\
 	prov/shm/src/smr_atomic.c	\
@@ -12,6 +13,7 @@ _shm_files = \
 	prov/shm/src/smr_fabric.c	\
 	prov/shm/src/smr_init.c		\
 	prov/shm/src/smr_av.c		\
+	prov/shm/src/smr_signal.h	\
 	prov/shm/src/smr.h
 
 if HAVE_SHM_DL

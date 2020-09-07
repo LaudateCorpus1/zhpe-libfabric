@@ -1,7 +1,8 @@
 #
 # Copyright (c) 2016 Cisco Systems, Inc.  All rights reserved.
-# Copyright (c) 2017 Intel Corporation, Inc. All right reserved.
-# Copyright (c) 2017-2018 Hewlett Packard Enterprise Development LP.  All rights reserved.
+# Copyright (c) 2017-2018 Intel Corporation, Inc. All right reserved.
+# Copyright (c) 2018 Amazon.com, Inc. or its affiliates. All rights reserved.
+# (C) Copyright 2017-2020 Hewlett Packard Enterprise Development LP
 #
 # Makefile.am for libfabric
 
@@ -11,8 +12,6 @@ AM_CPPFLAGS = \
 	-DSYSCONFDIR=\"$(sysconfdir)\" \
 	-DRDMADIR=\"@rdmadir@\" \
 	-DPROVDLDIR=\"$(pkglibdir)\"
-
-AM_LDFLAGS =
 
 noinst_LTLIBRARIES =
 lib_LTLIBRARIES =
@@ -41,13 +40,17 @@ rdmainclude_HEADERS =
 
 # internal utility functions shared by in-tree providers:
 common_srcs =				\
+	src/hmem.c			\
+	src/hmem_cuda.c			\
 	src/common.c			\
 	src/enosys.c			\
 	src/rbtree.c			\
+	src/tree.c			\
 	src/fasthash.c			\
 	src/indexer.c			\
 	src/mem.c			\
 	src/iov.c			\
+	src/shared/ofi_str.c		\
 	prov/util/src/util_atomic.c	\
 	prov/util/src/util_attr.c	\
 	prov/util/src/util_av.c		\
@@ -66,17 +69,9 @@ common_srcs =				\
 	prov/util/src/util_ns.c		\
 	prov/util/src/util_shm.c	\
 	prov/util/src/util_mem_monitor.c\
+	prov/util/src/util_mem_hooks.c	\
 	prov/util/src/util_mr_cache.c	\
-	prov/hook/src/hook.c		\
-	prov/hook/src/hook_av.c		\
-	prov/hook/src/hook_cm.c		\
-	prov/hook/src/hook_cntr.c	\
-	prov/hook/src/hook_cq.c		\
-	prov/hook/src/hook_domain.c	\
-	prov/hook/src/hook_ep.c		\
-	prov/hook/src/hook_eq.c		\
-	prov/hook/src/hook_wait.c	\
-	prov/hook/src/hook_xfer.c
+	prov/util/src/util_coll.c
 
 
 if MACOS
@@ -93,6 +88,7 @@ endif
 
 if LINUX
 common_srcs += src/unix/osd.c
+common_srcs += src/linux/osd.c
 if HAVE_LINUX_PERF_RDPMC
 common_srcs += src/linux/rdpmc.c
 endif
@@ -125,31 +121,38 @@ util_fi_pingpong_LDADD = $(linkback)
 
 nodist_src_libfabric_la_SOURCES =
 src_libfabric_la_SOURCES =			\
+	include/ofi_hmem.h			\
 	include/ofi.h				\
 	include/ofi_abi.h			\
 	include/ofi_atom.h			\
 	include/ofi_enosys.h			\
 	include/ofi_file.h			\
+	include/ofi_hook.h			\
 	include/ofi_indexer.h			\
 	include/ofi_iov.h			\
 	include/ofi_list.h			\
+	include/ofi_bitmask.h			\
+	include/shared/ofi_str.h		\
 	include/ofi_lock.h			\
 	include/ofi_mem.h			\
 	include/ofi_osd.h			\
 	include/ofi_proto.h			\
+	include/ofi_recvwin.h			\
 	include/ofi_rbuf.h			\
 	include/ofi_shm.h			\
 	include/ofi_signal.h			\
+	include/ofi_epoll.h			\
+	include/ofi_tree.h			\
 	include/ofi_util.h			\
 	include/ofi_atomic.h			\
 	include/ofi_mr.h			\
 	include/ofi_net.h			\
 	include/ofi_perf.h			\
+	include/ofi_coll.h			\
 	include/fasthash.h			\
 	include/rbtree.h			\
 	include/uthash.h			\
 	include/ofi_prov.h			\
-	prov/hook/src/hook.h			\
 	include/rdma/providers/fi_log.h		\
 	include/rdma/providers/fi_prov.h	\
 	src/fabric.c				\
@@ -158,6 +161,16 @@ src_libfabric_la_SOURCES =			\
 	src/log.c				\
 	src/var.c				\
 	src/abi_1_0.c				\
+	prov/hook/src/hook.c			\
+	prov/hook/src/hook_av.c			\
+	prov/hook/src/hook_cm.c			\
+	prov/hook/src/hook_cntr.c		\
+	prov/hook/src/hook_cq.c			\
+	prov/hook/src/hook_domain.c		\
+	prov/hook/src/hook_ep.c			\
+	prov/hook/src/hook_eq.c			\
+	prov/hook/src/hook_wait.c		\
+	prov/hook/src/hook_xfer.c		\
 	$(common_srcs)
 
 src_libfabric_la_CPPFLAGS = $(AM_CPPFLAGS)
@@ -166,7 +179,7 @@ src_libfabric_la_LIBADD =
 src_libfabric_la_DEPENDENCIES = libfabric.map
 
 if !EMBEDDED
-src_libfabric_la_LDFLAGS += -version-info 10:15:9
+src_libfabric_la_LDFLAGS += -version-info 14:1:13
 endif
 src_libfabric_la_LDFLAGS += -export-dynamic \
 			   $(libfabric_version_script)
@@ -174,6 +187,7 @@ rdmainclude_HEADERS += \
 	$(top_srcdir)/include/rdma/fabric.h \
 	$(top_srcdir)/include/rdma/fi_atomic.h \
 	$(top_srcdir)/include/rdma/fi_cm.h \
+	$(top_srcdir)/include/rdma/fi_collective.h \
 	$(top_srcdir)/include/rdma/fi_domain.h \
 	$(top_srcdir)/include/rdma/fi_eq.h \
 	$(top_srcdir)/include/rdma/fi_rma.h \
@@ -205,8 +219,10 @@ real_man_pages = \
         man/man1/fi_pingpong.1 \
         man/man1/fi_strerror.1 \
         man/man3/fi_av.3 \
+        man/man3/fi_av_set.3 \
         man/man3/fi_cm.3 \
         man/man3/fi_cntr.3 \
+        man/man3/fi_collective.3 \
         man/man3/fi_control.3 \
         man/man3/fi_cq.3 \
         man/man3/fi_domain.3 \
@@ -217,18 +233,23 @@ real_man_pages = \
         man/man3/fi_getinfo.3 \
         man/man3/fi_mr.3 \
         man/man3/fi_msg.3 \
+	man/man3/fi_nic.3 \
         man/man3/fi_poll.3 \
         man/man3/fi_rma.3 \
         man/man3/fi_tagged.3 \
         man/man3/fi_trigger.3 \
         man/man3/fi_version.3 \
         man/man7/fabric.7 \
+	man/man7/fi_hook.7 \
         man/man7/fi_provider.7 \
         man/man7/fi_direct.7
 
 dummy_man_pages = \
         man/man3/fi_accept.3 \
         man/man3/fi_alias.3 \
+        man/man3/fi_allgather.3 \
+        man/man3/fi_allreduce.3 \
+        man/man3/fi_alltoall.3 \
         man/man3/fi_atomic.3 \
         man/man3/fi_atomic_valid.3 \
         man/man3/fi_atomicmsg.3 \
@@ -239,7 +260,14 @@ dummy_man_pages = \
         man/man3/fi_av_lookup.3 \
         man/man3/fi_av_open.3 \
         man/man3/fi_av_remove.3 \
+        man/man3/fi_av_set_diff.3 \
+        man/man3/fi_av_set_insert.3 \
+        man/man3/fi_av_set_intersect.3 \
+        man/man3/fi_av_set_remove.3 \
+        man/man3/fi_av_set_union.3 \
         man/man3/fi_av_straddr.3 \
+        man/man3/fi_barrier.3 \
+        man/man3/fi_broadcast.3 \
         man/man3/fi_cancel.3 \
         man/man3/fi_close.3 \
         man/man3/fi_cntr_add.3 \
@@ -286,6 +314,7 @@ dummy_man_pages = \
         man/man3/fi_inject_write.3 \
         man/man3/fi_inject_writedata.3 \
         man/man3/fi_join.3 \
+        man/man3/fi_join_collective.3 \
         man/man3/fi_leave.3 \
         man/man3/fi_listen.3 \
         man/man3/fi_mr_bind.3 \
@@ -301,12 +330,15 @@ dummy_man_pages = \
         man/man3/fi_poll_add.3 \
         man/man3/fi_poll_del.3 \
         man/man3/fi_poll_open.3 \
+        man/man3/fi_query_atomic.3 \
+        man/man3/fi_query_collective.3 \
         man/man3/fi_read.3 \
         man/man3/fi_readmsg.3 \
         man/man3/fi_readv.3 \
         man/man3/fi_recv.3 \
         man/man3/fi_recvmsg.3 \
         man/man3/fi_recvv.3 \
+        man/man3/fi_reduce_scatter.3 \
         man/man3/fi_reject.3 \
         man/man3/fi_rx_addr.3 \
         man/man3/fi_rx_size_left.3 \
@@ -367,17 +399,22 @@ EXTRA_DIST=
 include prov/sockets/Makefile.include
 include prov/udp/Makefile.include
 include prov/verbs/Makefile.include
+include prov/efa/Makefile.include
 include prov/usnic/Makefile.include
 include prov/psm/Makefile.include
 include prov/psm2/Makefile.include
 include prov/gni/Makefile.include
 include prov/rxm/Makefile.include
+include prov/mrail/Makefile.include
 include prov/rxd/Makefile.include
 include prov/bgq/Makefile.include
-include prov/mlx/Makefile.include
 include prov/shm/Makefile.include
 include prov/tcp/Makefile.include
 include prov/zhpe/Makefile.include
+include prov/rstream/Makefile.include
+include prov/hook/Makefile.include
+include prov/hook/perf/Makefile.include
+include prov/hook/hook_debug/Makefile.include
 
 man_MANS = $(real_man_pages) $(prov_install_man_pages) $(dummy_man_pages)
 

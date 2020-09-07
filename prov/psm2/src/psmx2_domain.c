@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2018 Intel Corporation. All rights reserved.
+ * Copyright (c) 2013-2019 Intel Corporation. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -203,7 +203,8 @@ static int psmx2_domain_close(fid_t fid)
 	return 0;
 }
 
-static int psmx2_domain_control(fid_t fid, int command, void *arg)
+DIRECT_FN
+STATIC int psmx2_domain_control(fid_t fid, int command, void *arg)
 {
 	struct fi_mr_map_raw *map;
 
@@ -245,6 +246,7 @@ static struct fi_ops_domain psmx2_domain_ops = {
 	.stx_ctx = psmx2_stx_ctx,
 	.srx_ctx = fi_no_srx_context,
 	.query_atomic = psmx2_query_atomic,
+	.query_collective = fi_no_query_collective,
 };
 
 static int psmx2_key_compare(void *key1, void *key2)
@@ -292,6 +294,7 @@ err_out:
 	return err;
 }
 
+DIRECT_FN
 int psmx2_domain_open(struct fid_fabric *fabric, struct fi_info *info,
 		      struct fid_domain **domain, void *context)
 {
@@ -299,7 +302,7 @@ int psmx2_domain_open(struct fid_fabric *fabric, struct fi_info *info,
 	struct psmx2_fid_domain *domain_priv;
 	struct psmx2_ep_name *src_addr = info->src_addr;
 	int mr_mode = (info->domain_attr->mr_mode & FI_MR_BASIC) ? FI_MR_BASIC : 0;
-	int err;
+	int err, tmp;
 
 	FI_INFO(&psmx2_prov, FI_LOG_DOMAIN, "\n");
 
@@ -307,7 +310,7 @@ int psmx2_domain_open(struct fid_fabric *fabric, struct fi_info *info,
 				   util_fabric.fabric_fid);
 
 	if (!info->domain_attr->name ||
-	    strcmp(info->domain_attr->name, PSMX2_DOMAIN_NAME)) {
+	    strncmp(info->domain_attr->name, PSMX2_DOMAIN_NAME, strlen(PSMX2_DOMAIN_NAME))) {
 		err = -FI_EINVAL;
 		goto err_out;
 	}
@@ -336,6 +339,136 @@ int psmx2_domain_open(struct fid_fabric *fabric, struct fi_info *info,
 
 	if (info->addr_format == FI_ADDR_STR)
 		src_addr = psmx2_string_to_ep_name(info->src_addr);
+
+	/* Use generic lock/unlock functions by default */
+	domain_priv->av_lock_fn = psmx2_lock;
+	domain_priv->am_req_pool_lock_fn = psmx2_lock;
+	domain_priv->trx_ctxt_lock_fn = psmx2_lock;
+	domain_priv->rma_queue_lock_fn = psmx2_lock;
+	domain_priv->trigger_queue_lock_fn = psmx2_lock;
+	domain_priv->peer_lock_fn = psmx2_lock;
+	domain_priv->sep_lock_fn = psmx2_lock;
+	domain_priv->trigger_lock_fn = psmx2_lock;
+	domain_priv->cq_lock_fn = psmx2_lock;
+	domain_priv->mr_lock_fn = psmx2_lock;
+	domain_priv->context_lock_fn = psmx2_lock;
+	domain_priv->poll_trylock_fn = psmx2_trylock;
+
+	domain_priv->av_unlock_fn = psmx2_unlock;
+	domain_priv->am_req_pool_unlock_fn = psmx2_unlock;
+	domain_priv->trx_ctxt_unlock_fn = psmx2_unlock;
+	domain_priv->rma_queue_unlock_fn = psmx2_unlock;
+	domain_priv->trigger_queue_unlock_fn = psmx2_unlock;
+	domain_priv->peer_unlock_fn = psmx2_unlock;
+	domain_priv->sep_unlock_fn = psmx2_unlock;
+	domain_priv->trigger_unlock_fn = psmx2_unlock;
+	domain_priv->cq_unlock_fn = psmx2_unlock;
+	domain_priv->mr_unlock_fn = psmx2_unlock;
+	domain_priv->context_unlock_fn = psmx2_unlock;
+	domain_priv->poll_unlock_fn = psmx2_unlock;
+
+	/* If lock_level env is unset, then set locks based off threading model*/
+	err = fi_param_get_bool(&psmx2_prov, "lock_level", &tmp);
+	if (err < 0) {
+		switch (info->domain_attr->threading) {
+		case FI_THREAD_DOMAIN:
+			/* Disable locks not required when serializing access to a domain */
+			domain_priv->av_lock_fn = psmx2_lock_disabled;
+			domain_priv->trx_ctxt_lock_fn = psmx2_lock_disabled;
+			domain_priv->trigger_queue_lock_fn = psmx2_lock_disabled;
+			domain_priv->sep_lock_fn = psmx2_lock_disabled;
+			domain_priv->trigger_lock_fn = psmx2_lock_disabled;
+			domain_priv->cq_lock_fn = psmx2_lock_disabled;
+			domain_priv->mr_lock_fn = psmx2_lock_disabled;
+			domain_priv->context_lock_fn = psmx2_lock_disabled;
+			domain_priv->poll_trylock_fn = psmx2_trylock_disabled;
+
+			domain_priv->av_unlock_fn = psmx2_lock_disabled;
+			domain_priv->trx_ctxt_unlock_fn = psmx2_lock_disabled;
+			domain_priv->trigger_queue_unlock_fn = psmx2_lock_disabled;
+			domain_priv->sep_unlock_fn = psmx2_lock_disabled;
+			domain_priv->trigger_unlock_fn = psmx2_lock_disabled;
+			domain_priv->cq_unlock_fn = psmx2_lock_disabled;
+			domain_priv->mr_unlock_fn = psmx2_lock_disabled;
+			domain_priv->context_unlock_fn = psmx2_lock_disabled;
+			domain_priv->poll_unlock_fn = psmx2_lock_disabled;
+
+			/* Enable lock accessed by the disconnection thread */
+			domain_priv->peer_lock_fn = psmx2_lock_enabled;
+			domain_priv->peer_unlock_fn = psmx2_unlock_enabled;
+
+			/*
+			 * If FI_RMA or FI_ATOMIC caps are enabled, then locks are
+			 * required for the CQ, am_req_pool, & rma_queue
+			 * due to the PSM2 Recv thread.
+			 * NOTE: am_req_pool & rma_queue are only used when FI_RMA
+			 * and FI_ATOMIC capabilities are enabled.
+			 */
+			if ((info->caps & FI_RMA) || (info->caps & FI_ATOMIC)) {
+				domain_priv->cq_lock_fn = psmx2_lock_enabled;
+				domain_priv->am_req_pool_lock_fn = psmx2_lock_enabled;
+				domain_priv->rma_queue_lock_fn = psmx2_lock_enabled;
+				domain_priv->cq_unlock_fn = psmx2_unlock_enabled;
+				domain_priv->am_req_pool_unlock_fn = psmx2_unlock_enabled;
+				domain_priv->rma_queue_unlock_fn = psmx2_unlock_enabled;
+			}
+
+			/*
+			 * Locks accessed by the progress thread are required because
+			 * they are outside the scope of domain access serialization
+			 * implied by FI_THREAD_DOMAIN.
+			 */
+			if (domain_priv->progress_thread_enabled) {
+				domain_priv->trx_ctxt_lock_fn = psmx2_lock_enabled;
+				domain_priv->poll_trylock_fn = psmx2_trylock_enabled;
+				domain_priv->cq_lock_fn = psmx2_lock_enabled;
+				domain_priv->trx_ctxt_unlock_fn = psmx2_unlock_enabled;
+				domain_priv->poll_unlock_fn = psmx2_unlock_enabled;
+				domain_priv->cq_unlock_fn = psmx2_unlock_enabled;
+				if (info->caps & FI_TRIGGER) {
+					domain_priv->trigger_queue_lock_fn = psmx2_lock_enabled;
+					domain_priv->trigger_lock_fn = psmx2_lock_enabled;
+					domain_priv->av_lock_fn = psmx2_lock_enabled;
+					domain_priv->mr_lock_fn = psmx2_lock_enabled;
+					domain_priv->context_lock_fn = psmx2_lock_enabled;
+					domain_priv->trigger_queue_unlock_fn = psmx2_unlock_enabled;
+					domain_priv->trigger_unlock_fn = psmx2_unlock_enabled;
+					domain_priv->av_unlock_fn = psmx2_unlock_enabled;
+					domain_priv->mr_unlock_fn = psmx2_unlock_enabled;
+					domain_priv->context_unlock_fn = psmx2_unlock_enabled;
+				}
+			}
+			break;
+		default:
+			/* Otherwise, enable all locks */
+			domain_priv->av_lock_fn = psmx2_lock_enabled;
+			domain_priv->am_req_pool_lock_fn = psmx2_lock_enabled;
+			domain_priv->trx_ctxt_lock_fn = psmx2_lock_enabled;
+			domain_priv->rma_queue_lock_fn = psmx2_lock_enabled;
+			domain_priv->trigger_queue_lock_fn = psmx2_lock_enabled;
+			domain_priv->peer_lock_fn = psmx2_lock_enabled;
+			domain_priv->sep_lock_fn = psmx2_lock_enabled;
+			domain_priv->trigger_lock_fn = psmx2_lock_enabled;
+			domain_priv->cq_lock_fn = psmx2_lock_enabled;
+			domain_priv->mr_lock_fn = psmx2_lock_enabled;
+			domain_priv->context_lock_fn = psmx2_lock_enabled;
+			domain_priv->poll_trylock_fn = psmx2_trylock_enabled;
+
+			domain_priv->av_unlock_fn = psmx2_unlock_enabled;
+			domain_priv->am_req_pool_unlock_fn = psmx2_unlock_enabled;
+			domain_priv->trx_ctxt_unlock_fn = psmx2_unlock_enabled;
+			domain_priv->rma_queue_unlock_fn = psmx2_unlock_enabled;
+			domain_priv->trigger_queue_unlock_fn = psmx2_unlock_enabled;
+			domain_priv->peer_unlock_fn = psmx2_unlock_enabled;
+			domain_priv->sep_unlock_fn = psmx2_unlock_enabled;
+			domain_priv->trigger_unlock_fn = psmx2_unlock_enabled;
+			domain_priv->cq_unlock_fn = psmx2_unlock_enabled;
+			domain_priv->mr_unlock_fn = psmx2_unlock_enabled;
+			domain_priv->context_unlock_fn = psmx2_unlock_enabled;
+			domain_priv->poll_unlock_fn = psmx2_unlock_enabled;
+			break;
+		}
+	}
 
 	err = psmx2_domain_init(domain_priv, src_addr);
 	if (info->addr_format == FI_ADDR_STR)

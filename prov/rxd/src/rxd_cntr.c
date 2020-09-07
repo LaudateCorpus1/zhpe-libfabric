@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2017 Intel Corporation. All rights reserved.
+ * Copyright (c) 2013-2018 Intel Corporation. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -35,6 +35,52 @@
 
 #define RXD_FLAG(flag, mask) (((flag) & (mask)) == (mask))
 
+static int rxd_cntr_wait(struct fid_cntr *cntr_fid, uint64_t threshold, int timeout)
+{
+	struct fid_list_entry *fid_entry;
+	struct util_cntr *cntr;
+	struct rxd_ep *ep;
+	uint64_t endtime, errcnt;
+	int ret, ep_retry;
+
+	cntr = container_of(cntr_fid, struct util_cntr, cntr_fid);
+	assert(cntr->wait);
+	errcnt = ofi_atomic_get64(&cntr->err);
+	endtime = ofi_timeout_time(timeout);
+
+	do {
+		cntr->progress(cntr);
+		if (threshold <= ofi_atomic_get64(&cntr->cnt))
+			return FI_SUCCESS;
+
+		if (errcnt != ofi_atomic_get64(&cntr->err))
+			return -FI_EAVAIL;
+
+		if (ofi_adjust_timeout(endtime, &timeout))
+			return -FI_ETIMEDOUT;
+
+		ep_retry = -1;
+		fastlock_acquire(&cntr->ep_list_lock);
+		dlist_foreach_container(&cntr->ep_list, struct fid_list_entry,
+					fid_entry, entry) {
+			ep = container_of(fid_entry->fid, struct rxd_ep,
+					  util_ep.ep_fid.fid);
+			if (ep->next_retry == -1)
+				continue;
+			ep_retry = ep_retry == -1 ? ep->next_retry :
+					MIN(ep_retry, ep->next_retry);
+		}
+		fastlock_release(&cntr->ep_list_lock);
+
+		ret = fi_wait(&cntr->wait->wait_fid, ep_retry == -1 ?
+			      timeout : rxd_get_timeout(ep_retry));
+		if (ep_retry != -1 && ret == -FI_ETIMEDOUT)
+			ret = 0;
+	} while (!ret);
+
+	return ret;
+}
+
 int rxd_cntr_open(struct fid_domain *domain, struct fi_cntr_attr *attr,
 		  struct fid_cntr **cntr_fid, void *context)
 {
@@ -51,37 +97,12 @@ int rxd_cntr_open(struct fid_domain *domain, struct fi_cntr_attr *attr,
 		goto free;
 
 	*cntr_fid = &cntr->cntr_fid;
+	cntr->cntr_fid.ops->wait = rxd_cntr_wait;
 	return FI_SUCCESS;
 
 free:
 	free(cntr);
 	return ret;
-}
-
-void rxd_cntr_report_tx_comp(struct rxd_ep *ep, struct rxd_tx_entry *tx_entry)
-{
-        struct util_cntr *cntr;
-
-	switch (tx_entry->op_type) {
-	case RXD_TX_MSG:
-	case RXD_TX_TAG:
-		cntr = ep->util_ep.tx_cntr;
-		break;
-	case RXD_TX_WRITE:
-		cntr = ep->util_ep.wr_cntr;
-		break;
-	case RXD_TX_READ_REQ:
-		cntr = ep->util_ep.rem_rd_cntr;
-		break;
-	case RXD_TX_READ_RSP:
-		return;
-	default:
-		FI_WARN(&rxd_prov, FI_LOG_EP_CTRL, "invalid op type\n");
-		return;
-	}
-
-	if (cntr)
-		cntr->cntr_fid.ops->add(&cntr->cntr_fid, 1);
 }
 
 void rxd_cntr_report_error(struct rxd_ep *ep, struct fi_cq_err_entry *err)
@@ -98,6 +119,3 @@ void rxd_cntr_report_error(struct rxd_ep *ep, struct fi_cq_err_entry *err)
 	if (cntr)
 		cntr->cntr_fid.ops->adderr(&cntr->cntr_fid, 1);
 }
-
-
-

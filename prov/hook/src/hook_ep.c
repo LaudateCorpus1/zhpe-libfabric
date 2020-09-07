@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018 Intel Corporation. All rights reserved.
+ * Copyright (c) 2018-2019 Intel Corporation. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -32,7 +32,8 @@
 
 #include <stdlib.h>
 #include <ofi_enosys.h>
-#include "hook.h"
+#include "hook_prov.h"
+#include "ofi_hook.h"
 
 
 static int hook_open_tx_ctx(struct fid_ep *sep, int index,
@@ -86,7 +87,8 @@ static struct fi_ops_ep hook_ep_ops = {
 };
 
 
-static void hook_setup_ep(struct fid_ep *ep, int fclass, void *context)
+static void hook_setup_ep(enum ofi_hook_class hclass, struct fid_ep *ep,
+			  int fclass, void *context)
 {
 	ep->fid.fclass = fclass;
 	ep->fid.context = context;
@@ -110,7 +112,8 @@ int hook_scalable_ep(struct fid_domain *domain, struct fi_info *info,
 	if (!mysep)
 		return -FI_ENOMEM;
 
-	hook_setup_ep(&mysep->ep, FI_CLASS_SEP, context);
+	mysep->domain = dom;
+	hook_setup_ep(dom->fabric->hclass, &mysep->ep, FI_CLASS_SEP, context);
 	ret = fi_scalable_ep(dom->hdomain, info, &mysep->hep, &mysep->ep.fid);
 	if (ret)
 		free(mysep);
@@ -132,6 +135,7 @@ int hook_stx_ctx(struct fid_domain *domain,
 	if (!mystx)
 		return -FI_ENOMEM;
 
+	mystx->domain = dom;
 	mystx->stx.fid.fclass = FI_CLASS_STX_CTX;
 	mystx->stx.fid.context = context;
 	mystx->stx.fid.ops = &hook_fid_ops;
@@ -157,7 +161,8 @@ int hook_srx_ctx(struct fid_domain *domain, struct fi_rx_attr *attr,
 	if (!srx)
 		return -FI_ENOMEM;
 
-	hook_setup_ep(&srx->ep, FI_CLASS_SRX_CTX, context);
+	srx->domain = dom;
+	hook_setup_ep(dom->fabric->hclass, &srx->ep, FI_CLASS_SRX_CTX, context);
 	ret = fi_srx_context(dom->hdomain, attr, &srx->hep, &srx->ep.fid);
 	if (ret)
 		free(srx);
@@ -179,7 +184,9 @@ static int hook_open_tx_ctx(struct fid_ep *sep, int index,
 	if (!mytx)
 		return -FI_ENOMEM;
 
-	hook_setup_ep(&mytx->ep, FI_CLASS_TX_CTX, context);
+	mytx->domain = mysep->domain;
+	hook_setup_ep(mysep->domain->fabric->hclass, &mytx->ep,
+		      FI_CLASS_TX_CTX, context);
 	ret = fi_tx_context(mysep->hep, index, attr, &mytx->hep, &mytx->ep.fid);
 	if (ret)
 		free(mytx);
@@ -201,7 +208,9 @@ static int hook_open_rx_ctx(struct fid_ep *sep, int index,
 	if (!myrx)
 		return -FI_ENOMEM;
 
-	hook_setup_ep(&myrx->ep, FI_CLASS_RX_CTX, context);
+	myrx->domain = mysep->domain;
+	hook_setup_ep(mysep->domain->fabric->hclass, &myrx->ep,
+		      FI_CLASS_RX_CTX, context);
 	ret = fi_rx_context(mysep->hep, index, attr, &myrx->hep, &myrx->ep.fid);
 	if (ret)
 		free(myrx);
@@ -222,6 +231,7 @@ int hook_passive_ep(struct fid_fabric *fabric, struct fi_info *info,
 	if (!mypep)
 		return -FI_ENOMEM;
 
+	mypep->fabric = fab;
 	mypep->pep.fid.fclass = FI_CLASS_PEP;
 	mypep->pep.fid.context = context;
 	mypep->pep.fid.ops = &hook_fid_ops;
@@ -237,6 +247,33 @@ int hook_passive_ep(struct fid_fabric *fabric, struct fi_info *info,
 	return ret;
 }
 
+int hook_endpoint_init(struct fid_domain *domain, struct fi_info *info,
+		       struct fid_ep **ep, void *context, struct hook_ep *myep)
+{
+	struct hook_domain *dom = container_of(domain, struct hook_domain, domain);
+	struct fid *saved_fid;
+	int ret;
+
+	saved_fid = info->handle;
+	if (saved_fid) {
+		info->handle = hook_to_hfid(info->handle);
+		if (!info->handle)
+			info->handle = saved_fid;
+	}
+	myep->domain = dom;
+
+	hook_setup_ep(dom->fabric->hclass, &myep->ep, FI_CLASS_EP, context);
+
+	ret = fi_endpoint(dom->hdomain, info, &myep->hep, &myep->ep.fid);
+	info->handle = saved_fid;
+
+	if (ret)
+		return ret;
+
+	*ep = &myep->ep;
+	return 0;
+}
+
 int hook_endpoint(struct fid_domain *domain, struct fi_info *info,
 		  struct fid_ep **ep, void *context)
 {
@@ -248,12 +285,18 @@ int hook_endpoint(struct fid_domain *domain, struct fi_info *info,
 	if (!myep)
 		return -FI_ENOMEM;
 
-	hook_setup_ep(&myep->ep, FI_CLASS_EP, context);
-	ret = fi_endpoint(dom->hdomain, info, &myep->hep, &myep->ep.fid);
+	ret = hook_endpoint_init(domain, info, ep, context, myep);
 	if (ret)
-		free(myep);
-	else
-		*ep = &myep->ep;
+		goto err1;
 
+	ret = hook_ini_fid(dom->fabric->prov_ctx, &myep->ep.fid);
+	if (ret)
+		goto err2;
+
+	return 0;
+err2:
+	fi_close(&myep->hep->fid);
+err1:
+	free(myep);
 	return ret;
 }

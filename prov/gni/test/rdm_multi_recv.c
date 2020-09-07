@@ -2,6 +2,7 @@
  * Copyright (c) 2015-2017 Los Alamos National Security, LLC.
  *                         All rights reserved.
  * Copyright (c) 2015-2017 Cray Inc. All rights reserved.
+ * Copyright (c) 2019 Triad National Security, LLC. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -91,7 +92,6 @@ char *target2, *target2_base;
 char *source, *source_base;
 char *source2, *source2_base;
 struct fid_mr *rem_mr[NUMEPS], *loc_mr[NUMEPS];
-uint64_t mr_key[NUMEPS];
 
 static struct fid_cntr *send_cntr[NUMEPS], *recv_cntr[NUMEPS];
 static struct fi_cntr_attr cntr_attr = {
@@ -235,7 +235,6 @@ static void setup_common(void)
 				  BUF_SZ);
 		}
 
-		mr_key[i] = fi_mr_key(rem_mr[i]);
 	}
 }
 
@@ -263,6 +262,36 @@ void rdm_multi_r_setup(void)
 	setup_common();
 }
 
+void rdm_multi_r_setup_nr(void)
+{
+	int ret = 0, i = 0;
+
+	hints = fi_allocinfo();
+	cr_assert(hints, "fi_allocinfo");
+
+	hints->domain_attr->mr_mode = GNIX_DEFAULT_MR_MODE;
+	hints->domain_attr->cq_data_size = NUMEPS * 2;
+	hints->domain_attr->control_progress = FI_PROGRESS_AUTO;
+	hints->domain_attr->data_progress = FI_PROGRESS_AUTO;
+	hints->mode = mode_bits;
+	hints->caps = FI_SOURCE | FI_MSG;
+	hints->fabric_attr->prov_name = strdup("gni");
+
+	/* Get info about fabric services with the provided hints */
+	for (; i < NUMEPS; i++) {
+		ret = fi_getinfo(fi_version(), NULL, 0, 0, hints, &fi[i]);
+		cr_assert(!ret, "fi_getinfo");
+	}
+
+	setup_common_eps();
+
+	for (i = 0; i < NUMEPS; i++) {
+		rem_mr[i] = NULL;
+		loc_mr[i] = NULL;
+	}
+}
+
+
 static void rdm_multi_r_teardown(void)
 {
 	int ret = 0, i = 0;
@@ -271,8 +300,10 @@ static void rdm_multi_r_teardown(void)
 		fi_close(&recv_cntr[i]->fid);
 		fi_close(&send_cntr[i]->fid);
 
-		fi_close(&loc_mr[i]->fid);
-		fi_close(&rem_mr[i]->fid);
+		if (loc_mr[i] != NULL)
+			fi_close(&loc_mr[i]->fid);
+		if (rem_mr[i] != NULL)
+			fi_close(&rem_mr[i]->fid);
 
 		ret = fi_close(&ep[i]->fid);
 		cr_assert(!ret, "failure in closing ep.");
@@ -432,6 +463,11 @@ TestSuite(rdm_multi_r,
 	  .fini = rdm_multi_r_teardown,
 	  .disabled = false);
 
+TestSuite(rdm_multi_r_nr,
+	  .init = rdm_multi_r_setup_nr,
+	  .fini = rdm_multi_r_teardown,
+	  .disabled = false);
+
 void do_multirecv(int len)
 {
 	int i, j, ret;
@@ -449,6 +485,8 @@ void do_multirecv(int len)
 	uint64_t *expected_addrs;
 	bool *addr_recvd, found, got_fi_multi_cqe = false;
 	int sends_done = 0;
+
+	dbg_printf("do_multirecv_trunc_last() called with len = %d\n", len);
 
 	init_data(source, len, 0xab);
 	init_data(target, len, 0);
@@ -557,12 +595,23 @@ void do_multirecv(int len)
 	dbg_printf("got context events!\n");
 }
 
-Test(rdm_multi_r, multirecv, .disabled = true)
+Test(rdm_multi_r, multirecv, .disabled = false)
 {
 	xfer_for_each_size(do_multirecv, 1, BUF_SZ);
 }
 
-Test(rdm_multi_r, multirecv_retrans, .disabled = true)
+Test(rdm_multi_r, multirecv_retrans, .disabled = false)
+{
+	inject_enable();
+	xfer_for_each_size(do_multirecv, 1, BUF_SZ);
+}
+
+Test(rdm_multi_r_nr, multirecv, .disabled = false)
+{
+	xfer_for_each_size(do_multirecv, 1, BUF_SZ);
+}
+
+Test(rdm_multi_r_nr, multirecv_retrans, .disabled = false)
 {
 	inject_enable();
 	xfer_for_each_size(do_multirecv, 1, BUF_SZ);
@@ -589,6 +638,8 @@ void do_multirecv_send_first(int len)
 
 	init_data(source, len, 0xab);
 	init_data(target, len, 0);
+
+	dbg_printf("do_multirecv_send_first() called with len = %d\n", len);
 
 	ret = fi_getopt(&ep[NUMEPS-1]->fid, FI_OPT_ENDPOINT,
 			FI_OPT_MIN_MULTI_RECV,
@@ -735,7 +786,7 @@ void do_multirecv_trunc_last(int len)
 	int i, j, ret;
 	ssize_t sz;
 	struct fi_cq_tagged_entry s_cqe, d_cqe;
-	struct fi_cq_err_entry err_cqe;
+	struct fi_cq_err_entry err_cqe = {0};
 	struct iovec iov;
 	struct fi_msg msg = {0};
 	uint64_t s[NUMEPS] = {0}, r[NUMEPS] = {0}, s_e[NUMEPS] = {0};
@@ -849,32 +900,33 @@ void do_multirecv_trunc_last(int len)
 			s[0]++;
 		}
 
-		/* Should not return a CQ event */
+		/* Should return -FI_EAVAIL */
 		ret = fi_cq_read(msg_cq[dest_ep], &d_cqe, 1);
-		cr_assert_eq(ret, 0, "fi_cq_read should return 0");
+		if (ret == 1) {
+			r[dest_ep]++;  /* we're counting the buffer release as a receive */
+		}
 
-		ret = fi_cq_readerr(msg_cq[1], &err_cqe, 0);
+		if (ret == -FI_EAVAIL) {
+		ret = fi_cq_readerr(msg_cq[dest_ep], &err_cqe, 0);
 		if (ret == 1) {
 			cr_assert((uint64_t)err_cqe.op_context ==
-				  (uint64_t)target,
+				  (uint64_t)source,
 				  "Bad error context");
-			cr_assert(err_cqe.flags ==
-				  (FI_MSG | FI_SEND | FI_MULTI_RECV));
+			cr_assert(err_cqe.flags == (FI_MSG | FI_RECV));
 			cr_assert(err_cqe.len == min_multi_recv,
 				  "Bad error len");
 			cr_assert(err_cqe.buf == (void *) expected_addrs[1],
 				  "Bad error buf");
-			cr_assert(err_cqe.data == 0, "Bad error data");
-			cr_assert(err_cqe.tag == 0, "Bad error tag");
 			cr_assert(err_cqe.olen == 1, "Bad error olen");
 			cr_assert(err_cqe.err == FI_ETRUNC, "Bad error errno");
-			cr_assert(err_cqe.prov_errno == 0, "Bad prov errno");
+			cr_assert(err_cqe.prov_errno == FI_ETRUNC, "Bad prov errno");
 			cr_assert(err_cqe.err_data == NULL,
 				  "Bad error provider data");
-			s_e[0]++;
+			r_e[dest_ep]++;
+		}
 		}
 
-	} while (s[0] != 2 || r_e[dest_ep] != 1);
+	} while (s[0] != 2 || r_e[dest_ep] != 1 || r[dest_ep] != 2);
 
 	check_cntrs(s, r, s_e, r_e, false);
 
@@ -890,13 +942,13 @@ void do_multirecv_trunc_last(int len)
  * message size of 1 below might change depending on whether 0 is a
  * valid value for FI_OPT_MIN_MULTI_RECV (Github issue #1120)
  */
-Test(rdm_multi_r, multirecv_trunc_last, .disabled = true)
+Test(rdm_multi_r, multirecv_trunc_last, .disabled = false)
 {
-	xfer_for_each_size(do_multirecv_trunc_last, 1, BUF_SZ);
+	xfer_for_each_size(do_multirecv_trunc_last, 2, BUF_SZ);
 }
 
-Test(rdm_multi_r, multirecv_trunc_last_retrans, .disabled = true)
+Test(rdm_multi_r, multirecv_trunc_last_retrans, .disabled = false)
 {
 	inject_enable();
-	xfer_for_each_size(do_multirecv_trunc_last, 1, BUF_SZ);
+	xfer_for_each_size(do_multirecv_trunc_last, 2, BUF_SZ);
 }

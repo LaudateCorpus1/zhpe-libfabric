@@ -71,6 +71,17 @@ VERBS_INI ;
 #  define VERBS_INIT NULL
 #endif
 
+#if (HAVE_EFA) && (HAVE_EFA_DL)
+#  define EFA_INI FI_EXT_INI
+#  define EFA_INIT NULL
+#elif (HAVE_EFA)
+#  define EFA_INI INI_SIG(fi_efa_ini)
+#  define EFA_INIT fi_efa_ini()
+EFA_INI ;
+#else
+#  define EFA_INIT NULL
+#endif
+
 #if (HAVE_PSM) && (HAVE_PSM_DL)
 #  define PSM_INI FI_EXT_INI
 #  define PSM_INIT NULL
@@ -113,17 +124,6 @@ SOCKETS_INI ;
 USNIC_INI ;
 #else
 #  define USNIC_INIT NULL
-#endif
-
-#if (HAVE_MLX) && (HAVE_MLX_DL)
-#  define MLX_INI FI_EXT_INI
-#  define MLX_INIT NULL
-#elif (HAVE_MLX)
-#  define MLX_INI INI_SIG(fi_mlx_ini)
-#  define MLX_INIT fi_mlx_ini()
-MLX_INI ;
-#else
-#  define MLX_INIT NULL
 #endif
 
 #if (HAVE_UDP) && (HAVE_UDP_DL)
@@ -206,6 +206,48 @@ SHM_INI ;
 #else
 #  define SHM_INIT NULL
 #endif
+
+#if (HAVE_MRAIL) && (HAVE_MRAIL_DL)
+#  define MRAIL_INI FI_EXT_INI
+#  define MRAIL_INIT NULL
+#elif (HAVE_MRAIL)
+#  define MRAIL_INI INI_SIG(fi_mrail_ini)
+#  define MRAIL_INIT fi_mrail_ini()
+MRAIL_INI ;
+#else
+#  define MRAIL_INIT NULL
+#endif
+
+#if (HAVE_RSTREAM) && (HAVE_RSTREAM_DL)
+#  define RSTREAM_INI FI_EXT_INI
+#  define RSTREAM_INIT NULL
+#elif (HAVE_RSTREAM)
+#  define RSTREAM_INI INI_SIG(fi_rstream_ini)
+#  define RSTREAM_INIT fi_rstream_ini()
+RSTREAM_INI ;
+#else
+#  define RSTREAM_INIT NULL
+#endif
+
+#if(HAVE_PERF)
+#  define HOOK_PERF_INI INI_SIG(fi_hook_perf_ini)
+#  define HOOK_PERF_INIT fi_hook_perf_ini()
+HOOK_PERF_INI ;
+#else
+#  define HOOK_PERF_INIT NULL
+#endif
+
+#if(HAVE_HOOK_DEBUG)
+#  define HOOK_DEBUG_INI INI_SIG(fi_debug_hook_ini)
+#  define HOOK_DEBUG_INIT fi_debug_hook_ini()
+HOOK_DEBUG_INI ;
+#else
+#  define HOOK_DEBUG_INIT NULL
+#endif
+
+#  define HOOK_NOOP_INI INI_SIG(fi_hook_noop_ini)
+#  define HOOK_NOOP_INIT fi_hook_noop_ini()
+HOOK_NOOP_INI ;
 
 #if (HAVE_ZHPE) && (HAVE_ZHPE_DL)
 #  define ZHPE_INI FI_EXT_INI

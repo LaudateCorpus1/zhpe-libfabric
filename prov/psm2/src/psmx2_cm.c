@@ -32,7 +32,8 @@
 
 #include "psmx2.h"
 
-static int psmx2_cm_getname(fid_t fid, void *addr, size_t *addrlen)
+DIRECT_FN
+STATIC int psmx2_cm_getname(fid_t fid, void *addr, size_t *addrlen)
 {
 	struct psmx2_fid_ep *ep;
 	struct psmx2_fid_sep *sep;

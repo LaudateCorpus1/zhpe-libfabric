@@ -11,6 +11,10 @@ fi_sockets \- The Sockets Fabric Provider
 
 # OVERVIEW
 
+The sockets provider is being deprecated in favor of the tcp, udp, and
+utility providers.  Further work on the sockets provider will be minimal.
+Most applications should instead use the tcp provider instead.
+
 The sockets provider is a general purpose provider that can be used on any
 system that supports TCP sockets.  The provider is not intended to provide
 performance improvements over regular TCP sockets, but rather to allow
@@ -60,6 +64,9 @@ The sockets provider checks for the following environment variables -
 *FI_SOCKETS_PE_WAITTIME*
 : An integer value that specifies how many milliseconds to spin while waiting for progress in *FI_PROGRESS_AUTO* mode.
 
+*FI_SOCKETS_CONN_TIMEOUT*
+: An integer value that specifies how many milliseconds to wait for one connection establishment.
+
 *FI_SOCKETS_MAX_CONN_RETRY*
 : An integer value that specifies the number of socket connection retries before reporting as failure.
 
@@ -92,6 +99,9 @@ The sockets provider checks for the following environment variables -
 
 *FI_SOCKETS_KEEPALIVE_PROBES*
 : An integer to specify the maximum number of keepalive probes sent before dropping the connection. Only relevant if *FI_SOCKETS_KEEPALIVE_ENABLE* is enabled.
+
+*FI_SOCKETS_IFACE*
+: The prefix or the name of the network interface (default: any)
 
 # LARGE SCALE JOBS
 

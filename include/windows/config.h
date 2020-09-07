@@ -50,6 +50,9 @@
 /* psm provider is built */
 /* #undef HAVE_PSM */
 
+/* perf provider is built */
+#define HAVE_PERF 1
+
 /* psm2 provider is built */
 /* #undef HAVE_PSM2 */
 
@@ -68,14 +71,14 @@
 /* Define to 1 if you have the <rdma/rsocket.h> header file. */
 /* #undef HAVE_RDMA_RSOCKET_H */
 
-/* sockets provider is built */
-#define HAVE_SOCKETS 1
-
 /* UDP provider is built */
 #define HAVE_UDP 1
 
-/* TCP provider is built */
-#define HAVE_TCP 1
+/* UDP provider is built as DSO */
+/* #undef HAVE_UDP_DL */
+
+/* sockets provider is built */
+#define HAVE_SOCKETS 1
 
 /* sockets provider is built as DSO */
 /* #undef HAVE_SOCKETS_DL */
@@ -156,19 +159,19 @@
 #define PACKAGE_BUGREPORT "ofiwg@lists.openfabrics.org"
 
 /* Define to the full name of this package. */
-#define PACKAGE_NAME "libfabric"
-
-/* Define to the full name and version of this package. */
-#define PACKAGE_STRING "libfabric 1.6.2"
+#define PACKAGE_NAME PACKAGE
 
 /* Define to the one symbol short name of this package. */
-#define PACKAGE_TARNAME "libfabric"
+#define PACKAGE_TARNAME PACKAGE
+
+/* Define to the version of this package. */
+#define PACKAGE_VERSION "1.11.0a1"
+
+/* Define to the full name and version of this package. */
+#define PACKAGE_STRING PACKAGE_NAME " " PACKAGE_VERSION
 
 /* Define to the home page for this package. */
 #define PACKAGE_URL ""
-
-/* Define to the version of this package. */
-#define PACKAGE_VERSION "1.6.2"
 
 /* Define to 1 if pthread_spin_init is available. */
 /* #undef PT_LOCK_SPIN */
@@ -192,7 +195,7 @@
 /* Version number of package */
 #define _FI_EXP(s) #s
 #define _FI_TO_STRING(s) _FI_EXP(s)
-#define VERSION _FI_TO_STRING(FI_MAJOR_VERSION) "." _FI_TO_STRING(FI_MINOR_VERSION) ".0"
+#define VERSION _FI_TO_STRING(FI_MAJOR_VERSION) "." _FI_TO_STRING(FI_MINOR_VERSION) ".1a1"
 
 #ifndef BUILD_ID
 #define BUILD_ID ""

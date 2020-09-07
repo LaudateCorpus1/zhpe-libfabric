@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2017 Intel Corporation, Inc.  All rights reserved.
- * Copyright (c) 2018 Hewlett Packard Enterprise Development LP.  All rights reserved.
+ * Copyright (c) 2018-2019 Hewlett Packard Enterprise Development LP.  All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You m"ay choose to be licensed under the terms of the GNU
@@ -33,68 +33,24 @@
 
 #include <zhpe.h>
 
-#ifdef HAVE_LINUX_UMMUNOTIFY_H
+#define ZHPE_SUBSYS	FI_LOG_DOMAIN
 
-#include <sys/ioctl.h>
+#define QACCESS_RD	(ZHPEQ_MR_PUT | ZHPEQ_MR_GET_REMOTE | ZHPEQ_MR_SEND)
+#define QACCESS_WR	(ZHPEQ_MR_GET | ZHPEQ_MR_PUT_REMOTE | ZHPEQ_MR_RECV)
+#define QACCESS_RW	(QACCESS_RD | QACCESS_WR)
 
-#include <linux/ummunotify.h>
+struct zhpe_mr_cache_data {
+	struct zhpeq_key_data	*qkdata;
+};
 
-#endif
-
-#define ZHPE_LOG_DBG(...) _ZHPE_LOG_DBG(FI_LOG_DOMAIN, __VA_ARGS__)
-#define ZHPE_LOG_ERROR(...) _ZHPE_LOG_ERROR(FI_LOG_DOMAIN, __VA_ARGS__)
-
-static inline struct zhpe_mr_cached **entry_data(struct ofi_mr_entry *entry)
+static inline struct zhpe_mr_cache_data *entry_data(struct ofi_mr_entry *entry)
 {
 	return (void *)entry->data;
 }
 
-static void zhpe_zmr_free_cached(void *ptr)
-{
-	struct zhpe_mr		*zmr = ptr;
-	struct zhpe_mr_cached	*zmc =
-		container_of(zmr, struct zhpe_mr_cached, zmr);
-
-	free(zmc);
-}
-
-static int zhpe_zmr_put_cached(struct zhpe_mr *zmr)
-{
-	struct zhpe_domain	*domain = zmr->domain;
-	struct zhpe_mr_cached	*zmc =
-		container_of(zmr, struct zhpe_mr_cached, zmr);
-
-	if (!zmr)
-		return 0;
-
-	fastlock_acquire(&domain->cache_lock);
-	/* If the entry is NULL, it has been freed from the cache,
-	 * but someone else might have a hold on the zmr.
-	 */
-	if (zmc->entry)
-		ofi_mr_cache_delete(&zmr->domain->cache, zmc->entry);
-	else
-		zhpe_zmr_put_uncached(&zmc->zmr);
-	fastlock_release(&domain->cache_lock);
-
-	return 0;
-}
-
-static struct zhpe_mr_ops zmr_ops_cached = {
-	.fi_ops = {
-		.size		= sizeof(struct fi_ops),
-		.close		= zhpe_mr_close,
-		.bind		= fi_no_bind,
-		.control	= fi_no_control,
-		.ops_open	= fi_no_ops_open,
-	},
-	.freeme			= zhpe_zmr_free_cached,
-	.put			= zhpe_zmr_put_cached,
-};
-
-static int zhpe_mr_reg_int_cached(struct zhpe_domain *domain, const void *buf,
-				  size_t len, uint64_t access, uint32_t qaccess,
-				  struct fid_mr **mr)
+static int zhpe_mr_reg_cached(struct zhpe_dom *zdom, const void *buf,
+			      size_t len,  uint32_t qaccess,
+			      struct zhpeq_key_data **qkdata_out)
 {
 	int			ret;
 	struct iovec		iov = {
@@ -104,254 +60,203 @@ static int zhpe_mr_reg_int_cached(struct zhpe_domain *domain, const void *buf,
 	struct fi_mr_attr	attr = {
 		.mr_iov		= &iov,
 		.iov_count	= 1,
-		.access		= access,
+		/*
+		 * The cache implementation ignores access. Our
+		 * add_region function will try for read/write and
+		 * then try read-only. It will be up to this routine to
+		 * check the returned flags and see if they are acceptable.
+		 */
+		.access		= 0,
 	};
 	struct ofi_mr_entry	*entry;
-	struct  zhpe_mr_cached	*zmc;
+	struct zhpe_mr_cache_data *cdata;
+	int64_t			old;
+	uint64_t		notify_start;
+	uint64_t		notify_end;
 
-	assert(!qaccess);
-	fastlock_acquire(&domain->cache_lock);
-	ret = ofi_mr_cache_search(&domain->cache, &attr, &entry);
-	fastlock_release(&domain->cache_lock);
-	if (OFI_LIKELY(ret >= 0)) {
-		zmc = *entry_data(entry);
-		*mr = &zmc->zmr.mr_fid;
-	} else
-		*mr = NULL;
+	*qkdata_out = NULL;
+	for (;;) {
+		ret = ofi_mr_cache_search(&zdom->cache, &attr, &entry);
+		if (OFI_UNLIKELY(ret < 0))
+			goto done;
+		cdata = entry_data(entry);
+		/*
+		 * Mark entry as active, bit zero used by driver as
+		 * a shoot down flag.
+		 */
+		old = atm_add(cdata->qkdata->active_uptr, 2);
+		zhpe_stats_stamp_dbg(__func__, __LINE__,
+				     (uintptr_t)cdata->qkdata->active_uptr, old,
+				     (uintptr_t)buf, len);
+		if (old & 1) {
+			/* Shot down: clean up stale entries and retry. */
+			atm_sub(cdata->qkdata->active_uptr, 2);
+			ofi_mr_cache_delete(&zdom->cache, entry);
+			/* Clean anything overlapping the pages. */
+			notify_start = page_down((uintptr_t)buf);
+			notify_end = page_up((uintptr_t)buf + len);
+			mutex_lock(&mm_lock);
+			ofi_mr_cache_notify(&zdom->cache, TO_PTR(notify_start),
+					    notify_end - notify_start);
+			mutex_unlock(&mm_lock);
+			ofi_mr_cache_flush(&zdom->cache, false);
+			continue;
+		}
+		break;
+	}
+	if ((cdata->qkdata->z.access & qaccess & QACCESS_RW) !=
+	    (qaccess & QACCESS_RW)) {
+		ret = -EFAULT;
+		ofi_mr_cache_delete(&zdom->cache, entry);
+		goto done;
+	}
 
+	*qkdata_out = cdata->qkdata;
+	ret = 0;
+
+done:
 	return ret;
 }
 
-#ifdef HAVE_LINUX_UMMUNOTIFY_H
+static int zhpe_mr_free_cached(struct zhpe_dom *zdom,
+			       struct zhpeq_key_data *qkdata)
+{
+	struct ofi_mr_entry	*entry = qkdata->cache_entry;
+	int64_t			old;
 
-#include <sys/ioctl.h>
+	/* Deactivate entry. */
+	old = atm_sub(qkdata->active_uptr, 2);
+	zhpe_stats_stamp_dbg(__func__, __LINE__,
+			     (uintptr_t)qkdata->active_uptr, old, 0, 0);
+	assert_always(!(old & 1));
+	assert_always(old >= 2);
+	ofi_mr_cache_delete(&zdom->cache, entry);
 
-#include <linux/ummunotify.h>
+	return 0;
+}
 
 static int zhpe_mr_cache_add_region(struct ofi_mr_cache *cache,
 				    struct ofi_mr_entry *entry)
 {
 	int			ret;
-	struct zhpe_domain	*domain =
-		container_of(cache->domain, struct zhpe_domain, util_domain);
-	void			*buf = entry->iov.iov_base;
-	size_t			len = entry->iov.iov_len;
-	uint32_t		qaccess =
-		(ZHPEQ_MR_GET | ZHPEQ_MR_PUT | ZHPEQ_MR_GET_REMOTE |
-		 ZHPEQ_MR_PUT_REMOTE | ZHPEQ_MR_SEND | ZHPEQ_MR_RECV |
-		 ZHPEQ_MR_KEY_ZERO_OFF | ZHPE_MR_KEY_INT);
-	struct zhpe_mr_cached	*zmc;
+	struct zhpe_mr_cache_data *cdata = entry_data(entry);
+	struct zhpe_dom		*zdom = udom2zdom(cache->domain);
+	void			*buf = entry->info.iov.iov_base;
+	size_t			len = entry->info.iov.iov_len;
 
-	zmc = malloc(sizeof(*zmc));
-	*entry_data(entry) = zmc;
-	if (!zmc) {
-		ret = -FI_ENOMEM;
-		goto done;
-	}
-	zmc->entry = entry;
-
-	ret = zhpe_zmr_reg(domain, buf, len, qaccess,
-			   atm_inc(&domain->mr_zhpe_key),
-			   &zmc->zmr, &zmr_ops_cached);
+	/* Flush shot down registrations before new registration. */
+	ofi_mr_cache_flush(cache, false);
+	ret = zhpeq_mr_reg(zdom->zqdom, buf, len, QACCESS_RW, &cdata->qkdata);
 	if (ret < 0) {
-		free(zmc);
-		*entry_data(entry) = NULL;
-		ZHPE_LOG_ERROR("Failed to register memory 0x%lx-0x%lx,"
-			       " error %d:%s\n",
-			       (uintptr_t)buf, (uintptr_t)buf + len - 1,
-			       ret, fi_strerror(-ret));
+		if (ret != -EFAULT)
+			goto done;
+		/* Possible read-only mapping. */
+		ret = zhpeq_mr_reg(zdom->zqdom, buf, len, QACCESS_RD,
+				   &cdata->qkdata);
+		if (ret < 0)
+			goto done;
 	}
+	cdata->qkdata->cache_entry = entry;
+
  done:
+	/* zhpeq_mr_reg() will set cdata->qkdata to NULL on error. */
+
 	return ret;
 }
 
 static void zhpe_mr_cache_delete_region(struct ofi_mr_cache *cache,
 					struct ofi_mr_entry *entry)
 {
-	struct zhpe_mr_cached	*zmc = *entry_data(entry);
-	void			*buf = entry->iov.iov_base;
-	size_t			len = entry->iov.iov_len;
+	struct zhpe_mr_cache_data *cdata = entry_data(entry);
 	int			rc;
 
-	/* domain->cache_lock is held */
-	zmc->entry = NULL;
-	rc = zhpe_zmr_put_uncached(&zmc->zmr);
+	if (OFI_UNLIKELY(!cdata->qkdata))
+		return;
+
+	rc = zhpeq_qkdata_free(cdata->qkdata);
 	if (rc < 0)
-		ZHPE_LOG_ERROR("Failed to unregister memory 0x%lx-0x%lx,"
-			       " error %d:%s\n",
-			       (uintptr_t)buf, (uintptr_t)buf + len - 1,
+		ZHPE_LOG_ERROR("zhpeq_qkdata_free() error %d:%s\n",
 			       rc, fi_strerror(-rc));
 }
 
-static int zhpe_monitor_subscribe(struct ofi_mem_monitor *monitor,
-				  void *addr, size_t len,
-				  struct ofi_subscription *subscription)
+void zhpe_dom_mr_cache_destroy(struct zhpe_dom *zdom)
 {
-	int			ret;
-	struct zhpe_domain	*domain =
-		container_of(monitor, struct zhpe_domain, monitor);
-	struct ummunotify_register_ioctl reg = {
-		.start		= (uintptr_t)addr,
-		.end		= (uintptr_t)addr + len - 1,
-		.user_cookie	= (uintptr_t)subscription,
-	};
-
-	ret = ioctl(domain->monitor_fd, UMMUNOTIFY_REGISTER_REGION, &reg);
-	if (ret == -1) {
-		ret = -errno;
-		ZHPE_LOG_ERROR("Failed to monitor region 0x%Lx-0x%Lx,"
-			       " error %d:%s\n",
-			       (ullong)reg.start, (ullong)reg.end,
-			       ret, strerror(-ret));
-	}
-
-	return ret;
-}
-
-static void zhpe_monitor_unsubscribe(struct ofi_mem_monitor *monitor,
-				     void *addr, size_t len,
-				     struct ofi_subscription *subscription)
-{
-	struct zhpe_domain	*domain =
-		container_of(monitor, struct zhpe_domain, monitor);
-	uint64_t		unreg = (uintptr_t)subscription;
-	int			rc;
-
-	rc = ioctl(domain->monitor_fd, UMMUNOTIFY_UNREGISTER_REGION, &unreg);
-	if (rc == -1) {
-		rc = -errno;
-		ZHPE_LOG_ERROR("Failed to unregister region 0x%lx-0x%lx,"
-			       " error %d:%s\n",
-			       (uintptr_t)addr, (uintptr_t)addr + len - 1,
-			       rc, strerror(-rc));
+	if (zdom->qkdata_mr_reg == zhpe_mr_reg_cached) {
+		ofi_mr_cache_cleanup(&zdom->cache);
+		zdom->qkdata_mr_reg = NULL;
 	}
 }
 
-static struct ofi_subscription *
-zhpe_monitor_get_event(struct ofi_mem_monitor *monitor)
+static void noop_monitor_init(struct ofi_mem_monitor *monitor)
 {
-	struct ofi_subscription	*ret = NULL;
-	struct zhpe_domain	*domain =
-		container_of(monitor, struct zhpe_domain, monitor);
-	ssize_t			rc;
-	struct ummunotify_event	evt;
-	uint64_t		events;
-
-	events = atm_load_rlx(domain->monitor_eventsp);
-	if (events == domain->monitor_events)
-		goto done;
-
-	for (;;) {
-		rc = read(domain->monitor_fd, &evt, sizeof(evt));
-		if (rc == -1) {
-			rc = -errno;
-			if (rc == -EAGAIN) {
-				/* We've caught up */
-				domain->monitor_events = events;
-				break;
-			}
-			ZHPE_LOG_ERROR("Failed to read event, error %ld:%s\n",
-				       rc, strerror(-rc));
-			break;
-		}
-		if (rc != sizeof(evt)) {
-			ZHPE_LOG_ERROR("read %ld, expected %lu\n",
-				       rc, sizeof(evt));
-			break;
-		}
-		if (evt.type == UMMUNOTIFY_EVENT_TYPE_INVAL) {
-			ret = (void *)(uintptr_t)evt.user_cookie_counter;
-			break;
-		}
-	}
- done:
-	return ret;
 }
 
-#endif
-
-void zhpe_mr_cache_destroy(struct zhpe_domain *domain)
+static int noop_monitor_subscribe(struct ofi_mem_monitor *notifier,
+				  const void *addr, size_t len)
 {
-	if (domain->monitor_fd != -1) {
-		if (domain->cache_inited) {
-			fastlock_destroy(&domain->cache_lock);
-			ofi_mr_cache_cleanup(&domain->cache);
-			domain->cache_inited = false;
-		}
-		close(domain->monitor_fd);
-		domain->monitor_fd = -1;
-		if (domain->monitor_eventsp)
-			munmap(domain->monitor_eventsp,
-			       sizeof(*domain->monitor_eventsp));
-		domain->monitor_eventsp = NULL;
-		ofi_monitor_cleanup(&domain->monitor);
-	}
+	return 0;
 }
 
-int zhpe_mr_cache_init(struct zhpe_domain *domain)
+static void noop_monitor_unsubscribe(struct ofi_mem_monitor *notifier,
+				     const void *addr, size_t len)
+{
+}
+
+/* Our driver is performing the monitor functionality. */
+static struct dlist_entry	noop_dentry;
+
+static struct ofi_mem_monitor	noop_monitor = {
+	.list			= DLIST_INIT(&noop_monitor.list),
+	.init			= noop_monitor_init,
+	.cleanup		= noop_monitor_init,
+	.subscribe		= noop_monitor_subscribe,
+	.unsubscribe		= noop_monitor_unsubscribe,
+};
+
+int zhpe_dom_mr_cache_init(struct zhpe_dom *zdom)
 {
 	int			ret = 0;
-	const char		*dev_name = "/dev/ummunotify";
-	int			rc;
 
 	if (!zhpe_mr_cache_enable)
 		goto done;
-#ifdef HAVE_LINUX_UMMUNOTIFY_H
-	domain->monitor_fd = open(dev_name, O_RDONLY | O_NONBLOCK);
-	if (domain->monitor_fd == -1) {
-		rc = errno;
-		ZHPE_LOG_ERROR("Failed to open %s, error %d:%s,"
-			       " mr_cache disabled\n",
-			       dev_name, rc, strerror(rc));
-		goto done;
-	}
-	domain->monitor_eventsp = mmap(NULL, sizeof(*domain->monitor_eventsp),
-				       PROT_READ, MAP_SHARED,
-				       domain->monitor_fd, 0);
-	if (domain->monitor_eventsp == MAP_FAILED) {
-		domain->monitor_eventsp = NULL;
-		rc = errno;
-		ZHPE_LOG_ERROR("Failed to mmap %s, error %d:%s,"
-			       " mr_cache disabled\n",
-			       dev_name, rc, strerror(rc));
-		goto done;
-	}
-	domain->monitor_events = 0;
-	/* FIXME: need to change over to using util_xxx structs?
-	 * The ofi_mr_cache uses the util_domain only for ref counting
-	 * and the prov point for debugging output. Too much work for full
-	 * conversion; just init those for now.
-	 */
-	ofi_atomic_initialize32(&domain->util_domain.ref, 0);
-	domain->util_domain.prov = &zhpe_prov;
 
-	domain->monitor.subscribe = zhpe_monitor_subscribe;
-	domain->monitor.unsubscribe = zhpe_monitor_unsubscribe;
-	domain->monitor.get_event = zhpe_monitor_get_event;
-	ofi_monitor_init(&domain->monitor);
-
-	domain->cache.max_cached_cnt = zhpe_mr_cache_max_cnt;
-	domain->cache.max_cached_size = zhpe_mr_cache_max_size;
-	domain->cache.merge_regions = zhpe_mr_cache_merge_regions;
-	domain->cache.entry_data_size = sizeof(struct zhpe_mr);
-	domain->cache.add_region = zhpe_mr_cache_add_region;
-	domain->cache.delete_region = zhpe_mr_cache_delete_region;
-	ret = ofi_mr_cache_init(&domain->util_domain, &domain->monitor,
-				&domain->cache);
+	ret = zhpeq_feature_enable(ZHPE_FEATURE_MR_OVERLAP_CHECKING);
 	if (ret < 0)
 		goto done;
-	fastlock_init(&domain->cache_lock);
-	domain->reg_int = zhpe_mr_reg_int_cached;
-	domain->cache_inited = true;
-#else
-	ZHPE_LOG_DBG("%s support not configured, mr_cache disabled\n",
-		     dev_name);
-	goto done;
-#endif
+	zdom->cache.entry_data_size = sizeof(struct zhpe_mr_cache_data);
+	zdom->cache.add_region = zhpe_mr_cache_add_region;
+	zdom->cache.delete_region = zhpe_mr_cache_delete_region;
+	/* Wiggle around monitor init for now. */
+	dlist_insert_head(&noop_dentry, &noop_monitor.list);
+	ret = ofi_mr_cache_init(&zdom->util_domain, &noop_monitor,
+				&zdom->cache);
+	if (ret < 0)
+		goto done;
+	zdom->qkdata_mr_reg = zhpe_mr_reg_cached;
+	zdom->qkdata_mr_free = zhpe_mr_free_cached;
 
  done:
-	if (ret < 0)
-		zhpe_mr_cache_destroy(domain);
-
 	return ret;
 }
+
+#ifndef NDEBUG
+
+static void mr_cache_dump_handler(struct ofi_rbmap *rbmap, void *handler_arg,
+				  struct ofi_rbnode *rbnode)
+{
+	struct ofi_mr_entry	*entry = rbnode->data;
+	struct zhpe_mr_cache_data *cdata = entry_data(entry);
+
+	fprintf(stderr,
+                "0x%016" PRIx64 "/0x%016" PRIx64 "/%ld/%d\n",
+		(uintptr_t)entry->info.iov.iov_base, entry->info.iov.iov_len,
+		*cdata->qkdata->active_uptr, entry->use_cnt);
+}
+
+
+void zhpe_mr_cache_dump(struct ofi_mr_cache *cache)
+{
+	ofi_rbmap_walk(cache->storage.storage, NULL, mr_cache_dump_handler);
+}
+
+#endif

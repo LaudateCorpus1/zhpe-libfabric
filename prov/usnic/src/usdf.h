@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014-2017, Cisco Systems, Inc. All rights reserved.
+ * Copyright (c) 2014-2019, Cisco Systems, Inc. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -40,6 +40,7 @@
 #include <pthread.h>
 
 #include <rdma/providers/fi_log.h>
+#include <ofi_epoll.h>
 
 #include "usdf_progress.h"
 #include "usd.h"
@@ -120,7 +121,7 @@ struct usdf_fabric {
 	/* progression */
 	pthread_t fab_thread;
 	int fab_exit;
-	int fab_epollfd;
+	ofi_epoll_t fab_epollfd;
 	int fab_eventfd;
 	struct usdf_poll_item fab_poll_item;
 
@@ -146,11 +147,6 @@ struct usdf_domain {
 	pthread_spinlock_t dom_progress_lock;
 	TAILQ_HEAD(,usdf_tx) dom_tx_ready;
 	TAILQ_HEAD(,usdf_cq_hard) dom_hcq_list;
-
-	struct usdf_rdm_connection **dom_rdc_hashtab;
-	SLIST_HEAD(,usdf_rdm_connection) dom_rdc_free;
-	ofi_atomic32_t dom_rdc_free_cnt;
-	size_t dom_rdc_total;
 
 	/* used only by connected endpoints */
 	struct usdf_ep **dom_peer_tab;

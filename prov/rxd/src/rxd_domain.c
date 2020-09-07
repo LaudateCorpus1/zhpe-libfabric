@@ -47,6 +47,8 @@ static struct fi_ops_domain rxd_domain_ops = {
 	.poll_open = fi_poll_create,
 	.stx_ctx = fi_no_stx_context,
 	.srx_ctx = fi_no_srx_context,
+	.query_atomic = rxd_query_atomic,
+	.query_collective = fi_no_query_collective,
 };
 
 static int rxd_domain_close(fid_t fid)
@@ -77,119 +79,11 @@ static struct fi_ops rxd_domain_fi_ops = {
 	.ops_open = fi_no_ops_open,
 };
 
-struct rxd_mr_entry {
-	struct fid_mr mr_fid;
-	struct rxd_domain *domain;
-	uint64_t key;
-	uint64_t flags;
-};
-
-static int rxd_mr_close(struct fid *fid)
-{
-	struct rxd_domain *dom;
-	struct rxd_mr_entry *mr;
-	int err = 0;
-
-	mr = container_of(fid, struct rxd_mr_entry, mr_fid.fid);
-	dom = mr->domain;
-
-	fastlock_acquire(&dom->util_domain.lock);
-	err = ofi_mr_map_remove(&dom->mr_map, mr->key);
-	fastlock_release(&dom->util_domain.lock);
-	if (err)
-		return err;
-
-	ofi_atomic_dec32(&dom->util_domain.ref);
-	free(mr);
-	return 0;
-}
-
-static struct fi_ops rxd_mr_fi_ops = {
-	.size = sizeof(struct fi_ops),
-	.close = rxd_mr_close,
-	.control = fi_no_control,
-	.ops_open = fi_no_ops_open,
-};
-
-
-static int rxd_mr_regattr(struct fid *fid, const struct fi_mr_attr *attr,
-		uint64_t flags, struct fid_mr **mr)
-{
-	struct rxd_domain *dom;
-	struct rxd_mr_entry *_mr;
-	uint64_t key;
-	int ret = 0;
-
-	if (fid->fclass != FI_CLASS_DOMAIN || !attr || attr->iov_count <= 0) {
-		return -FI_EINVAL;
-	}
-
-	dom = container_of(fid, struct rxd_domain, util_domain.domain_fid.fid);
-	_mr = calloc(1, sizeof(*_mr));
-	if (!_mr)
-		return -FI_ENOMEM;
-
-	fastlock_acquire(&dom->util_domain.lock);
-
-	_mr->mr_fid.fid.fclass = FI_CLASS_MR;
-	_mr->mr_fid.fid.context = attr->context;
-	_mr->mr_fid.fid.ops = &rxd_mr_fi_ops;
-
-	_mr->domain = dom;
-	_mr->flags = flags;
-
-	ret = ofi_mr_map_insert(&dom->mr_map, attr, &key, _mr);
-	if (ret != 0) {
-		goto err;
-	}
-
-	_mr->mr_fid.key = _mr->key = key;
-	_mr->mr_fid.mem_desc = (void *) (uintptr_t) key;
-	fastlock_release(&dom->util_domain.lock);
-
-	*mr = &_mr->mr_fid;
-	ofi_atomic_inc32(&dom->util_domain.ref);
-
-	return 0;
-err:
-	fastlock_release(&dom->util_domain.lock);
-	free(_mr);
-	return ret;
-}
-
-static int rxd_mr_regv(struct fid *fid, const struct iovec *iov,
-			size_t count, uint64_t access,
-			uint64_t offset, uint64_t requested_key,
-			uint64_t flags, struct fid_mr **mr, void *context)
-{
-	struct fi_mr_attr attr;
-
-	attr.mr_iov = iov;
-	attr.iov_count = count;
-	attr.access = access;
-	attr.offset = offset;
-	attr.requested_key = requested_key;
-	attr.context = context;
-	return rxd_mr_regattr(fid, &attr, flags, mr);
-}
-
-static int rxd_mr_reg(struct fid *fid, const void *buf, size_t len,
-		       uint64_t access, uint64_t offset, uint64_t requested_key,
-		       uint64_t flags, struct fid_mr **mr, void *context)
-{
-	struct iovec iov;
-
-	iov.iov_base = (void *) buf;
-	iov.iov_len = len;
-	return rxd_mr_regv(fid, &iov, 1, access,  offset, requested_key,
-			    flags, mr, context);
-}
-
 static struct fi_ops_mr rxd_mr_ops = {
 	.size = sizeof(struct fi_ops_mr),
-	.reg = rxd_mr_reg,
-	.regv = rxd_mr_regv,
-	.regattr = rxd_mr_regattr,
+	.reg = ofi_mr_reg,
+	.regv = ofi_mr_regv,
+	.regattr = ofi_mr_regattr,
 };
 
 int rxd_mr_verify(struct rxd_domain *rxd_domain, ssize_t len,
@@ -214,16 +108,13 @@ int rxd_domain_open(struct fid_fabric *fabric, struct fi_info *info,
 
 	rxd_fabric = container_of(fabric, struct rxd_fabric,
 				  util_fabric.fabric_fid);
-	ret = ofi_prov_check_info(&rxd_util_prov, fabric->api_version, info);
-	if (ret)
-		return ret;
 
 	rxd_domain = calloc(1, sizeof(*rxd_domain));
 	if (!rxd_domain)
 		return -FI_ENOMEM;
 
 	ret = ofi_get_core_info(fabric->api_version, NULL, NULL,
-				0, &rxd_util_prov, info,
+				0, &rxd_util_prov, info, NULL,
 				rxd_info_to_core, &dg_info);
 	if (ret)
 		goto err1;
@@ -234,8 +125,17 @@ int rxd_domain_open(struct fid_fabric *fabric, struct fi_info *info,
 	if (ret)
 		goto err2;
 
-	rxd_domain->max_mtu_sz = dg_info->ep_attr->max_msg_size;
-	rxd_domain->mr_mode = dg_info->domain_attr->mr_mode;
+	rxd_domain->max_mtu_sz = MIN(dg_info->ep_attr->max_msg_size, RXD_MAX_MTU_SIZE);
+	rxd_domain->max_inline_msg = rxd_domain->max_mtu_sz -
+					sizeof(struct rxd_base_hdr) -
+					dg_info->ep_attr->msg_prefix_size;
+	rxd_domain->max_inline_rma = rxd_domain->max_inline_msg -
+					(sizeof(struct rxd_rma_hdr) +
+					(RXD_IOV_LIMIT * sizeof(struct ofi_rma_iov)));
+	rxd_domain->max_inline_atom = rxd_domain->max_inline_rma -
+					sizeof(struct rxd_atom_hdr);
+	rxd_domain->max_seg_sz = rxd_domain->max_mtu_sz - sizeof(struct rxd_data_pkt) -
+				 dg_info->ep_attr->msg_prefix_size;
 
 	ret = ofi_domain_init(fabric, info, &rxd_domain->util_domain, context);
 	if (ret) {

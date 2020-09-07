@@ -41,11 +41,12 @@ static struct fi_ops_domain smr_domain_ops = {
 	.cq_open = smr_cq_open,
 	.endpoint = smr_endpoint,
 	.scalable_ep = fi_no_scalable_ep,
-	.cntr_open = fi_no_cntr_open,
+	.cntr_open = smr_cntr_open,
 	.poll_open = fi_poll_create,
 	.stx_ctx = fi_no_stx_context,
 	.srx_ctx = fi_no_srx_context,
 	.query_atomic = smr_query_atomic,
+	.query_collective = fi_no_query_collective,
 };
 
 static int smr_domain_close(fid_t fid)

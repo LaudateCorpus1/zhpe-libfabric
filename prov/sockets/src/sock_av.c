@@ -63,19 +63,24 @@
 				count * sizeof(struct sock_av_addr))
 #define SOCK_IS_SHARED_AV(av_name) ((av_name) ? 1 : 0)
 
-int sock_av_get_addr_index(struct sock_av *av, struct sockaddr_in *addr)
+int sock_av_get_addr_index(struct sock_av *av, union ofi_sock_ip *addr)
 {
 	int i;
 	struct sock_av_addr *av_addr;
 
+	fastlock_acquire(&av->table_lock);
 	for (i = 0; i < (int)av->table_hdr->size; i++) {
 		av_addr = &av->table[i];
 		if (!av_addr->valid)
 			continue;
 
-		 if (ofi_equals_sockaddr(addr, (struct sockaddr_in *)&av_addr->addr))
+		 if (ofi_equals_sockaddr((const struct sockaddr *) addr,
+					 (const struct sockaddr *) &av_addr->addr)) {
+			fastlock_release(&av->table_lock);
 			return i;
+		 }
 	}
+	fastlock_release(&av->table_lock);
 	SOCK_LOG_DBG("failed to get index in AV\n");
 	return -1;
 }
@@ -85,21 +90,26 @@ int sock_av_compare_addr(struct sock_av *av,
 {
 	int index1, index2;
 	struct sock_av_addr *av_addr1, *av_addr2;
+	int ret;
 
 	index1 = ((uint64_t)addr1 & av->mask);
 	index2 = ((uint64_t)addr2 & av->mask);
 
+	fastlock_acquire(&av->table_lock);
 	if (index1 >= (int)av->table_hdr->size || index1 < 0 ||
 	    index2 >= (int)av->table_hdr->size || index2 < 0) {
 		SOCK_LOG_ERROR("requested rank is larger than av table\n");
+		fastlock_release(&av->table_lock);
 		return -1;
 	}
 
 	av_addr1 = &av->table[index1];
 	av_addr2 = &av->table[index2];
 
-	return memcmp(&av_addr1->addr, &av_addr2->addr,
-		      sizeof(struct sockaddr_in));
+	/* Return 0 if the addresses match */
+	ret = !ofi_equals_sockaddr(&av_addr1->addr.sa, &av_addr2->addr.sa);
+	fastlock_release(&av->table_lock);
+	return ret;
 }
 
 static inline void sock_av_report_success(struct sock_av *av, void *context,
@@ -127,9 +137,9 @@ static inline void sock_av_report_error(struct sock_av *av,
 			     context, index, err, -err, NULL, 0);
 }
 
-static int sock_av_is_valid_address(struct sockaddr_in *addr)
+static int sock_av_is_valid_address(const struct sockaddr *addr)
 {
-	return addr->sin_family == AF_INET ? 1 : 0;
+	return ofi_sizeofaddr(addr);
 }
 
 static void sock_update_av_table(struct sock_av *_av, size_t count)
@@ -159,6 +169,7 @@ static int sock_resize_av_table(struct sock_av *av)
 		new_addr = realloc(av->table_hdr, table_sz);
 		if (!new_addr)
 			return -1;
+		memset((char *) new_addr + old_sz, 0, table_sz - old_sz);
 	}
 
 	av->table_hdr = new_addr;
@@ -180,13 +191,13 @@ static int sock_av_get_next_index(struct sock_av *av)
 	return -1;
 }
 
-static int sock_check_table_in(struct sock_av *_av, struct sockaddr_in *addr,
+static int sock_check_table_in(struct sock_av *_av, const struct sockaddr *addr,
 			       fi_addr_t *fi_addr, int count, uint64_t flags,
 			       void *context)
 {
 	int i, ret = 0;
 	uint64_t j;
-	char sa_ip[INET_ADDRSTRLEN];
+	char sa_ip[INET6_ADDRSTRLEN];
 	struct sock_av_addr *av_addr;
 	int index;
 
@@ -207,7 +218,7 @@ static int sock_check_table_in(struct sock_av *_av, struct sockaddr_in *addr,
 
 				av_addr = &_av->table[j];
 				if (memcmp(&av_addr->addr, &addr[i],
-					   sizeof(struct sockaddr_in)) == 0) {
+					   ofi_sizeofaddr(&addr[i])) == 0) {
 					SOCK_LOG_DBG("Found addr in shared av\n");
 					if (fi_addr)
 						fi_addr[i] = (fi_addr_t)j;
@@ -242,12 +253,13 @@ static int sock_check_table_in(struct sock_av *_av, struct sockaddr_in *addr,
 		}
 
 		av_addr = &_av->table[index];
-		inet_ntop(addr[i].sin_family, &addr[i].sin_addr, sa_ip, INET_ADDRSTRLEN);
+		inet_ntop(addr[i].sa_family, ofi_get_ipaddr(&addr[i]),
+			  sa_ip, sizeof sa_ip);
 		SOCK_LOG_DBG("AV-INSERT: dst_addr family: %d, IP %s, port: %d\n",
-			      ((struct sockaddr_in *)&addr[i])->sin_family,
-				sa_ip, ntohs(((struct sockaddr_in *)&addr[i])->sin_port));
+			      (&addr[i])->sa_family, sa_ip,
+			      ofi_addr_get_port(&addr[i]));
 
-		memcpy(&av_addr->addr, &addr[i], sizeof(struct sockaddr_in));
+		memcpy(&av_addr->addr, &addr[i], ofi_sizeofaddr(&addr[i]));
 		if (fi_addr)
 			fi_addr[i] = (fi_addr_t)index;
 
@@ -262,9 +274,15 @@ static int sock_av_insert(struct fid_av *av, const void *addr, size_t count,
 			  fi_addr_t *fi_addr, uint64_t flags, void *context)
 {
 	struct sock_av *_av;
+	int ret = 0;
+
 	_av = container_of(av, struct sock_av, av_fid);
-	return sock_check_table_in(_av, (struct sockaddr_in *)addr,
+
+	fastlock_acquire(&_av->table_lock);
+	ret = sock_check_table_in(_av, (const struct sockaddr *) addr,
 				   fi_addr, count, flags, context);
+	fastlock_release(&_av->table_lock);
+	return ret;
 }
 
 static int sock_av_lookup(struct fid_av *av, fi_addr_t fi_addr, void *addr,
@@ -276,13 +294,17 @@ static int sock_av_lookup(struct fid_av *av, fi_addr_t fi_addr, void *addr,
 
 	_av = container_of(av, struct sock_av, av_fid);
 	index = ((uint64_t)fi_addr & _av->mask);
+
+	fastlock_acquire(&_av->table_lock);
 	if (index >= (int)_av->table_hdr->size || index < 0) {
 		SOCK_LOG_ERROR("requested address not inserted\n");
+		fastlock_release(&_av->table_lock);
 		return -EINVAL;
 	}
 
 	av_addr = &_av->table[index];
 	memcpy(addr, &av_addr->addr, MIN(*addrlen, (size_t)_av->addrlen));
+	fastlock_release(&_av->table_lock);
 	*addrlen = _av->addrlen;
 	return 0;
 }
@@ -298,6 +320,7 @@ static int _sock_av_insertsvc(struct fid_av *av, const char *node,
 
 	_av = container_of(av, struct sock_av, av_fid);
 	memset(&sock_hints, 0, sizeof(struct addrinfo));
+	/* Map all services to IPv4 addresses -- for compatibility */
 	sock_hints.ai_family = AF_INET;
 	sock_hints.ai_socktype = SOCK_STREAM;
 
@@ -310,8 +333,10 @@ static int _sock_av_insertsvc(struct fid_av *av, const char *node,
 		return -ret;
 	}
 
-	ret = sock_check_table_in(_av, (struct sockaddr_in *)result->ai_addr,
+	fastlock_acquire(&_av->table_lock);
+	ret = sock_check_table_in(_av, result->ai_addr,
 				  fi_addr, 1, flags, context);
+	fastlock_release(&_av->table_lock);
 	freeaddrinfo(result);
 	return ret;
 }
@@ -354,8 +379,9 @@ static int sock_av_insertsym(struct fid_av *av, const char *node, size_t nodecnt
 	else
 		fmt = offset;
 
-	assert((hostlen-offset) < FI_NAME_MAX);
-	strncpy(base_host, node, hostlen - (offset));
+	if (hostlen - offset >= FI_NAME_MAX)
+		return -FI_ETOOSMALL;
+	memcpy(base_host, node, hostlen - offset);
 	var_port = atoi(service);
 	var_host = atoi(node + hostlen - offset);
 
@@ -373,7 +399,7 @@ static int sock_av_insertsym(struct fid_av *av, const char *node, size_t nodecnt
 					err_code = ret;
 			} else {
 				SOCK_LOG_ERROR("Node/service value is not valid\n");
-				err_code = FI_ETOOSMALL;
+				err_code = -FI_ETOOSMALL;
 			}
 		}
 	}
@@ -400,7 +426,7 @@ static int sock_av_remove(struct fid_av *av, fi_addr_t *fi_addr, size_t count,
 		sock_ep = container_of(fid_entry->fid, struct sock_ep, ep.fid);
 		fastlock_acquire(&sock_ep->attr->cmap.lock);
 		for (i = 0; i < count; i++) {
-        		idx = fi_addr[i] & sock_ep->attr->av->mask;
+			idx = fi_addr[i] & sock_ep->attr->av->mask;
 			conn = ofi_idm_lookup(&sock_ep->attr->av_idm, idx);
 			if (conn) {
 				/* A peer may be using the connection, so leave
@@ -415,10 +441,12 @@ static int sock_av_remove(struct fid_av *av, fi_addr_t *fi_addr, size_t count,
 	}
 	fastlock_release(&_av->list_lock);
 
+	fastlock_acquire(&_av->table_lock);
 	for (i = 0; i < count; i++) {
 		av_addr = &_av->table[fi_addr[i]];
 		av_addr->valid = 0;
 	}
+	fastlock_release(&_av->table_lock);
 
 	return 0;
 }
@@ -426,15 +454,16 @@ static int sock_av_remove(struct fid_av *av, fi_addr_t *fi_addr, size_t count,
 static const char *sock_av_straddr(struct fid_av *av, const void *addr,
 				   char *buf, size_t *len)
 {
-	const struct sockaddr_in *sin;
-	char straddr[24];
-	char ipaddr[24];
+	const struct sockaddr *sa = addr;
+	char straddr[OFI_ADDRSTRLEN];
+	char ipaddr[INET6_ADDRSTRLEN];
 	int size;
 
-	sin = addr;
-	inet_ntop(sin->sin_family, (void*)&sin->sin_addr, ipaddr, sizeof(ipaddr));
+	if (!inet_ntop(sa->sa_family, ofi_get_ipaddr(sa), ipaddr, sizeof(ipaddr)))
+		return NULL;
+
 	size = snprintf(straddr, sizeof(straddr), "%s:%d",
-			ipaddr, ntohs(sin->sin_port));
+			ipaddr, ofi_addr_get_port(sa));
 	snprintf(buf, *len, "%s", straddr);
 	*len = size + 1;
 	return buf;
@@ -473,6 +502,7 @@ static int sock_av_close(struct fid *fid)
 
 	ofi_atomic_dec32(&av->domain->ref);
 	fastlock_destroy(&av->list_lock);
+	fastlock_destroy(&av->table_lock);
 	free(av);
 	return 0;
 }
@@ -611,13 +641,17 @@ int sock_av_open(struct fid_domain *domain, struct fi_av_attr *attr,
 	case FI_SOCKADDR_IN:
 		_av->addrlen = sizeof(struct sockaddr_in);
 		break;
+	case FI_SOCKADDR_IN6:
+		_av->addrlen = sizeof(struct sockaddr_in6);
+		break;
 	default:
-		SOCK_LOG_ERROR("Invalid address format: only IPv4 supported\n");
+		SOCK_LOG_ERROR("Invalid address format: only IP supported\n");
 		ret = -FI_EINVAL;
 		goto err2;
 	}
 	dlist_init(&_av->ep_list);
 	fastlock_init(&_av->list_lock);
+	fastlock_init(&_av->table_lock);
 	_av->rx_ctx_bits = attr->rx_ctx_bits;
 	_av->mask = attr->rx_ctx_bits ?
 		((uint64_t)1 << (64 - attr->rx_ctx_bits)) - 1 : ~0;

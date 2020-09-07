@@ -38,14 +38,14 @@ struct psmx2_fid_mr *psmx2_mr_get(struct psmx2_fid_domain *domain,
 	RbtIterator it;
 	struct psmx2_fid_mr *mr = NULL;
 
-	psmx2_lock(&domain->mr_lock, 1);
+	domain->mr_lock_fn(&domain->mr_lock, 1);
 	it = rbtFind(domain->mr_map, (void *)key);
 	if (!it)
 		goto exit;
 
 	rbtKeyValue(domain->mr_map, it, (void **)&key, (void **)&mr);
 exit:
-	psmx2_unlock(&domain->mr_lock, 1);
+	domain->mr_unlock_fn(&domain->mr_lock, 1);
 	return mr;
 }
 
@@ -54,11 +54,11 @@ static inline void psmx2_mr_release_key(struct psmx2_fid_domain *domain,
 {
 	RbtIterator it;
 
-	psmx2_lock(&domain->mr_lock, 1);
+	domain->mr_lock_fn(&domain->mr_lock, 1);
 	it = rbtFind(domain->mr_map, (void *)key);
 	if (it)
 		rbtErase(domain->mr_map, it);
-	psmx2_unlock(&domain->mr_lock, 1);
+	domain->mr_unlock_fn(&domain->mr_lock, 1);
 }
 
 static int psmx2_mr_reserve_key(struct psmx2_fid_domain *domain,
@@ -71,7 +71,7 @@ static int psmx2_mr_reserve_key(struct psmx2_fid_domain *domain,
 	int try_count;
 	int err = -FI_ENOKEY;
 
-	psmx2_lock(&domain->mr_lock, 1);
+	domain->mr_lock_fn(&domain->mr_lock, 1);
 
 	if (domain->mr_mode == FI_MR_BASIC) {
 		key = domain->mr_reserved_key;
@@ -93,7 +93,7 @@ static int psmx2_mr_reserve_key(struct psmx2_fid_domain *domain,
 		}
 	}
 
-	psmx2_unlock(&domain->mr_lock, 1);
+	domain->mr_unlock_fn(&domain->mr_lock, 1);
 
 	return err;
 }
@@ -132,7 +132,8 @@ static int psmx2_mr_close(fid_t fid)
 	return 0;
 }
 
-static int psmx2_mr_bind(struct fid *fid, struct fid *bfid, uint64_t flags)
+DIRECT_FN
+STATIC int psmx2_mr_bind(struct fid *fid, struct fid *bfid, uint64_t flags)
 {
 	struct psmx2_fid_mr *mr;
 	struct psmx2_fid_ep *ep;
@@ -170,7 +171,8 @@ static int psmx2_mr_bind(struct fid *fid, struct fid *bfid, uint64_t flags)
 	return 0;
 }
 
-static int psmx2_mr_control(fid_t fid, int command, void *arg)
+DIRECT_FN
+STATIC int psmx2_mr_control(fid_t fid, int command, void *arg)
 {
 	struct psmx2_fid_mr *mr;
 	struct fi_mr_raw_attr *attr;
@@ -272,7 +274,8 @@ static void psmx2_mr_normalize_iov(struct iovec *iov, size_t *count)
 	*count = i;
 }
 
-static int psmx2_mr_reg(struct fid *fid, const void *buf, size_t len,
+DIRECT_FN
+STATIC int psmx2_mr_reg(struct fid *fid, const void *buf, size_t len,
 			uint64_t access, uint64_t offset, uint64_t requested_key,
 			uint64_t flags, struct fid_mr **mr, void *context)
 {
@@ -318,7 +321,8 @@ static int psmx2_mr_reg(struct fid *fid, const void *buf, size_t len,
 	return 0;
 }
 
-static int psmx2_mr_regv(struct fid *fid,
+DIRECT_FN
+STATIC int psmx2_mr_regv(struct fid *fid,
 			 const struct iovec *iov, size_t count,
 			 uint64_t access, uint64_t offset,
 			 uint64_t requested_key, uint64_t flags,
@@ -372,7 +376,8 @@ static int psmx2_mr_regv(struct fid *fid,
 	return 0;
 }
 
-static int psmx2_mr_regattr(struct fid *fid, const struct fi_mr_attr *attr,
+DIRECT_FN
+STATIC int psmx2_mr_regattr(struct fid *fid, const struct fi_mr_attr *attr,
 			uint64_t flags, struct fid_mr **mr)
 {
 	struct fid_domain *domain;

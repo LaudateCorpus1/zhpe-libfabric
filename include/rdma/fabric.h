@@ -37,6 +37,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <sys/types.h>
+#include <sys/uio.h>
 
 #ifdef __GNUC__
 #define FI_DEPRECATED_FUNC __attribute__((deprecated))
@@ -75,11 +76,9 @@ extern "C" {
 	((sizeof(x)/sizeof(0[x])) / ((size_t)(!(sizeof(x) % sizeof(0[x])))))
 #endif
 
-/* API version (which is not necessarily the same as the
- * tarball/libfabric package version number).
- */
 #define FI_MAJOR_VERSION 1
-#define FI_MINOR_VERSION 6
+#define FI_MINOR_VERSION 10
+#define FI_REVISION_VERSION 0
 
 enum {
 	FI_PATH_MAX		= 256,
@@ -87,14 +86,17 @@ enum {
 	FI_VERSION_MAX		= 64
 };
 
-#define FI_VERSION(major, minor) ((major << 16) | (minor))
+#define FI_VERSION(major, minor) (((major) << 16) | (minor))
 #define FI_MAJOR(version)	(version >> 16)
 #define FI_MINOR(version)	(version & 0xFFFF)
 #define FI_VERSION_GE(v1, v2)   ((FI_MAJOR(v1) > FI_MAJOR(v2)) || \
-				 (FI_MAJOR(v1) == FI_MAJOR(v2) && FI_MINOR(v1) == FI_MINOR(v2)) || \
-				 (FI_MAJOR(v1) == FI_MAJOR(v2) && FI_MINOR(v1) > FI_MINOR(v2)))
+				 (FI_MAJOR(v1) == FI_MAJOR(v2) && \
+				  FI_MINOR(v1) == FI_MINOR(v2)) || \
+				 (FI_MAJOR(v1) == FI_MAJOR(v2) && \
+				  FI_MINOR(v1) > FI_MINOR(v2)))
 #define FI_VERSION_LT(v1, v2)	((FI_MAJOR(v1) < FI_MAJOR(v2)) || \
-				 (FI_MAJOR(v1) == FI_MAJOR(v2) && FI_MINOR(v1) < FI_MINOR(v2)))
+				 (FI_MAJOR(v1) == FI_MAJOR(v2) && \
+				  FI_MINOR(v1) < FI_MINOR(v2)))
 
 uint32_t fi_version(void);
 
@@ -111,6 +113,7 @@ struct fid_ep;
 struct fid_pep;
 struct fid_stx;
 struct fid_mr;
+struct fid_nic;
 
 typedef struct fid *fid_t;
 
@@ -133,6 +136,7 @@ typedef struct fid *fid_t;
 #define FI_ATOMIC		(1ULL << 4)
 #define FI_ATOMICS		FI_ATOMIC
 #define FI_MULTICAST		(1ULL << 5)
+#define FI_COLLECTIVE		(1ULL << 6)
 
 #define FI_READ			(1ULL << 8)
 #define FI_WRITE		(1ULL << 9)
@@ -148,6 +152,7 @@ typedef struct fid *fid_t;
 #define FI_PEEK			(1ULL << 19)
 #define FI_TRIGGER		(1ULL << 20)
 #define FI_FENCE		(1ULL << 21)
+#define FI_PRIORITY		(1ULL << 22)
 
 #define FI_COMPLETION		(1ULL << 24)
 #define FI_EVENT		FI_COMPLETION
@@ -157,7 +162,10 @@ typedef struct fid *fid_t;
 #define FI_DELIVERY_COMPLETE	(1ULL << 28)
 #define FI_AFFINITY		(1ULL << 29)
 #define FI_COMMIT_COMPLETE	(1ULL << 30)
+#define FI_MATCH_COMPLETE	(1ULL << 31)
 
+#define FI_HMEM			(1ULL << 47)
+#define FI_VARIABLE_MSG		(1ULL << 48)
 #define FI_RMA_PMEM		(1ULL << 49)
 #define FI_SOURCE_ERR		(1ULL << 50)
 #define FI_LOCAL_COMM		(1ULL << 51)
@@ -169,6 +177,11 @@ typedef struct fid *fid_t;
 #define FI_SOURCE		(1ULL << 57)
 #define FI_NAMED_RX_CTX		(1ULL << 58)
 #define FI_DIRECTED_RECV	(1ULL << 59)
+
+
+/* Tagged messages, buffered receives, CQ flags */
+#define FI_CLAIM		(1ULL << 59)
+#define FI_DISCARD		(1ULL << 58)
 
 
 struct fi_ioc {
@@ -192,6 +205,8 @@ enum {
 	FI_ADDR_STR,		/* formatted char * */
 	FI_ADDR_PSMX2,		/* uint64_t[2] */
 	FI_ADDR_IB_UD,		/* uint64_t[4] */
+	FI_ADDR_EFA,
+	FI_ADDR_ZHPE,
 };
 
 #define FI_ADDR_UNSPEC		((uint64_t) -1)
@@ -220,6 +235,7 @@ enum fi_mr_mode {
 #define FI_MR_MMU_NOTIFY	(1 << 7)
 #define FI_MR_RMA_EVENT		(1 << 8)
 #define FI_MR_ENDPOINT		(1 << 9)
+#define FI_MR_HMEM		(1 << 10)
 
 enum fi_progress {
 	FI_PROGRESS_UNSPEC,
@@ -253,6 +269,16 @@ enum fi_resource_mgmt {
 #define FI_ORDER_SAW		(1ULL << 7)
 #define FI_ORDER_SAS		(1ULL << 8)
 #define FI_ORDER_STRICT		0x1FF
+
+#define FI_ORDER_RMA_RAR	(1ULL << 32)
+#define FI_ORDER_RMA_RAW	(1ULL << 33)
+#define FI_ORDER_RMA_WAR	(1ULL << 34)
+#define FI_ORDER_RMA_WAW	(1ULL << 35)
+#define FI_ORDER_ATOMIC_RAR	(1ULL << 36)
+#define FI_ORDER_ATOMIC_RAW	(1ULL << 37)
+#define FI_ORDER_ATOMIC_WAR	(1ULL << 38)
+#define FI_ORDER_ATOMIC_WAW	(1ULL << 39)
+
 #define FI_ORDER_DATA		(1ULL << 16)
 
 enum fi_ep_type {
@@ -289,7 +315,34 @@ enum {
 	FI_PROTO_NETWORKDIRECT,
 	FI_PROTO_PSMX2,
 	FI_PROTO_SHM,
+	FI_PROTO_MRAIL,
+	FI_PROTO_RSTREAM,
+	FI_PROTO_RDMA_CM_IB_XRC,
+	FI_PROTO_EFA,
+	FI_PROTO_ZHPE,
 };
+
+enum {
+	FI_TC_UNSPEC = 0,
+	FI_TC_DSCP = 0x100,
+	FI_TC_LABEL = 0x200,
+	FI_TC_BEST_EFFORT = FI_TC_LABEL,
+	FI_TC_LOW_LATENCY,
+	FI_TC_DEDICATED_ACCESS,
+	FI_TC_BULK_DATA,
+	FI_TC_SCAVENGER,
+	FI_TC_NETWORK_CTRL,
+};
+
+static inline uint32_t fi_tc_dscp_set(uint8_t dscp)
+{
+	return ((uint32_t) dscp) | FI_TC_DSCP;
+}
+
+static inline uint8_t fi_tc_dscp_get(uint32_t tclass)
+{
+	return tclass & FI_TC_DSCP ? (uint8_t) tclass : 0;
+}
 
 /* Mode bits */
 #define FI_CONTEXT		(1ULL << 59)
@@ -300,6 +353,7 @@ enum {
 #define FI_NOTIFY_FLAGS_ONLY	(1ULL << 54)
 #define FI_RESTRICTED_COMP	(1ULL << 53)
 #define FI_CONTEXT2		(1ULL << 52)
+#define FI_BUFFERED_RECV	(1ULL << 51)
 
 struct fi_tx_attr {
 	uint64_t		caps;
@@ -311,6 +365,7 @@ struct fi_tx_attr {
 	size_t			size;
 	size_t			iov_limit;
 	size_t			rma_iov_limit;
+	uint32_t		tclass;
 };
 
 struct fi_rx_attr {
@@ -367,6 +422,7 @@ struct fi_domain_attr {
 	size_t 			auth_key_size;
 	size_t			max_err_data;
 	size_t			mr_cnt;
+	uint32_t		tclass;
 };
 
 struct fi_fabric_attr {
@@ -392,6 +448,50 @@ struct fi_info {
 	struct fi_ep_attr	*ep_attr;
 	struct fi_domain_attr	*domain_attr;
 	struct fi_fabric_attr	*fabric_attr;
+	struct fid_nic		*nic;
+};
+
+struct fi_device_attr {
+	char			*name;
+	char			*device_id;
+	char			*device_version;
+	char			*vendor_id;
+	char			*driver;
+	char			*firmware;
+};
+
+enum fi_bus_type {
+	FI_BUS_UNSPEC,
+	FI_BUS_UNKNOWN = FI_BUS_UNSPEC,
+	FI_BUS_PCI,
+};
+
+struct fi_pci_attr {
+	uint16_t		domain_id;
+	uint8_t			bus_id;
+	uint8_t			device_id;
+	uint8_t			function_id;
+};
+
+struct fi_bus_attr {
+	enum fi_bus_type	bus_type;
+	union {
+		struct fi_pci_attr	pci;
+	} attr;
+};
+
+enum fi_link_state {
+	FI_LINK_UNKNOWN,
+	FI_LINK_DOWN,
+	FI_LINK_UP,
+};
+
+struct fi_link_attr {
+	char			*address;
+	size_t			mtu;
+	size_t			speed;
+	enum fi_link_state	state;
+	char			*network_type;
 };
 
 enum {
@@ -415,6 +515,8 @@ enum {
 	FI_CLASS_POLL,
 	FI_CLASS_CONNREQ,
 	FI_CLASS_MC,
+	FI_CLASS_NIC,
+	FI_CLASS_AV_SET,
 };
 
 struct fi_eq_attr;
@@ -429,7 +531,8 @@ struct fi_ops {
 	int	(*bind)(struct fid *fid, struct fid *bfid, uint64_t flags);
 	int	(*control)(struct fid *fid, int command, void *arg);
 	int	(*ops_open)(struct fid *fid, const char *name,
-			uint64_t flags, void **ops, void *context);
+			    uint64_t flags, void **ops, void *context);
+	int	(*tostr)(const struct fid *fid, char *buf, size_t len);
 };
 
 /* All fabric interface descriptors must start with this structure */
@@ -472,8 +575,16 @@ struct fid_fabric {
 
 int fi_fabric(struct fi_fabric_attr *attr, struct fid_fabric **fabric, void *context);
 
+struct fid_nic {
+	struct fid		fid;
+	struct fi_device_attr	*device_attr;
+	struct fi_bus_attr	*bus_attr;
+	struct fi_link_attr	*link_attr;
+	void			*prov_attr;
+};
+
 #define FI_CHECK_OP(ops, opstype, op) \
-	((ops->size > offsetof(opstype, op)) && ops->op)
+	(ops && (ops->size > offsetof(opstype, op)) && ops->op)
 
 static inline int fi_close(struct fid *fid)
 {
@@ -517,6 +628,8 @@ enum {
 	FI_CANCEL_WORK,		/* struct fi_deferred_work */
 	FI_FLUSH_WORK,		/* NULL */
 	FI_REFRESH,		/* mr: fi_mr_modify */
+	FI_DUP,			/* struct fid ** */
+	FI_GETWAITOBJ,		/*enum fi_wait_obj * */
 };
 
 static inline int fi_control(struct fid *fid, int command, void *arg)
@@ -563,6 +676,9 @@ enum fi_type {
 	FI_TYPE_CQ_EVENT_FLAGS,
 	FI_TYPE_MR_MODE,
 	FI_TYPE_OP_TYPE,
+	FI_TYPE_FID,
+	FI_TYPE_COLLECTIVE_OP,
+	FI_TYPE_HMEM_IFACE,
 };
 
 char *fi_tostr(const void *data, enum fi_type datatype);
@@ -584,7 +700,6 @@ struct fi_param {
 int fi_getparams(struct fi_param **params, int *count);
 void fi_freeparams(struct fi_param *params);
 
-
 #ifdef FABRIC_DIRECT
 #include <rdma/fi_direct.h>
 #endif	/* FABRIC_DIRECT */
@@ -598,6 +713,11 @@ struct fi_context2 {
 	void			*internal[8];
 };
 #endif
+
+struct fi_recv_context {
+	struct fid_ep		*ep;
+	void			*context;
+};
 
 #ifdef __cplusplus
 }

@@ -1,6 +1,7 @@
 /*
  * Copyright (c) 2016 Intel Corporation.  All rights reserved.
  * Copyright (c) 2016 Cisco Systems, Inc.  All rights reserved.
+ * Copyright (c) 2018 Amazon.com, Inc. or its affiliates. All rights reserved.
  *
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
  * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
@@ -18,8 +19,10 @@
 #include "config.h"
 
 #include <WinSock2.h>
+#include <Mswsock.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <process.h>
 #include <io.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -29,6 +32,7 @@
 #include "pthread.h"
 
 #include <sys/uio.h>
+#include <time.h>
 
 #include <rdma/fi_errno.h>
 #include <rdma/fabric.h>
@@ -38,6 +42,8 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+#define OFI_MAX_SOCKET_BUF_SIZE	INT_MAX
 
 /*
  * The following defines redefine the Windows Socket
@@ -208,9 +214,6 @@ extern "C" {
 #define SHUT_RDWR	SD_BOTH
 #endif
 
-#ifndef _SC_PAGESIZE
-#define _SC_PAGESIZE	0
-#endif
 
 #define FI_DESTRUCTOR(func) void func
 
@@ -257,7 +260,6 @@ do						\
 #define strdup _strdup
 #define strcasecmp _stricmp
 #define snprintf _snprintf
-#define getpid (int)GetCurrentProcessId
 #define sleep(x) Sleep(x * 1000)
 
 #define __PRI64_PREFIX "ll"
@@ -272,11 +274,15 @@ do						\
 #define ntohll _byteswap_uint64
 #define strncasecmp _strnicmp
 
+typedef int pid_t;
+#define getpid (int)GetCurrentProcessId
+
 int fd_set_nonblock(int fd);
 
 int socketpair(int af, int type, int protocol, int socks[2]);
 void sock_get_ip_addr_table(struct slist *addr_list);
 int ofi_getsockname(SOCKET fd, struct sockaddr *addr, socklen_t *len);
+int ofi_getpeername(SOCKET fd, struct sockaddr *addr, socklen_t *len);
 
 /*
  * Win32 error code should be passed as a parameter.
@@ -630,15 +636,22 @@ static inline int ffsll(long long val)
 	return 0;
 }
 
+static inline int vasprintf(char **ptr, const char *format, va_list args)
+{
+	int len = vsnprintf(0, 0, format, args);
+	*ptr = (char *)malloc(len + 1);
+	vsnprintf(*ptr, len + 1, format, args);
+	(*ptr)[len] = 0; /* to be sure that string is enclosed */
+	return len;
+}
+
 static inline int asprintf(char **ptr, const char *format, ...)
 {
 	va_list args;
-	va_start(args, format);
+	int len;
 
-	int len = vsnprintf(0, 0, format, args);
-	*ptr = (char*)malloc(len + 1);
-	vsnprintf(*ptr, len + 1, format, args);
-	(*ptr)[len] = 0; /* to be sure that string is enclosed */
+	va_start(args, format);
+	len = vasprintf(ptr, format, args);
 	va_end(args);
 
 	return len;
@@ -696,42 +709,71 @@ static inline SOCKET ofi_socket(int domain, int type, int protocol)
 	return socket(domain, type, protocol);
 }
 
+/*
+ * The windows API limits socket send/recv transfers to INT_MAX.
+ * For nonblocking, stream sockets, we limit send/recv calls to that
+ * size, since the sockets aren't guaranteed to send the full amount
+ * requested.  For datagram sockets, we don't expect any transfers to
+ * be larger than a few KB.
+ * We do not handle blocking sockets that attempt to transfer more
+ * than INT_MAX data at a time.
+ */
+static inline ssize_t
+ofi_recv_socket(SOCKET fd, void *buf, size_t count, int flags)
+{
+	int len = count > INT_MAX ? INT_MAX : (int) count;
+	return (ssize_t) recv(fd, (char *) buf, len, flags);
+}
+
+static inline ssize_t
+ofi_send_socket(SOCKET fd, const void *buf, size_t count, int flags)
+{
+	int len = count > INT_MAX ? INT_MAX : (int) count;
+	return (ssize_t) send(fd, (const char*) buf, len, flags);
+}
+
 static inline ssize_t ofi_read_socket(SOCKET fd, void *buf, size_t count)
 {
-	return recv(fd, (char *)buf, (int)count, 0);
+	return ofi_recv_socket(fd, buf, count, 0);
 }
 
 static inline ssize_t ofi_write_socket(SOCKET fd, const void *buf, size_t count)
 {
-	return send(fd, (const char*)buf, (int)count, 0);
+	return ofi_send_socket(fd, buf, count, 0);
 }
 
-static inline ssize_t ofi_recv_socket(SOCKET fd, void *buf, size_t count,
-				      int flags)
+static inline ssize_t
+ofi_recvfrom_socket(SOCKET fd, void *buf, size_t count, int flags,
+		    struct sockaddr *from, socklen_t *fromlen)
 {
-	return recv(fd, (char *)buf, (int)count, flags);
+	int len = count > INT_MAX ? INT_MAX : (int) count;
+	return recvfrom(fd, (char*) buf, len, flags, from, (int *) fromlen);
 }
 
-static inline ssize_t ofi_recvfrom_socket(SOCKET fd, const void *buf, size_t count, int flags,
-					  const struct sockaddr *to, socklen_t tolen)
+static inline ssize_t
+ofi_sendto_socket(SOCKET fd, const void *buf, size_t count, int flags,
+		  const struct sockaddr *to, socklen_t tolen)
 {
-	return sendto(fd, (const char*)buf, (int)count, flags, to, tolen);
-}
-
-static inline ssize_t ofi_send_socket(SOCKET fd, const void *buf, size_t count,
-				      int flags)
-{
-	return send(fd, (const char*)buf, (int)count, flags);
-}
-
-static inline ssize_t ofi_sendto_socket(SOCKET fd, const void *buf, size_t count, int flags,
-					const struct sockaddr *to, socklen_t tolen)
-{
-	return sendto(fd, (const char*)buf, (int)count, flags, to, tolen);
+	int len = count > INT_MAX ? INT_MAX : (int) count;
+	return sendto(fd, (const char*) buf, len, flags, to, (int) tolen);
 }
 
 ssize_t ofi_writev_socket(SOCKET fd, const struct iovec *iovec, size_t iov_cnt);
 ssize_t ofi_readv_socket(SOCKET fd, const struct iovec *iovec, size_t iov_cnt);
+ssize_t ofi_sendmsg_tcp(SOCKET fd, const struct msghdr *msg, int flags);
+ssize_t ofi_recvmsg_tcp(SOCKET fd, struct msghdr *msg, int flags);
+
+static inline ssize_t
+ofi_sendmsg_udp(SOCKET fd, const struct msghdr *msg, int flags)
+{
+	DWORD bytes;
+	int ret;
+
+	ret = WSASendMsg(fd, msg, flags, &bytes, NULL, NULL);
+	return ret ? ret : bytes;
+}
+
+ssize_t ofi_recvmsg_udp(SOCKET fd, struct msghdr *msg, int flags);
 
 static inline int ofi_shutdown(SOCKET socket, int how)
 {
@@ -800,15 +842,35 @@ static inline char * strndup(char const *src, size_t n)
 	return dst;
 }
 
-static inline int ofi_sysconf(int name)
+char *strcasestr(const char *haystack, const char *needle);
+
+#ifndef _SC_PAGESIZE
+#define _SC_PAGESIZE	0
+#endif
+
+#ifndef _SC_NPROCESSORS_ONLN
+#define _SC_NPROCESSORS_ONLN 1
+#endif
+
+#ifndef _SC_PHYS_PAGES
+#define _SC_PHYS_PAGES 2
+#endif
+
+static inline long ofi_sysconf(int name)
 {
 	SYSTEM_INFO si;
+	ULONGLONG mem_size = 0;
 
 	GetSystemInfo(&si);
 
 	switch (name) {
 	case _SC_PAGESIZE:
 		return si.dwPageSize;
+	case _SC_NPROCESSORS_ONLN:
+		return si.dwNumberOfProcessors;
+	case _SC_PHYS_PAGES:
+		GetPhysicallyInstalledSystemMemory(&mem_size);
+		return mem_size / si.dwPageSize;
 	default:
 		errno = EINVAL;
 		return -1;
@@ -817,9 +879,29 @@ static inline int ofi_sysconf(int name)
 
 int ofi_shm_unmap(struct util_shm *shm);
 
+static inline ssize_t ofi_get_hugepage_size(void)
+{
+	return -FI_ENOSYS;
+}
+
+static inline int ofi_alloc_hugepage_buf(void **memptr, size_t size)
+{
+	return -FI_ENOSYS;
+}
+
+static inline int ofi_free_hugepage_buf(void *memptr, size_t size)
+{
+	return -FI_ENOSYS;
+}
+
+static inline int ofi_hugepage_enabled(void)
+{
+	return 0;
+}
+
 static inline int ofi_is_loopback_addr(struct sockaddr *addr) {
 	return (addr->sa_family == AF_INET &&
-		((struct sockaddr_in *)addr)->sin_addr.s_addr == ntohl(INADDR_LOOPBACK)) ||
+		((struct sockaddr_in *)addr)->sin_addr.s_addr == htonl(INADDR_LOOPBACK)) ||
 		(addr->sa_family == AF_INET6 &&
 		((struct sockaddr_in6 *)addr)->sin6_addr.u.Word[0] == 0 &&
 		((struct sockaddr_in6 *)addr)->sin6_addr.u.Word[1] == 0 &&
@@ -828,7 +910,28 @@ static inline int ofi_is_loopback_addr(struct sockaddr *addr) {
 		((struct sockaddr_in6 *)addr)->sin6_addr.u.Word[4] == 0 &&
 		((struct sockaddr_in6 *)addr)->sin6_addr.u.Word[5] == 0 &&
 		((struct sockaddr_in6 *)addr)->sin6_addr.u.Word[6] == 0 &&
-		((struct sockaddr_in6 *)addr)->sin6_addr.u.Word[7] == ntohs(1));
+		((struct sockaddr_in6 *)addr)->sin6_addr.u.Word[7] == htons(1));
+}
+
+size_t ofi_ifaddr_get_speed(struct ifaddrs *ifa);
+
+#define file2unix_time	10000000i64
+#define win2unix_epoch	116444736000000000i64
+#define CLOCK_MONOTONIC 1
+
+/* Own implementation of clock_gettime*/
+static inline
+int clock_gettime(int which_clock, struct timespec *spec)
+{
+	__int64 wintime;
+
+	GetSystemTimeAsFileTime((FILETIME*)&wintime);
+	wintime -= win2unix_epoch;
+
+	spec->tv_sec = wintime / file2unix_time;
+	spec->tv_nsec = wintime % file2unix_time * 100;
+
+	return 0;
 }
 
 /* complex operations implementation */
@@ -897,11 +1000,15 @@ OFI_DEF_COMPLEX(long_double)
 /* atomics primitives */
 #ifdef HAVE_BUILTIN_ATOMICS
 #define InterlockedAdd32 InterlockedAdd
+#define InterlockedCompareExchange32 InterlockedCompareExchange
 typedef LONG ofi_atomic_int_32_t;
 typedef LONGLONG ofi_atomic_int_64_t;
 
 #define ofi_atomic_add_and_fetch(radix, ptr, val) InterlockedAdd##radix((ofi_atomic_int_##radix##_t *)(ptr), (ofi_atomic_int_##radix##_t)(val))
 #define ofi_atomic_sub_and_fetch(radix, ptr, val) InterlockedAdd##radix((ofi_atomic_int_##radix##_t *)(ptr), -(ofi_atomic_int_##radix##_t)(val))
+#define ofi_atomic_cas_bool(radix, ptr, expected, desired)					\
+	(InterlockedCompareExchange##radix(ptr, desired, expected) == expected)
+
 #endif /* HAVE_BUILTIN_ATOMICS */
 
 static inline int ofi_set_thread_affinity(const char *s)

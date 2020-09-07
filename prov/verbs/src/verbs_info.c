@@ -34,9 +34,9 @@
 
 #include <ifaddrs.h>
 #include <net/if.h>
+#include <stdint.h>
 
 #include "fi_verbs.h"
-#include "ep_rdm/verbs_rdm.h"
 
 
 #define VERBS_IB_PREFIX "IB-0x"
@@ -44,28 +44,23 @@
 
 #define VERBS_DOMAIN_CAPS (FI_LOCAL_COMM | FI_REMOTE_COMM)
 
-#define VERBS_MSG_CAPS (FI_MSG | FI_RMA | FI_ATOMICS | FI_READ | FI_WRITE |	\
-			FI_SEND | FI_RECV | FI_REMOTE_READ | FI_REMOTE_WRITE |	\
-			VERBS_DOMAIN_CAPS)
-#define VERBS_RDM_CAPS (FI_MSG | FI_RMA | FI_TAGGED | FI_READ | FI_WRITE |	\
-			FI_RECV | FI_MULTI_RECV | FI_SEND | FI_REMOTE_READ |	\
-			FI_REMOTE_WRITE | VERBS_DOMAIN_CAPS)
-#define VERBS_DGRAM_CAPS (FI_MSG | FI_RECV | FI_SEND | VERBS_DOMAIN_CAPS)
+#define VERBS_MSG_TX_CAPS (OFI_TX_MSG_CAPS | OFI_TX_RMA_CAPS | FI_ATOMICS)
+#define VERBS_MSG_RX_CAPS (OFI_RX_MSG_CAPS | OFI_RX_RMA_CAPS | FI_ATOMICS)
+#define VERBS_MSG_CAPS (VERBS_MSG_TX_CAPS | VERBS_MSG_RX_CAPS | VERBS_DOMAIN_CAPS)
+#define VERBS_DGRAM_TX_CAPS (OFI_TX_MSG_CAPS)
+#define VERBS_DGRAM_RX_CAPS (OFI_RX_MSG_CAPS)
+#define VERBS_DGRAM_CAPS (VERBS_DGRAM_TX_CAPS | VERBS_DGRAM_RX_CAPS | \
+			  VERBS_DOMAIN_CAPS)
 
-#define VERBS_RDM_MODE (FI_CONTEXT)
+#define VERBS_DGRAM_RX_MODE (FI_MSG_PREFIX)
 
-#define VERBS_TX_OP_FLAGS (FI_INJECT | FI_COMPLETION | FI_TRANSMIT_COMPLETE)
-#define VERBS_TX_OP_FLAGS_IWARP (FI_INJECT | FI_COMPLETION)
-#define VERBS_TX_OP_FLAGS_IWARP_RDM (VERBS_TX_OP_FLAGS)
-
-#define VERBS_TX_RDM_MODE VERBS_RDM_MODE
+#define VERBS_TX_OP_FLAGS_IWARP (FI_INJECT | FI_INJECT_COMPLETE | FI_COMPLETION)
+#define VERBS_TX_OP_FLAGS (VERBS_TX_OP_FLAGS_IWARP | FI_TRANSMIT_COMPLETE)
 
 #define VERBS_RX_MODE (FI_RX_CQ_DATA)
 
-#define VERBS_RX_RDM_OP_FLAGS (FI_COMPLETION)
-
-#define VERBS_MSG_ORDER (FI_ORDER_RAR | FI_ORDER_RAW | FI_ORDER_RAS | \
-		FI_ORDER_WAW | FI_ORDER_WAS | FI_ORDER_SAW | FI_ORDER_SAS )
+#define VERBS_MSG_ORDER (OFI_ORDER_RAR_SET | OFI_ORDER_RAW_SET | FI_ORDER_RAS | \
+		OFI_ORDER_WAW_SET | FI_ORDER_WAS | FI_ORDER_SAW | FI_ORDER_SAS )
 
 #define VERBS_INFO_NODE_2_UD_ADDR(sybsys, node, svc, ib_ud_addr)			\
 	VERBS_INFO(sybsys, "'%s:%u' resolved to <gid <interface_id=%"PRIu64		\
@@ -75,7 +70,7 @@
 		   (ib_ud_addr)->lid, (ib_ud_addr)->service)
 
 const struct fi_fabric_attr verbs_fabric_attr = {
-	.prov_version		= VERBS_PROV_VERS,
+	.prov_version		= OFI_VERSION_DEF_PROV,
 };
 
 const struct fi_domain_attr verbs_domain_attr = {
@@ -92,8 +87,9 @@ const struct fi_domain_attr verbs_domain_attr = {
 	.max_ep_tx_ctx		= 1,
 	.max_ep_rx_ctx		= 1,
 	.mr_iov_limit		= VERBS_MR_IOV_LIMIT,
-	/* max_err_data is size of ibv_wc::vendor_err for CQ, 0 - for EQ */
-	.max_err_data		= sizeof_field(struct ibv_wc, vendor_err),
+	/* max_err_data is size of ibv_wc::vendor_err for CQ, UINT8_MAX - for EQ */
+	.max_err_data		= MAX(sizeof_field(struct ibv_wc, vendor_err),
+				      UINT8_MAX),
 };
 
 const struct fi_ep_attr verbs_ep_attr = {
@@ -106,21 +102,25 @@ const struct fi_ep_attr verbs_ep_attr = {
 };
 
 const struct fi_rx_attr verbs_rx_attr = {
+	.caps			= VERBS_MSG_RX_CAPS,
 	.mode			= VERBS_RX_MODE,
+	.op_flags		= FI_COMPLETION,
 	.msg_order		= VERBS_MSG_ORDER,
 	.comp_order		= FI_ORDER_STRICT | FI_ORDER_DATA,
 	.total_buffered_recv	= 0,
 };
 
-const struct fi_rx_attr verbs_rdm_rx_attr = {
-	.mode			= VERBS_RDM_MODE | VERBS_RX_MODE,
-	.op_flags		= VERBS_RX_RDM_OP_FLAGS,
+const struct fi_rx_attr verbs_dgram_rx_attr = {
+	.caps			= VERBS_DGRAM_RX_CAPS,
+	.mode			= VERBS_DGRAM_RX_MODE | VERBS_RX_MODE,
+	.op_flags		= FI_COMPLETION,
 	.msg_order		= VERBS_MSG_ORDER,
+	.comp_order		= FI_ORDER_STRICT | FI_ORDER_DATA,
 	.total_buffered_recv	= 0,
-	.iov_limit		= 1
 };
 
 const struct fi_tx_attr verbs_tx_attr = {
+	.caps			= VERBS_MSG_TX_CAPS,
 	.mode			= 0,
 	.op_flags		= VERBS_TX_OP_FLAGS,
 	.msg_order		= VERBS_MSG_ORDER,
@@ -129,44 +129,43 @@ const struct fi_tx_attr verbs_tx_attr = {
 	.rma_iov_limit		= 1,
 };
 
-const struct fi_tx_attr verbs_rdm_tx_attr = {
-	.mode			= VERBS_TX_RDM_MODE,
+const struct fi_tx_attr verbs_dgram_tx_attr = {
+	.caps			= VERBS_DGRAM_TX_CAPS,
+	.mode			= 0,
 	.op_flags		= VERBS_TX_OP_FLAGS,
 	.msg_order		= VERBS_MSG_ORDER,
-	.inject_size		= FI_IBV_RDM_DFLT_BUFFERED_SIZE,
+	.comp_order		= FI_ORDER_STRICT,
+	.inject_size		= 0,
 	.rma_iov_limit		= 1,
 };
 
 const struct verbs_ep_domain verbs_msg_domain = {
 	.suffix			= "",
 	.type			= FI_EP_MSG,
-	.caps			= VERBS_MSG_CAPS,
+	.protocol		= FI_PROTO_UNSPEC,
 };
 
-const struct verbs_ep_domain verbs_rdm_domain = {
-	.suffix			= "-rdm",
-	.type			= FI_EP_RDM,
-	.caps			= VERBS_RDM_CAPS,
+const struct verbs_ep_domain verbs_msg_xrc_domain = {
+	.suffix			= "-xrc",
+	.type			= FI_EP_MSG,
+	.protocol		= FI_PROTO_RDMA_CM_IB_XRC,
 };
 
 const struct verbs_ep_domain verbs_dgram_domain = {
 	.suffix			= "-dgram",
 	.type			= FI_EP_DGRAM,
-	.caps			= VERBS_DGRAM_CAPS,
+	.protocol		= FI_PROTO_UNSPEC,
 };
 
-struct fi_ibv_rdm_sysaddr
-{
-	struct sockaddr_in addr;
-	int is_found;
-};
+/* The list (not thread safe) is populated once when the provider is initialized */
+DEFINE_LIST(verbs_devs);
 
-int fi_ibv_check_ep_attr(const struct fi_info *hints,
+int vrb_check_ep_attr(const struct fi_info *hints,
 			 const struct fi_info *info)
 {
 	struct fi_info *user_hints;
 	struct util_prov tmp_util_prov = {
-		.prov = &fi_ibv_prov,
+		.prov = &vrb_prov,
 		.info = NULL,
 		.flags = (info->domain_attr->max_ep_srx_ctx &&
 			  info->ep_attr->type == FI_EP_MSG) ?
@@ -177,10 +176,9 @@ int fi_ibv_check_ep_attr(const struct fi_info *hints,
 	switch (hints->ep_attr->protocol) {
 	case FI_PROTO_UNSPEC:
 	case FI_PROTO_RDMA_CM_IB_RC:
+	case FI_PROTO_RDMA_CM_IB_XRC:
 	case FI_PROTO_IWARP:
 	case FI_PROTO_IB_UD:
-	case FI_PROTO_IB_RDM:
-	case FI_PROTO_IWARP_RDM:
 		break;
 	default:
 		VERBS_INFO(FI_LOG_CORE,
@@ -206,27 +204,31 @@ int fi_ibv_check_ep_attr(const struct fi_info *hints,
 	return ret;
 }
 
-int fi_ibv_check_rx_attr(const struct fi_rx_attr *attr,
+int vrb_check_rx_attr(const struct fi_rx_attr *attr,
 			 const struct fi_info *hints,
 			 const struct fi_info *info)
 {
-	/* WARNING: This is not thread safe */
-	uint64_t saved_prov_mode = info->rx_attr->mode;
+	struct fi_info *dup_info;
 	int ret;
 
-	info->rx_attr->mode = (hints->domain_attr &&
-			       hints->domain_attr->cq_data_size) ?
-			info->rx_attr->mode :
-			(info->rx_attr->mode & ~FI_RX_CQ_DATA);
+	if ((hints->domain_attr && hints->domain_attr->cq_data_size) ||
+	    (hints->rx_attr && hints->rx_attr->mode & FI_RX_CQ_DATA) ||
+	    hints->mode & FI_RX_CQ_DATA) {
+		ret = ofi_check_rx_attr(&vrb_prov, info, attr, hints->mode);
+	} else {
+		dup_info = fi_dupinfo(info);
+		if (!dup_info)
+			return -FI_ENOMEM;
 
-	ret = ofi_check_rx_attr(&fi_ibv_prov, info, attr, hints->mode);
-
-	info->rx_attr->mode = saved_prov_mode;
-
+		dup_info->rx_attr->mode &= ~FI_RX_CQ_DATA;
+		ret = ofi_check_rx_attr(&vrb_prov, dup_info, attr,
+					hints->mode);
+		fi_freeinfo(dup_info);
+	}
 	return ret;
 }
 
-static int fi_ibv_check_hints(uint32_t version, const struct fi_info *hints,
+static int vrb_check_hints(uint32_t version, const struct fi_info *hints,
 			      const struct fi_info *info)
 {
 	int ret;
@@ -234,7 +236,7 @@ static int fi_ibv_check_hints(uint32_t version, const struct fi_info *hints,
 
 	if (hints->caps & ~(info->caps)) {
 		VERBS_INFO(FI_LOG_CORE, "Unsupported capabilities\n");
-		FI_INFO_CHECK(&fi_ibv_prov, info, hints, caps, FI_TYPE_CAPS);
+		FI_INFO_CHECK(&vrb_prov, info, hints, caps, FI_TYPE_CAPS);
 		return -FI_ENODATA;
 	}
 
@@ -242,19 +244,26 @@ static int fi_ibv_check_hints(uint32_t version, const struct fi_info *hints,
 
 	if ((hints->mode & prov_mode) != prov_mode) {
 		VERBS_INFO(FI_LOG_CORE, "needed mode not set\n");
-		FI_INFO_MODE(&fi_ibv_prov, prov_mode, hints->mode);
+		FI_INFO_MODE(&vrb_prov, prov_mode, hints->mode);
 		return -FI_ENODATA;
 	}
 
 	if (hints->fabric_attr) {
-		ret = ofi_check_fabric_attr(&fi_ibv_prov, info->fabric_attr,
+		ret = ofi_check_fabric_attr(&vrb_prov, info->fabric_attr,
 					    hints->fabric_attr);
 		if (ret)
 			return ret;
 	}
 
 	if (hints->domain_attr) {
-		ret = ofi_check_domain_attr(&fi_ibv_prov, version,
+		if (hints->domain_attr->name &&
+		    strcasecmp(hints->domain_attr->name, info->domain_attr->name)) {
+			VERBS_INFO(FI_LOG_CORE, "skipping device %s (want %s)\n",
+				   info->domain_attr->name, hints->domain_attr->name);
+			return -FI_ENODATA;
+		}
+
+		ret = ofi_check_domain_attr(&vrb_prov, version,
 					    info->domain_attr,
 					    hints);
 		if (ret)
@@ -262,19 +271,19 @@ static int fi_ibv_check_hints(uint32_t version, const struct fi_info *hints,
 	}
 
 	if (hints->ep_attr) {
-		ret = fi_ibv_check_ep_attr(hints, info);
+		ret = vrb_check_ep_attr(hints, info);
 		if (ret)
 			return ret;
 	}
 
 	if (hints->rx_attr) {
-		ret = fi_ibv_check_rx_attr(hints->rx_attr, hints, info);
+		ret = vrb_check_rx_attr(hints->rx_attr, hints, info);
 		if (ret)
 			return ret;
 	}
 
 	if (hints->tx_attr) {
-		ret = ofi_check_tx_attr(&fi_ibv_prov, info->tx_attr,
+		ret = ofi_check_tx_attr(&vrb_prov, info->tx_attr,
 					hints->tx_attr, hints->mode);
 		if (ret)
 			return ret;
@@ -283,7 +292,7 @@ static int fi_ibv_check_hints(uint32_t version, const struct fi_info *hints,
 	return FI_SUCCESS;
 }
 
-int fi_ibv_fi_to_rai(const struct fi_info *fi, uint64_t flags,
+int vrb_fi_to_rai(const struct fi_info *fi, uint64_t flags,
 		     struct rdma_addrinfo *rai)
 {
 	memset(rai, 0, sizeof *rai);
@@ -342,7 +351,7 @@ int fi_ibv_fi_to_rai(const struct fi_info *fi, uint64_t flags,
 }
 
 static inline
-void *fi_ibv_dgram_ep_name_to_string(const struct ofi_ib_ud_ep_name *name,
+void *vrb_dgram_ep_name_to_string(const struct ofi_ib_ud_ep_name *name,
 				     size_t *len)
 {
 	char *str;
@@ -363,11 +372,11 @@ void *fi_ibv_dgram_ep_name_to_string(const struct ofi_ib_ud_ep_name *name,
 	return str;
 }
 
-static int fi_ibv_fill_addr_by_ep_name(struct ofi_ib_ud_ep_name *ep_name,
+static int vrb_fill_addr_by_ep_name(struct ofi_ib_ud_ep_name *ep_name,
 				       uint32_t fmt, void **addr, size_t *addrlen)
 {
 	if (fmt == FI_ADDR_STR) {
-		*addr = fi_ibv_dgram_ep_name_to_string(ep_name, addrlen);
+		*addr = vrb_dgram_ep_name_to_string(ep_name, addrlen);
 		if (!*addr)
 			return -FI_ENOMEM;
 	} else {
@@ -381,7 +390,7 @@ static int fi_ibv_fill_addr_by_ep_name(struct ofi_ib_ud_ep_name *ep_name,
 	return FI_SUCCESS;
 }
 
-static int fi_ibv_rai_to_fi(struct rdma_addrinfo *rai, struct fi_info *fi)
+static int vrb_rai_to_fi(struct rdma_addrinfo *rai, struct fi_info *fi)
 {
 	if (!rai)
 		return FI_SUCCESS;
@@ -410,8 +419,8 @@ static int fi_ibv_rai_to_fi(struct rdma_addrinfo *rai, struct fi_info *fi)
  	return FI_SUCCESS;
 }
 
-static inline int fi_ibv_get_qp_cap(struct ibv_context *ctx,
-				    struct fi_info *info)
+static inline int vrb_get_qp_cap(struct ibv_context *ctx,
+				    struct fi_info *info, uint32_t protocol)
 {
 	struct ibv_pd *pd;
 	struct ibv_cq *cq;
@@ -433,17 +442,33 @@ static inline int fi_ibv_get_qp_cap(struct ibv_context *ctx,
 		goto err1;
 	}
 
-	qp_type = (info->ep_attr->type != FI_EP_DGRAM) ?
-			    IBV_QPT_RC : IBV_QPT_UD;
+	if (protocol == FI_PROTO_RDMA_CM_IB_XRC)
+		qp_type = IBV_QPT_XRC_SEND;
+	else
+		qp_type = (info->ep_attr->type != FI_EP_DGRAM) ?
+				    IBV_QPT_RC : IBV_QPT_UD;
 
 	memset(&init_attr, 0, sizeof init_attr);
 	init_attr.send_cq = cq;
-	init_attr.recv_cq = cq;
-	init_attr.cap.max_send_wr = fi_ibv_gl_data.def_tx_size;
-	init_attr.cap.max_recv_wr = fi_ibv_gl_data.def_rx_size;
-	init_attr.cap.max_send_sge = fi_ibv_gl_data.def_tx_iov_limit;
-	init_attr.cap.max_recv_sge = fi_ibv_gl_data.def_rx_iov_limit;
-	init_attr.cap.max_inline_data = fi_ibv_find_max_inline(pd, ctx, qp_type);
+
+	assert(info->tx_attr->size &&
+	       info->tx_attr->iov_limit &&
+	       info->rx_attr->size &&
+	       info->rx_attr->iov_limit);
+
+	init_attr.cap.max_send_wr = MIN(vrb_gl_data.def_tx_size,
+					info->tx_attr->size);
+	init_attr.cap.max_send_sge = MIN(vrb_gl_data.def_tx_iov_limit,
+					 info->tx_attr->iov_limit);
+
+	if (qp_type != IBV_QPT_XRC_SEND) {
+		init_attr.recv_cq = cq;
+		init_attr.cap.max_recv_wr = MIN(vrb_gl_data.def_rx_size,
+						info->rx_attr->size);
+		init_attr.cap.max_recv_sge = MIN(vrb_gl_data.def_rx_iov_limit,
+						 info->rx_attr->iov_limit);
+	}
+	init_attr.cap.max_inline_data = vrb_find_max_inline(pd, ctx, qp_type);
 	init_attr.qp_type = qp_type;
 
 	qp = ibv_create_qp(pd, &init_attr);
@@ -464,7 +489,7 @@ err1:
 	return ret;
 }
 
-static int fi_ibv_mtu_type_to_len(enum ibv_mtu mtu_type)
+static int vrb_mtu_type_to_len(enum ibv_mtu mtu_type)
 {
 	switch (mtu_type) {
 	case IBV_MTU_256:
@@ -482,20 +507,59 @@ static int fi_ibv_mtu_type_to_len(enum ibv_mtu mtu_type)
 	}
 }
 
-static int fi_ibv_get_device_attrs(struct ibv_context *ctx,
-				   struct fi_info *info)
+static enum fi_link_state vrb_pstate_2_lstate(enum ibv_port_state pstate)
+{
+	switch (pstate) {
+	case IBV_PORT_DOWN:
+	case IBV_PORT_INIT:
+	case IBV_PORT_ARMED:
+		return FI_LINK_DOWN;
+	case IBV_PORT_ACTIVE:
+		return FI_LINK_UP;
+	default:
+		return FI_LINK_UNKNOWN;
+	}
+}
+
+static const char *vrb_link_layer_str(uint8_t link_layer)
+{
+	switch (link_layer) {
+	case IBV_LINK_LAYER_UNSPECIFIED:
+	case IBV_LINK_LAYER_INFINIBAND:
+		return "InfiniBand";
+	case IBV_LINK_LAYER_ETHERNET:
+		return "Ethernet";
+	default:
+		return "Unknown";
+	}
+}
+
+static int vrb_get_device_attrs(struct ibv_context *ctx,
+				   struct fi_info *info, uint32_t protocol)
 {
 	struct ibv_device_attr device_attr;
 	struct ibv_port_attr port_attr;
 	size_t max_sup_size;
-	int ret = 0;
+	int ret = 0, mtu_size;
 	uint8_t port_num;
+	enum fi_log_level level =
+		vrb_gl_data.msg.prefer_xrc ? FI_LOG_WARN : FI_LOG_INFO;
+	const char *dev_name = ibv_get_device_name(ctx->device);
 
 	ret = ibv_query_device(ctx, &device_attr);
 	if (ret) {
 		VERBS_INFO_ERRNO(FI_LOG_FABRIC,
 				 "ibv_query_device", errno);
 		return -errno;
+	}
+
+	if (protocol == FI_PROTO_RDMA_CM_IB_XRC) {
+		if (!(device_attr.device_cap_flags & IBV_DEVICE_XRC)) {
+			FI_LOG(&vrb_prov, level, FI_LOG_FABRIC,
+			       "XRC support unavailable in device: %s\n",
+			       dev_name);
+			return -FI_EINVAL;
+		}
 	}
 
 	info->domain_attr->cq_cnt 		= device_attr.max_cq;
@@ -510,9 +574,6 @@ static int fi_ibv_get_device_attrs(struct ibv_context *ctx,
 						      device_attr.max_qp);
 	info->domain_attr->max_ep_srx_ctx	= device_attr.max_srq;
 	info->domain_attr->mr_cnt		= device_attr.max_mr;
-	if (info->ep_attr->type == FI_EP_RDM)
-		info->domain_attr->cntr_cnt	= device_attr.max_qp * 4;
-
 	info->tx_attr->size 			= device_attr.max_qp_wr;
 	info->tx_attr->iov_limit 		= device_attr.max_sge;
 
@@ -520,12 +581,17 @@ static int fi_ibv_get_device_attrs(struct ibv_context *ctx,
 						  MIN(device_attr.max_qp_wr,
 						      device_attr.max_srq_wr) :
 						  device_attr.max_qp_wr;
+	// TODO set one of srq sge or regular sge based on hints?
 	info->rx_attr->iov_limit 		= device_attr.max_srq_sge ?
 						  MIN(device_attr.max_sge,
 						      device_attr.max_srq_sge) :
 						  device_attr.max_sge;
+	if (protocol == FI_PROTO_RDMA_CM_IB_XRC) {
+		info->rx_attr->iov_limit = MIN(info->rx_attr->iov_limit, 1);
+		info->ep_attr->rx_ctx_cnt = FI_SHARED_CONTEXT;
+	}
 
-	ret = fi_ibv_get_qp_cap(ctx, info);
+	ret = vrb_get_qp_cap(ctx, info, protocol);
 	if (ret)
 		return ret;
 
@@ -541,21 +607,20 @@ static int fi_ibv_get_device_attrs(struct ibv_context *ctx,
 	}
 
 	if (port_num == device_attr.phys_port_cnt + 1) {
-		VERBS_WARN(FI_LOG_FABRIC, "There are no active ports\n");
+		FI_WARN(&vrb_prov, FI_LOG_FABRIC, "device %s: there are no "
+			"active ports\n", dev_name);
 		return -FI_ENODATA;
 	} else {
-		VERBS_INFO(FI_LOG_FABRIC,
-			   "The first found active port is %"PRIu8"\n",
-			   port_num);
+		VERBS_INFO(FI_LOG_FABRIC, "device %s: first found active port "
+			   "is %"PRIu8"\n", dev_name, port_num);
 	}
 
 	if (info->ep_attr->type == FI_EP_DGRAM) {
-		ret = fi_ibv_mtu_type_to_len(port_attr.active_mtu);
+		ret = vrb_mtu_type_to_len(port_attr.active_mtu);
 		if (ret < 0) {
-			VERBS_WARN(FI_LOG_FABRIC, "Device %s (port: %d) reports"
+			VERBS_WARN(FI_LOG_FABRIC, "device %s (port: %d) reports"
 				   " an unrecognized MTU (%d) \n",
-				   ibv_get_device_name(ctx->device), port_num,
-				   port_attr.active_mtu);
+				   dev_name, port_num, port_attr.active_mtu);
 			return ret;
 		}
 		max_sup_size = MIN(ret, port_attr.max_msg_sz);
@@ -567,6 +632,54 @@ static int fi_ibv_get_device_attrs(struct ibv_context *ctx,
 	info->ep_attr->max_order_raw_size 	= max_sup_size;
 	info->ep_attr->max_order_waw_size	= max_sup_size;
 
+	ret = asprintf(&info->nic->device_attr->device_id, "0x%04x",
+		       device_attr.vendor_part_id);
+	if (ret < 0) {
+		info->nic->device_attr->device_id = NULL;
+		VERBS_WARN(FI_LOG_FABRIC,
+			   "Unable to allocate memory for device_attr::device_id\n");
+		return -FI_ENOMEM;
+	}
+
+	ret = asprintf(&info->nic->device_attr->vendor_id, "0x%04x",
+		       device_attr.vendor_id);
+	if (ret < 0) {
+		info->nic->device_attr->vendor_id = NULL;
+		VERBS_WARN(FI_LOG_FABRIC,
+			   "Unable to allocate memory for device_attr::vendor_id\n");
+		return -FI_ENOMEM;
+	}
+
+	ret = asprintf(&info->nic->device_attr->device_version, "%"PRIu32,
+		       device_attr.hw_ver);
+	if (ret < 0) {
+		info->nic->device_attr->device_version = NULL;
+		VERBS_WARN(FI_LOG_FABRIC,
+			   "Unable to allocate memory for device_attr::device_version\n");
+		return -FI_ENOMEM;
+	}
+
+        info->nic->device_attr->firmware = strdup(device_attr.fw_ver);
+	if (!info->nic->device_attr->firmware) {
+		VERBS_WARN(FI_LOG_FABRIC,
+			   "Unable to allocate memory for device_attr::firmware\n");
+		return -FI_ENOMEM;
+	}
+
+	mtu_size = vrb_mtu_type_to_len(port_attr.active_mtu);
+	info->nic->link_attr->mtu = (size_t) (mtu_size > 0 ? mtu_size : 0);
+	info->nic->link_attr->speed = ofi_vrb_speed(port_attr.active_speed,
+						    port_attr.active_width);
+	info->nic->link_attr->state =
+		vrb_pstate_2_lstate(port_attr.state);
+	info->nic->link_attr->network_type =
+		strdup(vrb_link_layer_str(port_attr.link_layer));
+	if (!info->nic->link_attr->network_type) {
+		VERBS_WARN(FI_LOG_FABRIC,
+			   "Unable to allocate memory for link_attr::network_type\n");
+		return -FI_ENOMEM;
+	}
+
 	return 0;
 }
 
@@ -576,10 +689,12 @@ static int fi_ibv_get_device_attrs(struct ibv_context *ctx,
  * This avoids the lower libraries (libibverbs and librdmacm) from
  * reporting error messages to stderr.
  */
-static int fi_ibv_have_device(void)
+static int vrb_have_device(void)
 {
 	struct ibv_device **devs;
 	struct ibv_context *verbs;
+	struct ibv_device_attr attr;
+	const int AWS_VENDOR_ID = 0x1d0f;
 	int i, ret = 0;
 
 	devs = ibv_get_device_list(NULL);
@@ -589,9 +704,21 @@ static int fi_ibv_have_device(void)
 	for (i = 0; devs[i]; i++) {
 		verbs = ibv_open_device(devs[i]);
 		if (verbs) {
+			ret = ibv_query_device(verbs, &attr);
 			ibv_close_device(verbs);
-			ret = 1;
-			break;
+			/*
+			 * According to the librdmacm library interface,
+			 * rdma_get_devices() in vrb_init_info leaves devices
+			 * open even after rdma_free_devices() is called,
+			 * causing failure in efa provider.
+			 * Also, efa and verb devices are not expected to
+			 * co-exist on a system. If its an efa device, then it
+			 * should be handled by the efa provider.
+			 */
+			if (!ret && (attr.vendor_id != AWS_VENDOR_ID)) {
+				ret = 1;
+				break;
+			}
 		}
 	}
 
@@ -599,59 +726,70 @@ static int fi_ibv_have_device(void)
 	return ret;
 }
 
-static int fi_ibv_alloc_info(struct ibv_context *ctx, struct fi_info **info,
+static int vrb_alloc_info(struct ibv_context *ctx, struct fi_info **info,
 			     const struct verbs_ep_domain *ep_dom)
 {
 	struct fi_info *fi;
 	union ibv_gid gid;
 	size_t name_len;
+	const char *dev_name = ibv_get_device_name(ctx->device);
 	int ret;
 
 	if ((ctx->device->transport_type != IBV_TRANSPORT_IB) &&
-	    (ep_dom->type == FI_EP_DGRAM))
+	    ((ep_dom->type == FI_EP_DGRAM) ||
+	    (ep_dom->protocol == FI_PROTO_RDMA_CM_IB_XRC)))
 		return -FI_EINVAL;
 
-	if (!(fi = fi_allocinfo()))
+	fi = fi_allocinfo();
+	if (!fi)
 		return -FI_ENOMEM;
 
-	fi->caps		= ep_dom->caps;
-	fi->handle		= NULL;
-	if (ep_dom->type == FI_EP_RDM) {
-		fi->mode	= VERBS_RDM_MODE;
-		*(fi->tx_attr)	= verbs_rdm_tx_attr;
-		*(fi->rx_attr)	= verbs_rdm_rx_attr;
-	} else {
-		*(fi->tx_attr)	= verbs_tx_attr;
-		*(fi->rx_attr)	= verbs_rx_attr;
+	fi->handle = NULL;
+	*(fi->ep_attr) = verbs_ep_attr;
+	*(fi->domain_attr) = verbs_domain_attr;
+
+	switch (ep_dom->type) {
+	case FI_EP_MSG:
+		fi->caps = VERBS_MSG_CAPS;
+		*(fi->tx_attr) = verbs_tx_attr;
+		*(fi->rx_attr) = verbs_rx_attr;
+		break;
+	case FI_EP_DGRAM:
+		fi->caps = VERBS_DGRAM_CAPS;
+		fi->mode = VERBS_DGRAM_RX_MODE;
+		*(fi->tx_attr) = verbs_dgram_tx_attr;
+		*(fi->rx_attr) = verbs_dgram_rx_attr;
+		fi->ep_attr->msg_prefix_size = VERBS_DGRAM_MSG_PREFIX_SIZE;
+		break;
+	default:
+		assert(0);
+		return -FI_EINVAL;
+	}
+		
+
+	*(fi->fabric_attr) = verbs_fabric_attr;
+
+	fi->ep_attr->type = ep_dom->type;
+
+	fi->nic = ofi_nic_dup(NULL);
+	if (!fi->nic) {
+		ret = -FI_ENOMEM;
+		goto err;
 	}
 
-	*(fi->ep_attr)		= verbs_ep_attr;
-	*(fi->domain_attr)	= verbs_domain_attr;
+	fi->nic->device_attr->name = strdup(dev_name);
+	if (!fi->nic->device_attr->name) {
+		ret = -FI_ENOMEM;
+		goto err;
+	}
 
-	if (ep_dom->type == FI_EP_RDM)
-		fi->domain_attr->mr_mode &= ~FI_MR_LOCAL;
-
-	*(fi->fabric_attr)	= verbs_fabric_attr;
-
-	fi->ep_attr->type	= ep_dom->type;
-	fi->tx_attr->caps	= ep_dom->caps;
-	fi->rx_attr->caps	= ep_dom->caps;
-
-	ret = fi_ibv_get_device_attrs(ctx, fi);
+	ret = vrb_get_device_attrs(ctx, fi, ep_dom->protocol);
 	if (ret)
 		goto err;
 
-	if (ep_dom->type == FI_EP_RDM) {
-		fi->tx_attr->iov_limit = 1;
-		fi->tx_attr->rma_iov_limit = 1;
-		fi->tx_attr->inject_size = fi_ibv_gl_data.rdm.buffer_size;
-
-		fi->rx_attr->iov_limit = 1;
-	}
-
 	switch (ctx->device->transport_type) {
 	case IBV_TRANSPORT_IB:
-		if(ibv_query_gid(ctx, 1, 0, &gid)) {
+		if (ibv_query_gid(ctx, 1, 0, &gid)) {
 			VERBS_INFO_ERRNO(FI_LOG_FABRIC,
 					 "ibv_query_gid", errno);
 			ret = -errno;
@@ -664,15 +802,14 @@ static int fi_ibv_alloc_info(struct ibv_context *ctx, struct fi_info **info,
 			goto err;
 		}
 
-		snprintf(fi->fabric_attr->name, name_len, VERBS_IB_PREFIX "%" PRIu64,
+		snprintf(fi->fabric_attr->name, name_len, VERBS_IB_PREFIX "%" PRIx64,
 			 be64toh(gid.global.subnet_prefix));
 
 		switch (ep_dom->type) {
 		case FI_EP_MSG:
-			fi->ep_attr->protocol = FI_PROTO_RDMA_CM_IB_RC;
-			break;
-		case FI_EP_RDM:
-			fi->ep_attr->protocol = FI_PROTO_IB_RDM;
+			fi->ep_attr->protocol =
+				ep_dom->protocol == FI_PROTO_UNSPEC ?
+				FI_PROTO_RDMA_CM_IB_RC : ep_dom->protocol;
 			break;
 		case FI_EP_DGRAM:
 			fi->ep_attr->protocol = FI_PROTO_IB_UD;
@@ -689,14 +826,8 @@ static int fi_ibv_alloc_info(struct ibv_context *ctx, struct fi_info **info,
 			ret = -FI_ENOMEM;
 			goto err;
 		}
-
-		if (ep_dom->type == FI_EP_MSG) {
-			fi->ep_attr->protocol = FI_PROTO_IWARP;
-			fi->tx_attr->op_flags = VERBS_TX_OP_FLAGS_IWARP;
-		} else {
-			fi->ep_attr->protocol = FI_PROTO_IWARP_RDM;
-			fi->tx_attr->op_flags = VERBS_TX_OP_FLAGS_IWARP_RDM;
-		}
+		fi->ep_attr->protocol = FI_PROTO_IWARP;
+		fi->tx_attr->op_flags = VERBS_TX_OP_FLAGS_IWARP;
 
 		/* TODO Some iWarp HW may support immediate data as per RFC 7306
 		 * (RDMA Protocol Extensions). Update this to figure out if the
@@ -709,8 +840,8 @@ static int fi_ibv_alloc_info(struct ibv_context *ctx, struct fi_info **info,
 		goto err;
 	}
 
-	name_len = strlen(ctx->device->name) + strlen(ep_dom->suffix);
-	fi->domain_attr->name = malloc(name_len + 1);
+	name_len = strlen(dev_name) + strlen(ep_dom->suffix);
+	fi->domain_attr->name = calloc(1, name_len + 2);
 	if (!fi->domain_attr->name) {
 		ret = -FI_ENOMEM;
 		goto err;
@@ -718,45 +849,53 @@ static int fi_ibv_alloc_info(struct ibv_context *ctx, struct fi_info **info,
 
 	snprintf(fi->domain_attr->name, name_len + 1, "%s%s",
 		 ctx->device->name, ep_dom->suffix);
-	fi->domain_attr->name[name_len] = '\0';
 
 	*info = fi;
+
 	return 0;
 err:
 	fi_freeinfo(fi);
 	return ret;
 }
 
-static void fi_ibv_verbs_devs_free(struct dlist_entry *verbs_devs)
+static void verbs_devs_print(void)
 {
 	struct verbs_dev_info *dev;
 	struct verbs_addr *addr;
+	char addr_str[INET6_ADDRSTRLEN];
+	int i = 0;
 
-	while (!dlist_empty(verbs_devs)) {
-		dlist_pop_front(verbs_devs, struct verbs_dev_info, dev, entry);
-		while (!dlist_empty(&dev->addrs)) {
-			dlist_pop_front(&dev->addrs, struct verbs_addr, addr, entry);
-			rdma_freeaddrinfo(addr->rai);
-			free(addr);
+	FI_INFO(&vrb_prov, FI_LOG_FABRIC,
+		"list of verbs devices found for FI_EP_MSG:\n");
+	dlist_foreach_container(&verbs_devs, struct verbs_dev_info,
+				dev, entry) {
+		FI_INFO(&vrb_prov, FI_LOG_FABRIC,
+			"#%d %s - IPoIB addresses:\n", ++i, dev->name);
+		dlist_foreach_container(&dev->addrs, struct verbs_addr,
+					addr, entry) {
+			if (!inet_ntop(addr->rai->ai_family,
+				       ofi_get_ipaddr(addr->rai->ai_src_addr),
+				       addr_str, INET6_ADDRSTRLEN))
+				FI_INFO(&vrb_prov, FI_LOG_FABRIC,
+					"unable to convert address to string\n");
+			else
+				FI_INFO(&vrb_prov, FI_LOG_FABRIC,
+					"\t%s\n", addr_str);
 		}
-		free(dev->name);
-		free(dev);
 	}
 }
 
-static int fi_ibv_add_rai(struct dlist_entry *verbs_devs, struct rdma_cm_id *id,
-		struct rdma_addrinfo *rai)
+static int verbs_devs_add(struct dlist_entry *verbs_devs, char *dev_name,
+			  struct rdma_addrinfo *rai)
 {
 	struct verbs_dev_info *dev;
 	struct verbs_addr *addr;
-	const char *dev_name;
 
 	if (!(addr = malloc(sizeof(*addr))))
 		return -FI_ENOMEM;
 
 	addr->rai = rai;
 
-	dev_name = ibv_get_device_name(id->verbs->device);
 	dlist_foreach_container(verbs_devs, struct verbs_dev_info, dev, entry)
 		if (!strcmp(dev_name, dev->name))
 			goto add_rai;
@@ -764,30 +903,92 @@ static int fi_ibv_add_rai(struct dlist_entry *verbs_devs, struct rdma_cm_id *id,
 	if (!(dev = malloc(sizeof(*dev))))
 		goto err1;
 
-	if (!(dev->name = strdup(dev_name)))
-		goto err2;
-
+	dev->name = dev_name;
 	dlist_init(&dev->addrs);
 	dlist_insert_tail(&dev->entry, verbs_devs);
 add_rai:
 	dlist_insert_tail(&addr->entry, &dev->addrs);
 	return 0;
-err2:
-	free(dev);
 err1:
 	free(addr);
 	return -FI_ENOMEM;
 }
 
+#define IPV6_LINK_LOCAL_ADDR_PREFIX_STR "fe80"
+
+static int vrb_ifa_rdma_info(const struct ifaddrs *ifa, char **dev_name,
+				struct rdma_addrinfo **rai)
+{
+	char name[INET6_ADDRSTRLEN];
+	struct rdma_addrinfo rai_hints = {
+		.ai_flags = RAI_PASSIVE | RAI_NUMERICHOST,
+	}, *rai_;
+	struct rdma_cm_id *id;
+	int ret;
+
+	if (!inet_ntop(ifa->ifa_addr->sa_family, ofi_get_ipaddr(ifa->ifa_addr),
+		       name, INET6_ADDRSTRLEN))
+		return -errno;
+
+	ret = rdma_create_id(NULL, &id, NULL, RDMA_PS_TCP);
+	if (ret)
+		return ret;
+
+	/* Detect if the IPv6 address is link local.
+	 * TODO should we do something similar for IPv4? */
+	if (!strncmp(name, IPV6_LINK_LOCAL_ADDR_PREFIX_STR,
+		     strlen(IPV6_LINK_LOCAL_ADDR_PREFIX_STR))) {
+		assert(strlen(name) + strlen(ifa->ifa_name) < INET6_ADDRSTRLEN);
+		strcat(name, "%");
+		strcat(name, ifa->ifa_name);
+	}
+
+	ret = rdma_getaddrinfo((char *) name, NULL, &rai_hints, &rai_);
+	if (ret) {
+		ret = -errno;
+		FI_DBG(&vrb_prov, FI_LOG_FABRIC, "rdma_getaddrinfo failed "
+		       "with error code: %d (%s) for interface %s with address:"
+		       " %s\n", -ret, strerror(-ret), ifa->ifa_name, name);
+		goto err1;
+	}
+
+	ret = rdma_bind_addr(id, rai_->ai_src_addr);
+	if (ret) {
+		ret = -errno;
+		FI_DBG(&vrb_prov, FI_LOG_FABRIC, "rdma_bind_addr failed "
+		       "with error code: %d (%s) for interface %s with address:"
+		       " %s\n", -ret, strerror(-ret), ifa->ifa_name, name);
+		goto err2;
+	}
+
+	if (!id->verbs) {
+		ret = -FI_EINVAL;
+		goto err2;
+	}
+
+	*dev_name = strdup(ibv_get_device_name(id->verbs->device));
+	if (!(*dev_name)) {
+		ret = -FI_ENOMEM;
+		goto err2;
+	}
+
+	rdma_destroy_id(id);
+	*rai = rai_;
+	return 0;
+err2:
+	rdma_freeaddrinfo(rai_);
+err1:
+	rdma_destroy_id(id);
+	return ret;
+}
+
 /* Builds a list of interfaces that correspond to active verbs devices */
-static int fi_ibv_getifaddrs(struct dlist_entry *verbs_devs)
+static int vrb_getifaddrs(struct dlist_entry *verbs_devs)
 {
 	struct ifaddrs *ifaddr, *ifa;
-	char name[INET6_ADDRSTRLEN];
-	struct rdma_addrinfo *rai;
-	struct rdma_cm_id *id;
-	const char *ret_ptr;
-	char *iface = fi_ibv_gl_data.iface;
+	struct rdma_addrinfo *rai = NULL;
+	char *dev_name = NULL;
+	char *iface = vrb_gl_data.iface;
 	int ret, num_verbs_ifs = 0;
 	size_t iface_len = 0;
 	int exact_match = 0;
@@ -795,7 +996,7 @@ static int fi_ibv_getifaddrs(struct dlist_entry *verbs_devs)
 	ret = ofi_getifaddrs(&ifaddr);
 	if (ret) {
 		VERBS_WARN(FI_LOG_FABRIC,
-			   "Unable to get interface addresses\n");
+			   "unable to get interface addresses\n");
 		return ret;
 	}
 
@@ -803,9 +1004,8 @@ static int fi_ibv_getifaddrs(struct dlist_entry *verbs_devs)
 	if (iface) {
 		iface_len = strlen(iface);
 		if (iface_len > IFNAMSIZ) {
-			VERBS_INFO(FI_LOG_EP_CTRL,
-				   "Too long iface name: %s, max: %d\n",
-				   iface, IFNAMSIZ);
+			VERBS_INFO(FI_LOG_FABRIC, "iface name: %s, too long "
+				   "max: %d\n", iface, IFNAMSIZ);
 
 		}
 		for (ifa = ifaddr; ifa && !exact_match; ifa = ifa->ifa_next)
@@ -819,149 +1019,96 @@ static int fi_ibv_getifaddrs(struct dlist_entry *verbs_devs)
 
 		if (iface) {
 			if (exact_match) {
-				if (strcmp(ifa->ifa_name, iface))
+				if (strcmp(ifa->ifa_name, iface)) {
+					FI_INFO(&vrb_prov, FI_LOG_FABRIC,
+						"skipping interface: %s for FI_EP_MSG"
+						" as it doesn't match filter: %s\n",
+						ifa->ifa_name, iface);
 					continue;
+				}
 			} else {
-				if (strncmp(ifa->ifa_name, iface, iface_len))
+				if (strncmp(ifa->ifa_name, iface, iface_len)) {
+					FI_INFO(&vrb_prov, FI_LOG_FABRIC,
+						"skipping interface: %s for FI_EP_MSG"
+						" as it doesn't match filter: %s\n",
+						ifa->ifa_name, iface);
 					continue;
+				}
 			}
 		}
 
-		switch (ifa->ifa_addr->sa_family) {
-		case AF_INET:
-			ret_ptr = inet_ntop(AF_INET, &ofi_sin_addr(ifa->ifa_addr),
-				name, INET6_ADDRSTRLEN);
-			break;
-		case AF_INET6:
-			ret_ptr = inet_ntop(AF_INET6, &ofi_sin6_addr(ifa->ifa_addr),
-				name, INET6_ADDRSTRLEN);
-			break;
-		default:
-			continue;
-		}
-		if (!ret_ptr) {
-			VERBS_WARN(FI_LOG_FABRIC,
-				   "inet_ntop failed: %s(%d)\n",
-				   strerror(errno), errno);
-			ret = -errno;
-			goto err1;
-		}
-
-		ret = fi_ibv_create_ep(name, NULL, FI_NUMERICHOST | FI_SOURCE,
-				NULL, &rai, &id);
+		ret = vrb_ifa_rdma_info(ifa, &dev_name, &rai);
 		if (ret)
 			continue;
 
-		ret = fi_ibv_add_rai(verbs_devs, id, rai);
-		if (ret)
-			goto err2;
-
-		VERBS_DBG(FI_LOG_FABRIC, "Found active interface for verbs device: "
-			  "%s with address: %s\n",
-			  ibv_get_device_name(id->verbs->device), name);
-
-		rdma_destroy_ep(id);
-
+		ret = verbs_devs_add(verbs_devs, dev_name, rai);
+		if (ret) {
+			free(dev_name);
+			rdma_freeaddrinfo(rai);
+			continue;
+		}
 		num_verbs_ifs++;
 	}
+
+	verbs_devs_print();
+
 	freeifaddrs(ifaddr);
 	return num_verbs_ifs ? 0 : -FI_ENODATA;
-err2:
-	rdma_destroy_ep(id);
-err1:
-	fi_ibv_verbs_devs_free(verbs_devs);
-	freeifaddrs(ifaddr);
-	return ret;
 }
 
-static int fi_ibv_get_srcaddr_devs(struct fi_info **info)
+static int
+vrb_info_add_dev_addr(struct fi_info **info, struct verbs_dev_info *dev)
 {
-	struct fi_info *fi, *add_info;
-	struct fi_info *fi_unconf = NULL, *fi_prev = NULL;
-	struct verbs_dev_info *dev;
+	struct fi_info *add_info;
 	struct verbs_addr *addr;
-	int ret = 0;
+	int ret;
 
-	DEFINE_LIST(verbs_devs);
+	dlist_foreach_container(&dev->addrs, struct verbs_addr, addr, entry) {
+		/* When a device has multiple interfaces/addresses configured
+		 * duplicate fi_info and add the address info. fi->src_addr
+		 * would have been set in the previous iteration */
+		if ((*info)->src_addr) {
+			if (!(add_info = fi_dupinfo(*info)))
+				return -FI_ENOMEM;
 
-	ret = fi_ibv_getifaddrs(&verbs_devs);
-	if (ret)
-		return ret;
+			add_info->next = (*info)->next;
+			(*info)->next = add_info;
+			*info = add_info;
+		}
 
-	if (dlist_empty(&verbs_devs)) {
-		VERBS_WARN(FI_LOG_CORE, "No interface address found\n");
-		return 0;
+		ret = vrb_rai_to_fi(addr->rai, *info);
+		if (ret)
+			return ret;
 	}
+	return 0;
+}
+
+static int vrb_get_srcaddr_devs(struct fi_info **info)
+{
+	struct verbs_dev_info *dev;
+	struct fi_info *fi;
+	int ret;
 
 	for (fi = *info; fi; fi = fi->next) {
 		if (fi->ep_attr->type == FI_EP_DGRAM)
 			continue;
-		dlist_foreach_container(&verbs_devs, struct verbs_dev_info, dev, entry)
-			if (!strncmp(fi->domain_attr->name, dev->name, strlen(dev->name))) {
-				dlist_foreach_container(&dev->addrs, struct verbs_addr, addr, entry) {
-					/* When a device has multiple interfaces/addresses configured
-					 * duplicate fi_info and add the address info. fi->src_addr
-					 * would have been set in the previous iteration */
-					if (fi->src_addr) {
-						if (!(add_info = fi_dupinfo(fi))) {
-							ret = -FI_ENOMEM;
-							goto out;
-						}
-
-						add_info->next = fi->next;
-						fi->next = add_info;
-						fi = add_info;
-					}
-
-					ret = fi_ibv_rai_to_fi(addr->rai, fi);
-					if (ret)
-						goto out;
-				}
+		dlist_foreach_container(&verbs_devs, struct verbs_dev_info,
+					dev, entry) {
+			/* strncmp because we want to process XRC fi_info as
+			 * well which have a "-xrc" suffix in domain name */
+			if (!strncmp(fi->domain_attr->name, dev->name,
+				     strlen(dev->name))) {
+				ret = vrb_info_add_dev_addr(&fi, dev);
+				if (ret)
+					return ret;
 				break;
 			}
-	}
-
-        /* re-order info: move info without src_addr to tail */
-	for (fi = *info; fi;) {
-		if (!fi->src_addr) {
-			/* re-link list - exclude current element */
-			if (fi == *info) {
-				*info = fi->next;
-				fi->next = fi_unconf;
-				fi_unconf = fi;
-				fi = *info;
-			} else {
-				assert(fi_prev);
-				fi_prev->next = fi->next;
-				fi->next = fi_unconf;
-				fi_unconf = fi;
-				fi = fi_prev->next;
-			}
-		} else {
-			fi_prev = fi;
-			fi = fi->next;
 		}
 	}
-
-	/* append excluded elements to tail of list */
-	if (fi_unconf) {
-		if (fi_prev) {
-			assert(!fi_prev->next);
-			fi_prev->next = fi_unconf;
-		} else if (*info) {
-			assert(!(*info)->next);
-			(*info)->next = fi_unconf;
-		} else /* !(*info) */ {
-			(*info) = fi_unconf;
-		}
-	}
-
-out:
-	fi_ibv_verbs_devs_free(&verbs_devs);
-	return ret;
+	return 0;
 }
 
-static void fi_ibv_sockaddr_set_port(struct sockaddr *sa, uint16_t port)
+static void vrb_sockaddr_set_port(struct sockaddr *sa, uint16_t port)
 {
 	switch(sa->sa_family) {
 	case AF_INET:
@@ -973,10 +1120,10 @@ static void fi_ibv_sockaddr_set_port(struct sockaddr *sa, uint16_t port)
 	}
 }
 
-/* the `rai` parameter is used for the MSG/RDM EP types */
+/* the `rai` parameter is used for the MSG EP type */
 /* the `fmt`, `[src | dest]_addr` parameters are used for the DGRAM EP type */
 /* if the `fmt` parameter isn't used, pass FI_FORMAT_UNSPEC */
-static int fi_ibv_set_info_addrs(struct fi_info *info,
+static int vrb_set_info_addrs(struct fi_info *info,
 				 struct rdma_addrinfo *rai,
 				 uint32_t fmt,
 				 struct ofi_ib_ud_ep_name *src_addr,
@@ -987,32 +1134,32 @@ static int fi_ibv_set_info_addrs(struct fi_info *info,
 
 	for (; iter_info; iter_info = iter_info->next) {
 		if (iter_info->ep_attr->type != FI_EP_DGRAM) {
-			ret = fi_ibv_rai_to_fi(rai, iter_info);
+			ret = vrb_rai_to_fi(rai, iter_info);
 			if (ret)
 				return ret;
 		} else {
-			iter_info->addr_format = fmt;
 			if (src_addr) {
-				ret = fi_ibv_fill_addr_by_ep_name(src_addr, fmt,
+				ret = vrb_fill_addr_by_ep_name(src_addr, fmt,
 								  &iter_info->src_addr,
 								  &iter_info->src_addrlen);
 				if (ret)
 					return ret;
 			}
 			if (dest_addr) {
-				ret = fi_ibv_fill_addr_by_ep_name(dest_addr, fmt,
+				ret = vrb_fill_addr_by_ep_name(dest_addr, fmt,
 								  &iter_info->dest_addr,
 								  &iter_info->dest_addrlen);
 				if (ret)
 					return ret;
 			}
+			iter_info->addr_format = FI_ADDR_IB_UD;
 		}
 	}
 
 	return FI_SUCCESS;
 }
 
-static int fi_ibv_fill_addr(struct rdma_addrinfo *rai, struct fi_info **info,
+static int vrb_fill_addr(struct rdma_addrinfo *rai, struct fi_info **info,
 			    struct rdma_cm_id *id)
 {
 	struct sockaddr *local_addr;
@@ -1026,7 +1173,7 @@ static int fi_ibv_fill_addr(struct rdma_addrinfo *rai, struct fi_info **info,
 		goto rai_to_fi;
 
 	if (!id->verbs)
-		return fi_ibv_get_srcaddr_devs(info);
+		return vrb_get_srcaddr_devs(info);
 
 	/* Handle the case when rdma_cm doesn't fill src address even
 	 * though it fills the destination address (presence of id->verbs
@@ -1038,7 +1185,7 @@ static int fi_ibv_fill_addr(struct rdma_addrinfo *rai, struct fi_info **info,
 		return -FI_ENODATA;
 	}
 
-	rai->ai_src_len = fi_ibv_sockaddr_len(local_addr);
+	rai->ai_src_len = vrb_sockaddr_len(local_addr);
 	if (!(rai->ai_src_addr = malloc(rai->ai_src_len)))
 		return -FI_ENOMEM;
 
@@ -1046,39 +1193,64 @@ static int fi_ibv_fill_addr(struct rdma_addrinfo *rai, struct fi_info **info,
 	/* User didn't specify a port. Zero out the random port
 	 * assigned by rdmamcm so that this rai/fi_info can be
 	 * used multiple times to create rdma endpoints.*/
-	fi_ibv_sockaddr_set_port(rai->ai_src_addr, 0);
+	vrb_sockaddr_set_port(rai->ai_src_addr, 0);
 
 rai_to_fi:
-	return fi_ibv_set_info_addrs(*info, rai, FI_FORMAT_UNSPEC,
+	return vrb_set_info_addrs(*info, rai, FI_FORMAT_UNSPEC,
 				     NULL, NULL);
 }
 
-int fi_ibv_init_info(const struct fi_info **all_infos)
+static int vrb_device_has_ipoib_addr(const char *dev_name)
+{
+	struct verbs_dev_info *dev;
+
+	dlist_foreach_container(&verbs_devs, struct verbs_dev_info, dev, entry) {
+		if (!strcmp(dev_name, dev->name))
+			return 1;
+	}
+	return 0;
+}
+
+#define VERBS_NUM_DOMAIN_TYPES		3
+
+int vrb_init_info(const struct fi_info **all_infos)
 {
 	struct ibv_context **ctx_list;
 	struct fi_info *fi = NULL, *tail = NULL;
-	int ret = 0, i, num_devices;
+	const struct verbs_ep_domain *ep_type[VERBS_NUM_DOMAIN_TYPES];
+	int ret = 0, i, j, num_devices, dom_count = 0;
 
 	*all_infos = NULL;
 
-	if (!fi_ibv_gl_data.fork_unsafe) {
-		VERBS_INFO(FI_LOG_CORE, "Enabling IB fork support\n");
-		ret = ibv_fork_init();
-		if (ret) {
-			VERBS_WARN(FI_LOG_CORE,
-				   "Enabling IB fork support failed: %s (%d)\n",
-				   strerror(ret), ret);
-			goto done;
-		}
-	} else {
-		VERBS_INFO(FI_LOG_CORE, "Not enabling IB fork support\n");
-	}
-
-	if (!fi_ibv_have_device()) {
-		VERBS_INFO(FI_LOG_FABRIC, "No RDMA devices found\n");
+	if (!vrb_have_device()) {
+		VERBS_INFO(FI_LOG_FABRIC, "no RDMA devices found\n");
 		ret = -FI_ENODATA;
 		goto done;
 	}
+
+	/* List XRC MSG_EP domain before default RC MSG_EP if requested */
+	if (vrb_gl_data.msg.prefer_xrc) {
+		if (VERBS_HAVE_XRC)
+			ep_type[dom_count++] = &verbs_msg_xrc_domain;
+		else
+			FI_WARN(&vrb_prov, FI_LOG_FABRIC,
+				"XRC not built into provider, skip allocating "
+				"fi_info for XRC FI_EP_MSG endpoints\n");
+	}
+
+	vrb_getifaddrs(&verbs_devs);
+
+	if (dlist_empty(&verbs_devs))
+		FI_WARN(&vrb_prov, FI_LOG_FABRIC,
+			"no valid IPoIB interfaces found, FI_EP_MSG endpoint "
+			"type would not be available\n");
+	else
+		ep_type[dom_count++] = &verbs_msg_domain;
+
+	if (!vrb_gl_data.msg.prefer_xrc && VERBS_HAVE_XRC)
+		ep_type[dom_count++] = &verbs_msg_xrc_domain;
+
+	ep_type[dom_count++] = &verbs_dgram_domain;
 
 	ctx_list = rdma_get_devices(&num_devices);
 	if (!num_devices) {
@@ -1088,25 +1260,29 @@ int fi_ibv_init_info(const struct fi_info **all_infos)
 	}
 
 	for (i = 0; i < num_devices; i++) {
-		ret = fi_ibv_alloc_info(ctx_list[i], &fi, &verbs_msg_domain);
-		if (!ret) {
-			if (!*all_infos)
-				*all_infos = fi;
-			else
-				tail->next = fi;
-			tail = fi;
-
-			ret = fi_ibv_alloc_info(ctx_list[i], &fi,
-						&verbs_rdm_domain);
-			if (!ret) {
-				tail->next = fi;
-				tail = fi;
+		for (j = 0; j < dom_count; j++) {
+			if (ep_type[j]->type == FI_EP_MSG &&
+			    !vrb_device_has_ipoib_addr(ctx_list[i]->device->name)) {
+				FI_INFO(&vrb_prov, FI_LOG_FABRIC,
+					"skipping device: %s for FI_EP_MSG, "
+					"it may have a filtered IPoIB interface"
+					" (FI_VERBS_IFACE) or it may not have a"
+					" valid IP address configured\n",
+					ctx_list[i]->device->name);
+				continue;
 			}
+			if (vrb_gl_data.device_name &&
+			    strncasecmp(ctx_list[i]->device->name,
+					vrb_gl_data.device_name,
+					strlen(vrb_gl_data.device_name)))
+				continue;
 
-			ret = fi_ibv_alloc_info(ctx_list[i], &fi,
-						&verbs_dgram_domain);
+			ret = vrb_alloc_info(ctx_list[i], &fi, ep_type[j]);
 			if (!ret) {
-				tail->next = fi;
+				if (!*all_infos)
+					*all_infos = fi;
+				else
+					tail->next = fi;
 				tail = fi;
 			}
 		}
@@ -1120,69 +1296,36 @@ done:
 	return ret;
 }
 
-static int fi_ibv_set_default_attr(struct fi_info *info, size_t *attr,
-				   size_t default_attr, char *attr_str)
+static void vrb_set_default_attr(size_t *attr, size_t default_attr)
 {
-	if (default_attr > *attr) {
-		VERBS_WARN(FI_LOG_FABRIC, "Ignoring provider default value "
-			   "for %s as it is greater than the value supported "
-			   "by domain: %s\n", attr_str, info->domain_attr->name);
-	} else {
+	if (default_attr <= *attr)
 		*attr = default_attr;
-	}
-	return 0;
 }
 
 /* Set default values for attributes. ofi_alter_info would change them if the
  * user has asked for a different value in hints */
-static int fi_ibv_set_default_info(struct fi_info *info)
+static void vrb_set_default_info(struct fi_info *info)
 {
-	int ret;
+	vrb_set_default_attr(&info->tx_attr->size,
+				vrb_gl_data.def_tx_size);
 
-	ret = fi_ibv_set_default_attr(info, &info->tx_attr->size,
-				      fi_ibv_gl_data.def_tx_size,
-				      "tx context size");
-	if (ret)
-		return ret;
+	vrb_set_default_attr(&info->rx_attr->size,
+				vrb_gl_data.def_rx_size);
 
-	ret = fi_ibv_set_default_attr(info, &info->rx_attr->size,
-				      fi_ibv_gl_data.def_rx_size,
-				      "rx context size");
-	if (ret)
-		return ret;
+	vrb_set_default_attr(&info->tx_attr->iov_limit,
+				vrb_gl_data.def_tx_iov_limit);
+	vrb_set_default_attr(&info->rx_attr->iov_limit,
+				vrb_gl_data.def_rx_iov_limit);
 
-	/* Don't set defaults for verb/RDM as
-	 * it supports an iov limit of just 1 */
-	if (info->ep_attr->type != FI_EP_RDM) {
-		ret = fi_ibv_set_default_attr(
-			info, &info->tx_attr->iov_limit,
-			fi_ibv_gl_data.def_tx_iov_limit,
-			"tx iov_limit");
-		if (ret)
-			return ret;
-
-		ret = fi_ibv_set_default_attr(
-			info, &info->rx_attr->iov_limit,
-			fi_ibv_gl_data.def_rx_iov_limit,
-			"rx iov_limit");
-		if (ret)
-			return ret;
-
-		if (info->ep_attr->type != FI_EP_DGRAM) {
-			/* For verbs iov limit is same for
-			 * both regular messages and RMA */
-			ret = fi_ibv_set_default_attr(
-				info, &info->tx_attr->rma_iov_limit,
-				fi_ibv_gl_data.def_tx_iov_limit,
-				"tx rma_iov_limit");
-			if (ret)
-				return ret;
-		}
+	if (info->ep_attr->type == FI_EP_MSG) {
+		/* For verbs iov limit is same for
+		 * both regular messages and RMA */
+		vrb_set_default_attr(&info->tx_attr->rma_iov_limit,
+					vrb_gl_data.def_tx_iov_limit);
 	}
-	return 0;
 }
 
-static struct fi_info *fi_ibv_get_passive_info(const struct fi_info *prov_info,
+static struct fi_info *vrb_get_passive_info(const struct fi_info *prov_info,
 					       const struct fi_info *hints)
 {
 	struct fi_info *info;
@@ -1211,34 +1354,55 @@ static struct fi_info *fi_ibv_get_passive_info(const struct fi_info *prov_info,
 	return info;
 }
 
-static int fi_ibv_get_matching_info(uint32_t version,
-				    const struct fi_info *hints,
-				    struct fi_info **info,
-				    const struct fi_info *verbs_info,
-				    uint8_t passive)
+int vrb_get_matching_info(uint32_t version, const struct fi_info *hints,
+			     struct fi_info **info, const struct fi_info *verbs_info,
+			     uint8_t passive)
 {
 	const struct fi_info *check_info = verbs_info;
 	struct fi_info *fi, *tail;
-	int ret;
+	int ret, i;
 	uint8_t got_passive_info = 0;
+	enum fi_log_level level =
+		vrb_gl_data.msg.prefer_xrc ? FI_LOG_WARN : FI_LOG_INFO;
 
 	*info = tail = NULL;
 
-	for ( ; check_info; check_info = check_info->next) {
+	for (i = 1; check_info; check_info = check_info->next, i++) {
 		if (hints) {
-			VERBS_DBG(FI_LOG_FABRIC, "Checking domain: %s\n",
-				  check_info->domain_attr->name);
-			ret = fi_ibv_check_hints(version, hints,
+			FI_INFO(&vrb_prov, FI_LOG_FABRIC,
+				"checking domain: #%d %s\n",
+				i, check_info->domain_attr->name);
+
+			if (hints->ep_attr) {
+				/* check EP type first to avoid other unnecessary checks */
+				ret = ofi_check_ep_type(
+					&vrb_prov, check_info->ep_attr, hints->ep_attr);
+				if (ret)
+					continue;
+			}
+
+			ret = vrb_check_hints(version, hints,
 						 check_info);
 			if (ret)
 				continue;
+
+			if ((check_info->ep_attr->protocol ==
+			     FI_PROTO_RDMA_CM_IB_XRC) &&
+			    (!hints->ep_attr ||
+			     (hints->ep_attr->rx_ctx_cnt != FI_SHARED_CONTEXT))) {
+				FI_LOG(&vrb_prov, level, FI_LOG_FABRIC,
+				       "hints->ep_attr->rx_ctx_cnt != "
+				       "FI_SHARED_CONTEXT. Skipping "
+				       "XRC FI_EP_MSG endpoints\n");
+				continue;
+			}
 		}
 
 		if ((check_info->ep_attr->type == FI_EP_MSG) && passive) {
 			if (got_passive_info)
 				continue;
 
-			if (!(fi = fi_ibv_get_passive_info(check_info, hints))) {
+			if (!(fi = vrb_get_passive_info(check_info, hints))) {
 				ret = -FI_ENOMEM;
 				goto err;
 			}
@@ -1248,13 +1412,11 @@ static int fi_ibv_get_matching_info(uint32_t version,
 				ret = -FI_ENOMEM;
 				goto err;
 			}
-			ret = fi_ibv_set_default_info(fi);
-			if (ret) {
-				fi_freeinfo(fi);
-				continue;
-			}
+			vrb_set_default_info(fi);
 		}
 
+		FI_INFO(&vrb_prov, FI_LOG_FABRIC,
+			"adding fi_info for domain: %s\n", fi->domain_attr->name);
 		if (!*info)
 			*info = fi;
 		else
@@ -1271,7 +1433,7 @@ err:
 	return ret;
 }
 
-static int fi_ibv_del_info_not_belong_to_dev(const char *dev_name, struct fi_info **info)
+static int vrb_del_info_not_belong_to_dev(const char *dev_name, struct fi_info **info)
 {
 	struct fi_info *check_info = *info;
 	struct fi_info *cur, *prev = NULL;
@@ -1279,8 +1441,7 @@ static int fi_ibv_del_info_not_belong_to_dev(const char *dev_name, struct fi_inf
 	*info = NULL;
 
 	while (check_info) {
-		/* Use strncmp since verbs RDM domain name
-		 * would have "-rdm" suffix */
+		/* Use strncmp since verbs domain names would have "-<ep_type>" suffix */
 		if (dev_name && strncmp(dev_name, check_info->domain_attr->name,
 					strlen(dev_name))) {
 			/* This branch removing `check_info` entry from the list */
@@ -1307,16 +1468,16 @@ static int fi_ibv_del_info_not_belong_to_dev(const char *dev_name, struct fi_inf
 	return FI_SUCCESS;
 }
 
-static int fi_ibv_resolve_ib_ud_dest_addr(const char *node, const char *service,
+static int vrb_resolve_ib_ud_dest_addr(const char *node, const char *service,
 					  struct ofi_ib_ud_ep_name **dest_addr)
 {
 	int svc = VERBS_IB_UD_NS_ANY_SERVICE;
 	struct util_ns ns = {
-		.port = fi_ibv_gl_data.dgram.name_server_port,
+		.port = vrb_gl_data.dgram.name_server_port,
 		.name_len = sizeof(**dest_addr),
 		.service_len = sizeof(svc),
-		.service_cmp = fi_ibv_dgram_ns_service_cmp,
-		.is_service_wildcard = fi_ibv_dgram_ns_is_service_wildcard,
+		.service_cmp = vrb_dgram_ns_service_cmp,
+		.is_service_wildcard = vrb_dgram_ns_is_service_wildcard,
 	};
 
 	ofi_ns_init(&ns);
@@ -1336,7 +1497,32 @@ static int fi_ibv_resolve_ib_ud_dest_addr(const char *node, const char *service,
 	return 0;
 }
 
-static int fi_ibv_handle_ib_ud_addr(const char *node, const char *service,
+static void vrb_delete_dgram_infos(struct fi_info **info)
+{
+	struct fi_info *check_info = *info;
+	struct fi_info *cur, *prev = NULL;
+
+	*info = NULL;
+
+	while (check_info) {
+		if (check_info->ep_attr->type == FI_EP_DGRAM) {
+			cur = check_info;
+			if (prev)
+				prev->next = check_info->next;
+			check_info = check_info->next;
+
+			cur->next = NULL;
+			fi_freeinfo(cur);
+		} else {
+			prev = check_info;
+			if (!*info)
+				*info = check_info;
+			check_info = check_info->next;
+		}
+	}
+}
+
+static int vrb_handle_ib_ud_addr(const char *node, const char *service,
 				    uint64_t flags, struct fi_info **info)
 {
 	struct ofi_ib_ud_ep_name *dest_addr = NULL;
@@ -1365,12 +1551,20 @@ static int fi_ibv_handle_ib_ud_addr(const char *node, const char *service,
 		if (!src_addr) {
 			VERBS_INFO(FI_LOG_CORE,
 			           "failed to allocate src addr.\n");
-			return -FI_ENODATA;
+			ret = -FI_ENODATA;
+			goto err;
 		}
 
 		if (flags & FI_SOURCE) {
-			if (service)
-				sscanf(service, "%" SCNu16, &src_addr->service);
+			if (service) {
+				ret = sscanf(service, "%" SCNu16,
+					     &src_addr->service);
+				if (ret != 1) {
+					ret = -errno;
+					goto err;
+				}
+			}
+
 			VERBS_INFO(FI_LOG_CORE, "node '%s' service '%s' "
 				                "converted to <service=%d>\n",
 				   node, service, src_addr->service);
@@ -1378,18 +1572,19 @@ static int fi_ibv_handle_ib_ud_addr(const char *node, const char *service,
 	}
 
 	if (!dest_addr && node && !(flags & FI_SOURCE)) {
-		ret = fi_ibv_resolve_ib_ud_dest_addr(node, service, &dest_addr);
+		ret = vrb_resolve_ib_ud_dest_addr(node, service, &dest_addr);
 		if (ret)
-			goto fn2; /* Here possible that `src_addr` isn't a NULL */
+			goto err; /* Here possible that `src_addr` isn't a NULL */
 	}
 
-	ret = fi_ibv_set_info_addrs(*info, NULL, fmt, src_addr, dest_addr);
-	if  (ret)
-		goto fn2;
-
+	ret = vrb_set_info_addrs(*info, NULL, fmt, src_addr, dest_addr);
+	if  (!ret)
+		goto out;
+err:
+	vrb_delete_dgram_infos(info);
 	/* `fi_info::src_addr` and `fi_info::dest_addr` is freed
 	 * in the `fi_freeinfo` function in case of failure */
-fn2:
+out:
 	if (src_addr)
 		free(src_addr);
 	if (dest_addr)
@@ -1397,26 +1592,7 @@ fn2:
 	return ret;
 }
 
-static void fi_ibv_remove_nosrc_info(struct fi_info **info)
-{
-	struct fi_info **fi = info, *next;
-	while (*fi && ((*fi)->ep_attr->type == FI_EP_MSG)) {
-		if (!(*fi)->src_addr) {
-			VERBS_INFO(FI_LOG_FABRIC, "Not reporting fi_info "
-				   "corresponding to domain: %s as it has no IP"
-				   "address configured\n",
-				   (*fi)->domain_attr->name);
-			next = (*fi)->next;
-			(*fi)->next = NULL;
-			fi_freeinfo(*fi);
-			*fi = next;
-		} else {
-			fi = &(*fi)->next;
-		}
-	}
-}
-
-static int fi_ibv_handle_sock_addr(const char *node, const char *service,
+static int vrb_handle_sock_addr(const char *node, const char *service,
 				   uint64_t flags, const struct fi_info *hints,
 				   struct fi_info **info)
 {
@@ -1425,59 +1601,60 @@ static int fi_ibv_handle_sock_addr(const char *node, const char *service,
 	const char *dev_name = NULL;
 	int ret;
 
-	ret = fi_ibv_create_ep(node, service, flags, hints, &rai, &id);
+	ret = vrb_get_rai_id(node, service, flags, hints, &rai, &id);
 	if (ret)
 		return ret;
 	if (id->verbs) {
 		dev_name = ibv_get_device_name(id->verbs->device);
-		ret = fi_ibv_del_info_not_belong_to_dev(dev_name, info);
+		ret = vrb_del_info_not_belong_to_dev(dev_name, info);
 		if (ret)
-			goto fn;
+			goto out;
 	}
 
-	ret = fi_ibv_fill_addr(rai, info, id);
-	fi_ibv_remove_nosrc_info(info);
-fn:
-	fi_ibv_destroy_ep(rai, &id);
+	ret = vrb_fill_addr(rai, info, id);
+out:
+	rdma_freeaddrinfo(rai);
+	if (rdma_destroy_id(id))
+		VERBS_INFO_ERRNO(FI_LOG_FABRIC, "rdma_destroy_id", errno);
 	return ret;
 }
 
-
-static int fi_ibv_get_match_infos(uint32_t version, const char *node,
+static int vrb_get_match_infos(uint32_t version, const char *node,
 				  const char *service, uint64_t flags,
 				  const struct fi_info *hints,
 				  const struct fi_info **raw_info,
 				  struct fi_info **info)
 {
-	int ret, ret_sock_addr, ret_ib_ud_addr;
+	int ret, ret_sock_addr = -FI_ENODATA, ret_ib_ud_addr = -FI_ENODATA;
 
 	// TODO check for AF_IB addr
-	ret = fi_ibv_get_matching_info(version, hints, info, *raw_info,
+	ret = vrb_get_matching_info(version, hints, info, *raw_info,
 				       ofi_is_wildcard_listen_addr(node, service,
 								   flags, hints));
 	if (ret)
 		return ret;
 
-	if (hints && (hints->addr_format == FI_ADDR_IB_UD)) {
-		/* This is case when only IB UD addresses are passed */
-		ret = fi_ibv_handle_ib_ud_addr(node, service, flags, info);
-		if (ret)
-			fi_freeinfo(*info);
-		return ret;
+	if (!hints || !hints->ep_attr || hints->ep_attr->type == FI_EP_MSG ||
+	    hints->ep_attr->type == FI_EP_UNSPEC) {
+		ret_sock_addr = vrb_handle_sock_addr(node, service, flags, hints, info);
+		if (ret_sock_addr) {
+			VERBS_INFO(FI_LOG_FABRIC,
+				   "handling of the socket address fails - %d\n",
+				   ret_sock_addr);
+		} else {
+			if (!*info)
+				return -FI_ENODATA;
+		}
 	}
 
-	ret_sock_addr = fi_ibv_handle_sock_addr(node, service, flags, hints, info);
-	if (ret_sock_addr)
-		VERBS_INFO(FI_LOG_CORE, "Handling of the socket address fails - %d\n",
-			   ret_sock_addr);
-
-	if (!*info)
-		return -FI_ENODATA;
-
-	ret_ib_ud_addr = fi_ibv_handle_ib_ud_addr(node, service, flags, info);
-	if (ret_ib_ud_addr)
-		VERBS_INFO(FI_LOG_CORE, "Handling of the IB ID address fails - %d\n",
-			   ret_ib_ud_addr);
+	if (!hints || !hints->ep_attr || hints->ep_attr->type == FI_EP_DGRAM ||
+	    hints->ep_attr->type == FI_EP_UNSPEC) {
+		ret_ib_ud_addr = vrb_handle_ib_ud_addr(node, service, flags, info);
+		if (ret_ib_ud_addr)
+			VERBS_INFO(FI_LOG_FABRIC,
+				   "handling of the IB ID address fails - %d\n",
+				   ret_ib_ud_addr);
+	}
 
 	if (ret_sock_addr && ret_ib_ud_addr) {
 		/* neither the sockaddr nor the ib_ud address wasn't
@@ -1491,36 +1668,50 @@ static int fi_ibv_get_match_infos(uint32_t version, const char *node,
 	return FI_SUCCESS;
 }
 
-int fi_ibv_getinfo(uint32_t version, const char *node, const char *service,
+void vrb_alter_info(const struct fi_info *hints, struct fi_info *info)
+{
+	struct fi_info *cur;
+
+	if (!ofi_check_rx_mode(hints, FI_RX_CQ_DATA)) {
+		for (cur = info; cur; cur = cur->next)
+			cur->domain_attr->cq_data_size = 0;
+	} else {
+		for (cur = info; cur; cur = cur->next) {
+			/* App may just set rx_attr.mode */
+			if (!hints || (hints->mode & FI_RX_CQ_DATA))
+				cur->mode |= FI_RX_CQ_DATA;
+			assert(cur->rx_attr->mode & FI_RX_CQ_DATA);
+		}
+	}
+
+	if (!hints || !hints->tx_attr || !hints->tx_attr->inject_size) {
+		for (cur = info; cur; cur = cur->next) {
+			if (cur->ep_attr->type != FI_EP_MSG)
+				continue;
+			/* The default inline size is usually smaller.
+			 * This is to avoid drop in throughput */
+			cur->tx_attr->inject_size =
+				MIN(cur->tx_attr->inject_size,
+				    vrb_gl_data.def_inline_size);
+		}
+	}
+}
+
+int vrb_getinfo(uint32_t version, const char *node, const char *service,
 		   uint64_t flags, const struct fi_info *hints,
 		   struct fi_info **info)
 {
 	int ret;
-	const struct fi_info *cur;
 
-	ret = fi_ibv_get_match_infos(version, node, service,
+	ret = vrb_get_match_infos(version, node, service,
 				     flags, hints,
-				     &fi_ibv_util_prov.info, info);
+				     &vrb_util_prov.info, info);
 	if (ret)
 		goto out;
 
 	ofi_alter_info(*info, hints, version);
 
-	if (!ofi_check_rx_mode(hints, FI_RX_CQ_DATA)) {
-		for (cur = *info; cur; cur = cur->next)
-			cur->domain_attr->cq_data_size = 0;
-	}
-
-	if (!hints || !hints->tx_attr || !hints->tx_attr->inject_size) {
-		for (cur = *info; cur; cur = cur->next) {
-			if (cur->ep_attr->type != FI_EP_MSG)
-				continue;
-			/* The default inline size is usually smaller.
-			 * This is to avoid drop in throughput */
-			cur->tx_attr->inject_size = MIN(cur->tx_attr->inject_size,
-							fi_ibv_gl_data.def_inline_size);
-		}
-	}
+	vrb_alter_info(hints, *info);
 out:
 	if (!ret || ret == -FI_ENOMEM || ret == -FI_ENODEV)
 		return ret;

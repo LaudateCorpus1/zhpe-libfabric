@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014-2017, Cisco Systems, Inc. All rights reserved.
+ * Copyright (c) 2014-2019, Cisco Systems, Inc. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -43,7 +43,7 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <netinet/in.h>
-#include <sys/epoll.h>
+#include <ofi_epoll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -65,7 +65,6 @@
 #include "usdf.h"
 #include "usdf_endpoint.h"
 #include "usdf_cm.h"
-#include "usdf_msg.h"
 
 static int
 usdf_pep_bind(fid_t fid, fid_t bfid, uint64_t flags)
@@ -143,8 +142,8 @@ usdf_pep_creq_epoll_del(struct usdf_connreq *crp)
 	pep = crp->cr_pep;
 
 	if (crp->cr_pollitem.pi_rtn != NULL) {
-		ret = epoll_ctl(pep->pep_fabric->fab_epollfd, EPOLL_CTL_DEL,
-				crp->cr_sockfd, NULL);
+		ret = ofi_epoll_del(pep->pep_fabric->fab_epollfd,
+				    crp->cr_sockfd);
 		crp->cr_pollitem.pi_rtn = NULL;
 		if (ret != 0) {
 			ret = -errno;
@@ -231,7 +230,6 @@ usdf_pep_listen_cb(void *v)
 	struct usdf_pep *pep;
 	struct sockaddr_in sin;
 	struct usdf_connreq *crp;
-	struct epoll_event ev;
 	socklen_t socklen;
 	int ret;
 	int s;
@@ -267,13 +265,11 @@ usdf_pep_listen_cb(void *v)
 
 	crp->cr_pollitem.pi_rtn = usdf_pep_read_connreq;
 	crp->cr_pollitem.pi_context = crp;
-	ev.events = EPOLLIN;
-	ev.data.ptr = &crp->cr_pollitem;
 
-	ret = epoll_ctl(pep->pep_fabric->fab_epollfd, EPOLL_CTL_ADD,
-			crp->cr_sockfd, &ev);
-	if (ret == -1) {
-		usdf_cm_report_failure(crp, -errno, false);
+	ret = ofi_epoll_add(pep->pep_fabric->fab_epollfd, crp->cr_sockfd,
+			    OFI_EPOLL_IN, &crp->cr_pollitem);
+	if (ret) {
+		usdf_cm_report_failure(crp, ret, false);
 		return 0;
 	}
 
@@ -286,7 +282,6 @@ static int
 usdf_pep_listen(struct fid_pep *fpep)
 {
 	struct usdf_pep *pep;
-	struct epoll_event ev;
 	struct usdf_fabric *fp;
 	struct sockaddr_in *sin;
 	socklen_t socklen;
@@ -360,10 +355,10 @@ usdf_pep_listen(struct fid_pep *fpep)
 
 	pep->pep_pollitem.pi_rtn = usdf_pep_listen_cb;
 	pep->pep_pollitem.pi_context = pep;
-	ev.events = EPOLLIN;
-	ev.data.ptr = &pep->pep_pollitem;
-	ret = epoll_ctl(fp->fab_epollfd, EPOLL_CTL_ADD, pep->pep_sock, &ev);
-	if (ret == -1) {
+	ret = ofi_epoll_add(fp->fab_epollfd, pep->pep_sock, OFI_EPOLL_IN,
+			    &pep->pep_pollitem);
+	if (ret) {
+		errno = -ret;
 		goto fail;
 	}
 
@@ -401,9 +396,6 @@ static int usdf_pep_reject_async(void *vreq)
 	crp->cr_resid -= ret;
 	crp->cr_ptr += ret;
 
-	if (crp->cr_resid == 0)
-		usdf_cm_msg_connreq_cleanup(crp);
-
 	return FI_SUCCESS;
 }
 
@@ -412,7 +404,6 @@ static int usdf_pep_reject(struct fid_pep *fpep, fid_t handle, const void *param
 {
 	struct usdf_pep *pep;
 	struct usdf_connreq *crp;
-	struct epoll_event event;
 	struct usdf_connreq_msg *reqp;
 	int ret;
 
@@ -456,16 +447,9 @@ static int usdf_pep_reject(struct fid_pep *fpep, fid_t handle, const void *param
 	crp->cr_pollitem.pi_rtn = usdf_pep_reject_async;
 	crp->cr_pollitem.pi_context = crp;
 
-	event.events = EPOLLOUT;
-	event.data.ptr = &crp->cr_pollitem;
-
-	ret = epoll_ctl(pep->pep_fabric->fab_epollfd, EPOLL_CTL_ADD,
-			crp->cr_sockfd, &event);
-
-	if (ret)
-		return -errno;
-
-	return FI_SUCCESS;
+	ret = ofi_epoll_add(pep->pep_fabric->fab_epollfd, crp->cr_sockfd,
+			    OFI_EPOLL_OUT, &crp->cr_pollitem);
+	return ret;
 }
 
 static void
@@ -701,10 +685,6 @@ usdf_pep_open(struct fid_fabric *fabric, struct fi_info *info,
 
 	if (info->ep_attr->type != FI_EP_MSG) {
 		return -FI_ENODEV;
-	}
-
-	if ((info->caps & ~USDF_MSG_CAPS) != 0) {
-		return -FI_EBADF;
 	}
 
 	switch (info->addr_format) {

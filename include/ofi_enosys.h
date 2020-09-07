@@ -43,6 +43,7 @@
 #include <rdma/fi_eq.h>
 #include <rdma/fi_rma.h>
 #include <rdma/fi_tagged.h>
+#include <rdma/fi_collective.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -190,6 +191,7 @@ static struct fi_ops_domain X = {
 	.stx_ctx = fi_no_stx_context,
 	.srx_ctx = fi_no_srx_context,
 	.query_atomic = fi_no_query_atomic,
+	.query_collective = fi_no_query_collective,
 };
 */
 int fi_no_av_open(struct fid_domain *domain, struct fi_av_attr *attr,
@@ -210,7 +212,8 @@ int fi_no_srx_context(struct fid_domain *domain, struct fi_rx_attr *attr,
 		struct fid_ep **rx_ep, void *context);
 int fi_no_query_atomic(struct fid_domain *domain, enum fi_datatype datatype,
 		enum fi_op op, struct fi_atomic_attr *attr, uint64_t flags);
-
+int fi_no_query_collective(struct fid_domain *domain, enum fi_collective_op coll,
+			   struct fi_collective_attr *attr, uint64_t flags);
 
 /*
 static struct fi_ops_mr X = {
@@ -453,6 +456,55 @@ int fi_no_av_insertsym(struct fid_av *av, const char *node, size_t nodecnt,
 			uint64_t flags, void *context);
 int fi_no_av_remove(struct fid_av *av, fi_addr_t *fi_addr, size_t count,
 			uint64_t flags);
+
+/*
+static struct fi_ops_collective X = {
+	.size = sizeof(struct fi_ops_collective),
+	.barrier = fi_coll_no_barrier,
+	.broadcast = fi_coll_no_broadcast,
+	.alltoall = fi_coll_no_alltoall,
+	.allreduce = fi_coll_no_allreduce,
+	.allgather = fi_coll_no_allgather,
+	.reduce_scatter = fi_coll_no_reduce_scatter,
+	.reduce = fi_coll_no_reduce,
+	.scatter = fi_coll_no_scatter,
+	.gather = fi_coll_no_gather,
+	.msg = fi_coll_no_msg,
+};
+*/
+ssize_t fi_coll_no_barrier(struct fid_ep *ep, fi_addr_t coll_addr, void *context);
+ssize_t fi_coll_no_broadcast(struct fid_ep *ep, void *buf, size_t count, void *desc,
+			     fi_addr_t coll_addr, fi_addr_t root_addr,
+			     enum fi_datatype datatype, uint64_t flags, void *context);
+ssize_t fi_coll_no_alltoall(struct fid_ep *ep, const void *buf, size_t count, void *desc,
+			    void *result, void *result_desc, fi_addr_t coll_addr,
+			    enum fi_datatype datatype, uint64_t flags, void *context);
+ssize_t fi_coll_no_allreduce(struct fid_ep *ep, const void *buf, size_t count, void *desc,
+			     void *result, void *result_desc, fi_addr_t coll_addr,
+			     enum fi_datatype datatype, enum fi_op op, uint64_t flags,
+			     void *context);
+ssize_t fi_coll_no_allgather(struct fid_ep *ep, const void *buf, size_t count, void *desc,
+			     void *result, void *result_desc, fi_addr_t coll_addr,
+			     enum fi_datatype datatype, uint64_t flags, void *context);
+ssize_t fi_coll_no_reduce_scatter(struct fid_ep *ep, const void *buf, size_t count,
+				  void *desc, void *result, void *result_desc,
+				  fi_addr_t coll_addr, enum fi_datatype datatype,
+				  enum fi_op op, uint64_t flags, void *context);
+ssize_t fi_coll_no_reduce(struct fid_ep *ep, const void *buf, size_t count, void *desc,
+			  void *result, void *result_desc, fi_addr_t coll_addr,
+			  fi_addr_t root_addr, enum fi_datatype datatype, enum fi_op op,
+			  uint64_t flags, void *context);
+ssize_t fi_coll_no_scatter(struct fid_ep *ep, const void *buf, size_t count, void *desc,
+			   void *result, void *result_desc, fi_addr_t coll_addr,
+			   fi_addr_t root_addr, enum fi_datatype datatype, uint64_t flags,
+			   void *context);
+ssize_t fi_coll_no_gather(struct fid_ep *ep, const void *buf, size_t count, void *desc,
+			  void *result, void *result_desc, fi_addr_t coll_addr,
+			  fi_addr_t root_addr, enum fi_datatype datatype, uint64_t flags,
+			  void *context);
+ssize_t fi_coll_no_msg(struct fid_ep *ep, const struct fi_msg_collective *msg,
+		       struct fi_ioc *resultv, void **result_desc, size_t result_count,
+		       uint64_t flags);
 
 #ifdef __cplusplus
 }

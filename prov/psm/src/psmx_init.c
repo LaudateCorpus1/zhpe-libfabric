@@ -53,7 +53,7 @@ struct psmx_env psmx_env = {
 
 static void psmx_init_env(void)
 {
-	if (getenv("OMPI_COMM_WORLD_RANK") || getenv("PMI_RANK"))
+	if (getenv("OMPI_COMM_WORLD_RANK") || getenv("PMI_RANK") || getenv("PMIX_RANK"))
 		psmx_env.name_server = 0;
 
 	fi_param_get_bool(&psmx_prov, "name_server", &psmx_env.name_server);
@@ -639,7 +639,7 @@ static int psmx_getinfo(uint32_t version, const char *node, const char *service,
 	psmx_info->dest_addrlen = sizeof(*dest_addr);
 	psmx_info->fabric_attr->name = strdup(PSMX_FABRIC_NAME);
 	psmx_info->fabric_attr->prov_name = NULL;
-	psmx_info->fabric_attr->prov_version = PSMX_VERSION;
+	psmx_info->fabric_attr->prov_version = OFI_VERSION_DEF_PROV;
 
 	psmx_info->tx_attr->caps = psmx_info->caps;
 	psmx_info->tx_attr->mode = psmx_info->mode;
@@ -696,8 +696,8 @@ static void psmx_fini(void)
 
 struct fi_provider psmx_prov = {
 	.name = PSMX_PROV_NAME,
-	.version = PSMX_VERSION,
-	.fi_version = PSMX_VERSION,
+	.version = OFI_VERSION_DEF_PROV,
+	.fi_version = OFI_VERSION_LATEST,
 	.getinfo = psmx_getinfo,
 	.fabric = psmx_fabric,
 	.cleanup = psmx_fini

@@ -35,7 +35,6 @@
 #include <ofi_util.h>
 #include <ofi_mr.h>
 #include <assert.h>
-#include <rbtree.h>
 
 
 static struct fi_mr_attr *
@@ -60,6 +59,7 @@ int ofi_mr_map_insert(struct ofi_mr_map *map, const struct fi_mr_attr *attr,
 		      uint64_t *key, void *context)
 {
 	struct fi_mr_attr *item;
+	int ret;
 
 	item = dup_mr_attr(attr);
 	if (!item)
@@ -68,32 +68,34 @@ int ofi_mr_map_insert(struct ofi_mr_map *map, const struct fi_mr_attr *attr,
 	if (!(map->mode & FI_MR_VIRT_ADDR))
 		item->offset = (uintptr_t) attr->mr_iov[0].iov_base;
 
-	if (!(map->mode & FI_MR_PROV_KEY)) {
-		if (rbtFind(map->rbtree, &item->requested_key)) {
-			free(item);
-			return -FI_ENOKEY;
-		}
-	} else {
+	if (map->mode & FI_MR_PROV_KEY)
 		item->requested_key = map->key++;
-	}
 
-	rbtInsert(map->rbtree, &item->requested_key, item);
+	ret = ofi_rbmap_insert(map->rbtree, &item->requested_key, item, NULL);
+	if (ret) {
+		if (ret == -FI_EALREADY)
+			ret = -FI_ENOKEY;
+		goto err;
+	}
 	*key = item->requested_key;
 	item->context = context;
 
 	return 0;
+err:
+	free(item);
+	return ret;
 }
 
 void *ofi_mr_map_get(struct ofi_mr_map *map, uint64_t key)
 {
 	struct fi_mr_attr *attr;
-	void *itr, *key_ptr;
+	struct ofi_rbnode *node;
 
-	itr = rbtFind(map->rbtree, &key);
-	if (!itr)
+	node = ofi_rbmap_find(map->rbtree, &key);
+	if (!node)
 		return NULL;
 
-	rbtKeyValue(map->rbtree, itr, &key_ptr, (void **) &attr);
+	attr = node->data;
 	return attr->context;
 }
 
@@ -102,13 +104,14 @@ int ofi_mr_map_verify(struct ofi_mr_map *map, uintptr_t *io_addr,
 		      void **context)
 {
 	struct fi_mr_attr *attr;
-	void *itr, *key_ptr, *addr;
+	struct ofi_rbnode *node;
+	void *addr;
 
-	itr = rbtFind(map->rbtree, &key);
-	if (!itr)
+	node = ofi_rbmap_find(map->rbtree, &key);
+	if (!node)
 		return -FI_EINVAL;
 
-	rbtKeyValue(map->rbtree, itr, &key_ptr, (void **) &attr);
+	attr = node->data;
 	assert(attr);
 
 	if ((access & attr->access) != access) {
@@ -132,26 +135,29 @@ int ofi_mr_map_verify(struct ofi_mr_map *map, uintptr_t *io_addr,
 
 int ofi_mr_map_remove(struct ofi_mr_map *map, uint64_t key)
 {
+	struct ofi_rbnode *node;
 	struct fi_mr_attr *attr;
-	void *itr, *key_ptr;
 
-	itr = rbtFind(map->rbtree, &key);
-	if (!itr)
+	node = ofi_rbmap_find(map->rbtree, &key);
+	if (!node)
 		return -FI_ENOKEY;
 
-	rbtKeyValue(map->rbtree, itr, &key_ptr, (void **) &attr);
-	rbtErase(map->rbtree, itr);
+	attr = node->data;
+	ofi_rbmap_delete(map->rbtree, node);
 	free(attr);
 
 	return 0;
 }
 
 /* assumes uint64_t keys */
-static int compare_mr_keys(void *key1, void *key2)
+static int compare_mr_keys(struct ofi_rbmap *rbtree,
+			   void *key, void *data)
 {
-	uint64_t k1 = *((uint64_t *) key1);
-	uint64_t k2 = *((uint64_t *) key2);
-	return (k1 < k2) ? -1 : (k1 > k2);
+	struct fi_mr_attr *attr = data;
+	uint64_t mrkey = *((uint64_t *) key);
+
+	return (mrkey < attr->requested_key) ? -1 :
+	       (mrkey > attr->requested_key);
 }
 
 
@@ -162,7 +168,7 @@ static int compare_mr_keys(void *key1, void *key2)
 int ofi_mr_map_init(const struct fi_provider *prov, int mode,
 		    struct ofi_mr_map *map)
 {
-	map->rbtree = rbtNew(compare_mr_keys);
+	map->rbtree = ofi_rbmap_create(compare_mr_keys);
 	if (!map->rbtree)
 		return -FI_ENOMEM;
 
@@ -184,7 +190,7 @@ int ofi_mr_map_init(const struct fi_provider *prov, int mode,
 
 void ofi_mr_map_close(struct ofi_mr_map *map)
 {
-	rbtDelete(map->rbtree);
+	ofi_rbmap_destroy(map->rbtree);
 }
 
 int ofi_mr_close(struct fid *fid)
@@ -208,8 +214,9 @@ int ofi_mr_close(struct fid *fid)
 static struct fi_ops ofi_mr_fi_ops = {
 	.size = sizeof(struct fi_ops),
 	.close = ofi_mr_close,
+	.bind = fi_no_bind,
 	.control = fi_no_control,
-	.ops_open = fi_no_ops_open,
+	.ops_open = fi_no_ops_open
 };
 
 int ofi_mr_regattr(struct fid *fid, const struct fi_mr_attr *attr,

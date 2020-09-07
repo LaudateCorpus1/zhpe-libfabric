@@ -32,11 +32,12 @@
 
 #include "rxm.h"
 
-#define RXM_EP_CAPS (FI_MSG | FI_RMA | FI_TAGGED | FI_DIRECTED_RECV |	\
-		     FI_READ | FI_WRITE | FI_RECV | FI_SEND |		\
-		     FI_REMOTE_READ | FI_REMOTE_WRITE | FI_SOURCE)
-
+#define RXM_TX_CAPS (OFI_TX_MSG_CAPS | FI_TAGGED | OFI_TX_RMA_CAPS | FI_ATOMICS)
+#define RXM_RX_CAPS (FI_SOURCE | OFI_RX_MSG_CAPS | FI_TAGGED | \
+		     OFI_RX_RMA_CAPS | FI_ATOMICS | FI_DIRECTED_RECV | \
+		     FI_MULTI_RECV)
 #define RXM_DOMAIN_CAPS (FI_LOCAL_COMM | FI_REMOTE_COMM)
+
 
 /* Since we are a layering provider, the attributes for which we rely on the
  * core provider are set to full capability. This ensures that ofix_getinfo
@@ -44,7 +45,8 @@
  * requested by the app. */
 
 struct fi_tx_attr rxm_tx_attr = {
-	.caps = RXM_EP_CAPS,
+	.caps = RXM_TX_CAPS,
+	.op_flags = RXM_PASSTHRU_TX_OP_FLAGS | RXM_TX_OP_FLAGS,
 	.msg_order = ~0x0ULL,
 	.comp_order = FI_ORDER_NONE,
 	.size = 1024,
@@ -53,7 +55,8 @@ struct fi_tx_attr rxm_tx_attr = {
 };
 
 struct fi_rx_attr rxm_rx_attr = {
-	.caps = RXM_EP_CAPS | FI_MULTI_RECV,
+	.caps = RXM_RX_CAPS,
+	.op_flags = RXM_PASSTHRU_RX_OP_FLAGS | RXM_RX_OP_FLAGS,
 	.msg_order = ~0x0ULL,
 	.comp_order = FI_ORDER_NONE,
 	.size = 1024,
@@ -73,6 +76,19 @@ struct fi_ep_attr rxm_ep_attr = {
 	.mem_tag_format = FI_TAG_GENERIC,
 };
 
+struct fi_ep_attr rxm_ep_attr_coll = {
+	.type = FI_EP_RDM,
+	.protocol = FI_PROTO_RXM,
+	.protocol_version = 1,
+	.max_msg_size = SIZE_MAX,
+	.tx_ctx_cnt = 1,
+	.rx_ctx_cnt = 1,
+	.max_order_raw_size = SIZE_MAX,
+	.max_order_war_size = SIZE_MAX,
+	.max_order_waw_size = SIZE_MAX,
+	.mem_tag_format = FI_TAG_GENERIC >> 1,
+};
+
 struct fi_domain_attr rxm_domain_attr = {
 	.caps = RXM_DOMAIN_CAPS,
 	.threading = FI_THREAD_SAFE,
@@ -82,7 +98,8 @@ struct fi_domain_attr rxm_domain_attr = {
 	.av_type = FI_AV_UNSPEC,
 	/* Advertise support for FI_MR_BASIC so that ofi_check_info call
 	 * doesn't fail at RxM level. If an app requires FI_MR_BASIC, it
-	 * would be passed down to core provider. */
+	 * would be passed down to core provider.
+	 */
 	.mr_mode = FI_MR_BASIC | FI_MR_SCALABLE,
 	.cq_data_size = sizeof_field(struct ofi_op_hdr, data),
 	.cq_cnt = (1 << 16),
@@ -95,20 +112,64 @@ struct fi_domain_attr rxm_domain_attr = {
 };
 
 struct fi_fabric_attr rxm_fabric_attr = {
-	.prov_version = FI_VERSION(RXM_MAJOR_VERSION, RXM_MINOR_VERSION),
+	.prov_version = OFI_VERSION_DEF_PROV,
 };
 
-struct fi_info rxm_info = {
-	.caps = RXM_EP_CAPS | RXM_DOMAIN_CAPS | FI_MULTI_RECV,
+struct fi_fabric_attr rxm_verbs_fabric_attr = {
+	.prov_version = OFI_VERSION_DEF_PROV,
+	.prov_name = "verbs",
+};
+
+struct fi_fabric_attr rxm_tcp_fabric_attr = {
+	.prov_version = OFI_VERSION_DEF_PROV,
+	.prov_name = "tcp",
+};
+
+struct fi_info rxm_coll_info = {
+	.caps = RXM_TX_CAPS | RXM_RX_CAPS | RXM_DOMAIN_CAPS | FI_COLLECTIVE,
+	.addr_format = FI_SOCKADDR,
+	.tx_attr = &rxm_tx_attr,
+	.rx_attr = &rxm_rx_attr,
+	.ep_attr = &rxm_ep_attr_coll,
+	.domain_attr = &rxm_domain_attr,
+	.fabric_attr = &rxm_fabric_attr
+};
+
+struct fi_info rxm_base_info = {
+	.caps = RXM_TX_CAPS | RXM_RX_CAPS | RXM_DOMAIN_CAPS,
 	.addr_format = FI_SOCKADDR,
 	.tx_attr = &rxm_tx_attr,
 	.rx_attr = &rxm_rx_attr,
 	.ep_attr = &rxm_ep_attr,
 	.domain_attr = &rxm_domain_attr,
-	.fabric_attr = &rxm_fabric_attr
+	.fabric_attr = &rxm_fabric_attr,
+	.next = &rxm_coll_info,
+};
+
+struct fi_info rxm_tcp_info = {
+	.caps = RXM_TX_CAPS | RXM_RX_CAPS | RXM_DOMAIN_CAPS,
+	.addr_format = FI_SOCKADDR,
+	.tx_attr = &rxm_tx_attr,
+	.rx_attr = &rxm_rx_attr,
+	.ep_attr = &rxm_ep_attr,
+	.domain_attr = &rxm_domain_attr,
+	.fabric_attr = &rxm_tcp_fabric_attr,
+	.next = &rxm_base_info,
+};
+
+struct fi_info rxm_verbs_info = {
+	.caps = RXM_TX_CAPS | RXM_RX_CAPS | RXM_DOMAIN_CAPS,
+	.addr_format = FI_SOCKADDR,
+	.tx_attr = &rxm_tx_attr,
+	.rx_attr = &rxm_rx_attr,
+	.ep_attr = &rxm_ep_attr,
+	.domain_attr = &rxm_domain_attr,
+	.fabric_attr = &rxm_verbs_fabric_attr,
+	.next = &rxm_tcp_info,
 };
 
 struct util_prov rxm_util_prov = {
 	.prov = &rxm_prov,
+	.info = &rxm_verbs_info,
 	.flags = 0,
 };

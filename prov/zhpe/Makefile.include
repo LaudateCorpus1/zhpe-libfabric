@@ -5,26 +5,23 @@ if HAVE_ZHPE
 zhpe_CPPFLAGS += -I$(top_srcdir)/prov/zhpe/include -I$(top_srcdir)/prov/zhpe
 
 _zhpe_files = \
-	prov/zhpe/src/zhpe_av.c \
-	prov/zhpe/src/zhpe_dom.c \
-	prov/zhpe/src/zhpe_eq.c \
-	prov/zhpe/src/zhpe_cq.c \
-	prov/zhpe/src/zhpe_cntr.c \
-	prov/zhpe/src/zhpe_poll.c \
-	prov/zhpe/src/zhpe_wait.c \
-	prov/zhpe/src/zhpe_ep_rdm.c \
-	prov/zhpe/src/zhpe_ep_msg.c \
-	prov/zhpe/src/zhpe_fabric.c \
-	prov/zhpe/src/zhpe_ep.c \
-	prov/zhpe/src/zhpe_ctx.c \
-	prov/zhpe/src/zhpe_progress.c \
-	prov/zhpe/src/zhpe_conn.c \
-	prov/zhpe/src/zhpe_rma.c \
-	prov/zhpe/src/zhpe_msg.c \
 	prov/zhpe/src/zhpe_atomic.c \
-	prov/zhpe/src/zhpe_trigger.c \
-	prov/zhpe/src/zhpe_zq.c \
-	prov/zhpe/src/zhpe_mr_cache.c
+	prov/zhpe/src/zhpe_attr.c \
+	prov/zhpe/src/zhpe_av.c \
+	prov/zhpe/src/zhpe_cntr.c \
+	prov/zhpe/src/zhpe_conn.c \
+	prov/zhpe/src/zhpe_cq.c \
+	prov/zhpe/src/zhpe_dom.c \
+	prov/zhpe/src/zhpe_ep.c \
+	prov/zhpe/src/zhpe_ep_msg.c \
+	prov/zhpe/src/zhpe_eq.c \
+	prov/zhpe/src/zhpe_fabric.c \
+	prov/zhpe/src/zhpe_mr_cache.c \
+	prov/zhpe/src/zhpe_msg.c \
+	prov/zhpe/src/zhpe_progress.c \
+	prov/zhpe/src/zhpe_rma.c \
+	prov/zhpe/src/zhpe_zq.c
+
 
 _zhpe_headers = \
 	prov/zhpe/include/zhpe.h
@@ -43,8 +40,6 @@ src_libfabric_la_CPPFLAGS += $(zhpe_CPPFLAGS) -g
 src_libfabric_la_LDFLAGS += $(zhpe_LDFLAGS)
 src_libfabric_la_LIBADD += $(zhpe_LIBS)
 endif !HAVE_ZHPE_DL
-
-AM_LDFLAGS += $(zhpe_LDFLAGS) $(zhpe_LIBS)
 
 rdmainclude_HEADERS += \
 	prov/zhpe/include/fi_ext_zhpe.h

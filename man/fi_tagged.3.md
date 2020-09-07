@@ -75,7 +75,8 @@ ssize_t fi_tinjectdata(struct fid_ep *ep, const void *buf, size_t len,
 : Mask of bits to ignore applied to the tag for receive operations.
 
 *desc*
-: Memory descriptor associated with the data buffer
+: Memory descriptor associated with the data buffer.
+  See [`fi_mr`(3)](fi_mr.3.html).
 
 *data*
 : Remote CQ data to transfer with the sent data.
@@ -97,7 +98,9 @@ ssize_t fi_tinjectdata(struct fid_ep *ep, const void *buf, size_t len,
 : Additional flags to apply for the send or receive operation.
 
 *context*
-: User specified pointer to associate with the operation.
+: User specified pointer to associate with the operation.  This parameter is
+  ignored if the operation will not generate a successful completion, unless
+  an op flag specifies the context parameter be used for required input.
 
 # DESCRIPTION
 
@@ -181,15 +184,8 @@ struct fi_msg_tagged {
 
 ## fi_tinject
 
-The tagged inject call is an optimized version of fi_tsend.  The
-fi_tinject function behaves as if the FI_INJECT transfer flag were
-set, and FI_COMPLETION were not.  That is, the data buffer is
-available for reuse immediately on returning from from fi_tinject, and
-no completion event will be generated for this send.  The completion
-event will be suppressed even if the endpoint has not been configured
-with FI_SELECTIVE_COMPLETION.  See the flags discussion below for more
-details. The requested message size that can be used with fi_tinject is
-limited by inject_size.
+The tagged inject call is an optimized version of fi_tsend.  It provides
+similar completion semantics as fi_inject [`fi_msg`(3)](fi_msg.3.html).
 
 ## fi_tsenddata
 
@@ -268,6 +264,11 @@ and/or fi_tsendmsg.
   generated until the operation has been successfully transmitted and
   is no longer being tracked by the provider.
 
+*FI_MATCH_COMPLETE*
+: Applies to fi_tsendmsg.  Indicates that a completion should be generated
+  only after the message has either been matched with a tagged
+  buffer or was discarded by the target application.
+
 *FI_FENCE*
 : Applies to transmits.  Indicates that the requested operation, also
   known as the fenced operation, and any operation posted after the
@@ -323,20 +324,72 @@ The following flags may be used with fi_trecvmsg.
   set is used to retrieve a previously claimed message.
 
   In order to use the FI_CLAIM flag, an application must supply a struct
-  fi_context structure as the context for the receive operation.  The same
+  fi_context structure as the context for the receive operation, or a
+  struct fi_recv_context in the case of buffered receives.  The same
   fi_context structure used for an FI_PEEK + FI_CLAIM operation must be used
   by the paired FI_CLAIM request.
 
+  This flag also applies to endpoints configured for FI_BUFFERED_RECV or
+  FI_VARIABLE_MSG.  When set, it is used to retrieve a tagged message that
+  was buffered by the provider.  See Buffered Tagged Receives section for
+  details.
+
 *FI_DISCARD*
-: This flag must be used in conjunction with either FI_PEEK or FI_CLAIM.
+: This flag may be used in conjunction with either FI_PEEK or FI_CLAIM.
   If this flag is used in conjunction with FI_PEEK, it indicates if the
   peek request completes successfully -- indicating that a matching message
   was located -- the message is discarded by the provider, as the data is not
   needed by the application.  This flag may also be used in conjunction with
-  FI_CLAIM in order to retrieve and discard a message previously claimed
+  FI_CLAIM in order to discard a message previously claimed
   using an FI_PEEK + FI_CLAIM request.
 
+  This flag also applies to endpoints configured for FI_BUFFERED_RECV or
+  FI_VARIABLE_MSG.  When set, it indicates that the provider should free
+  a buffered messages.  See Buffered Tagged Receives section for details.
+
   If this flag is set, the input buffer(s) and length parameters are ignored.
+
+# Buffered Tagged Receives
+
+See [`fi_msg`(3)](fi_msg.3.html) for an introduction to buffered receives.
+The handling of buffered receives differs between fi_msg operations and
+fi_tagged.  Although the provider is responsible for allocating and
+managing network buffers, the application is responsible for identifying
+the tags that will be used to match incoming messages.  The provider
+handles matching incoming receives to the application specified tags.
+
+When FI_BUFFERED_RECV is enabled, the application posts the tags that
+will be used for matching purposes.  Tags are posted using fi_trecv,
+fi_trecvv, and fi_trecvmsg; however, parameters related
+to the input buffers are ignored (e.g. buf, len, iov, desc).  When
+a provider receives a message for which there is a matching tag,
+it will write an entry to the completion queue associated with the
+receiving endpoint.
+
+For discussion purposes, the completion queue is assumed to be configured
+for FI_CQ_FORMAT_TAGGED.  The op_context field will point to a struct
+fi_recv_context.
+
+{% highlight c %}
+struct fi_recv_context {
+	struct fid_ep *ep;
+	void *context;
+};
+{% endhighlight %}
+
+The 'ep' field will be NULL.  The 'context' field will match the
+application context specified when posting the tag.  Other fields are
+set as defined in [`fi_msg`(3)](fi_msg.3.html).
+
+After being notified that a buffered receive has arrived,
+applications must either claim or discard the message as described in
+[`fi_msg`(3)](fi_msg.3.html).
+
+# Variable Length Tagged Messages
+
+Variable length messages are defined in [`fi_msg`(3)](fi_msg.3.html).
+The requirements for handling variable length tagged messages is identical
+to those defined above for buffered tagged receives.
 
 # RETURN VALUE
 

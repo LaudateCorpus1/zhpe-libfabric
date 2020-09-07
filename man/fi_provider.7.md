@@ -58,12 +58,41 @@ This distribution of libfabric contains the following providers
 *Blue Gene/Q*
 : See [`fi_bgq`(7)](fi_bgq.7.html) for more information.
 
+*EFA*
+: A provider for the [Amazon EC2 Elastic Fabric Adapter
+  (EFA)](https://aws.amazon.com/hpc/efa/), a custom-built OS bypass
+  hardware interface for inter-instance communication on EC2.
+  See [`fi_efa`(7)](fi_efa.7.html) for more information.
+
+*SHM*
+: A provider for intranode communication using shared memory.
+  The provider makes use of the Linux kernel feature Cross Memory
+  Attach (CMA) which allows processes to have full access to another
+  process' address space.
+  See [`fi_shm`(7)](fi_shm.7.html) for more information. 
+
 ## Utility providers
 
 *RxM*
 : The RxM provider (ofi_rxm) is an utility provider that supports RDM
   endpoints emulated over MSG endpoints of a core provider.
   See [`fi_rxm`(7)](fi_rxm.7.html) for more information.
+
+*RxD*
+: The RxD provider (ofi_rxd) is a utility provider that supports RDM
+  endpoints emulated over DGRAM endpoints of a core provider.
+  See [`fi_rxd`(7)](fi_rxd.7.html) for more information.
+
+## Special providers
+
+*Hook*
+: The hook provider is a special type of provider that can layer over any
+  other provider, unless FI_FABRIC_DIRECT is used.  The hook provider is
+  always available, but has no impact unless enabled.  When enabled, the
+  hook provider will intercept all calls to the underlying core or utility
+  provider(s).  The hook provider is useful for capturing performance data
+  or providing debugging information, even in release builds of the library.
+  See [`fi_hook`(7)](fi_hook.7.html) for more information.
 
 # CORE VERSUS UTILITY PROVIDERS
 
@@ -194,6 +223,7 @@ Logging is performed using the FI_ERR, FI_LOG, and FI_DEBUG macros.
 # SEE ALSO
 
 [`fi_gni`(7)](fi_gni.7.html),
+[`fi_hook`(7)](fi_hook.7.html),
 [`fi_psm`(7)](fi_psm.7.html),
 [`fi_sockets`(7)](fi_sockets.7.html),
 [`fi_usnic`(7)](fi_usnic.7.html),

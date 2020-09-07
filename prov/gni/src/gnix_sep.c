@@ -1597,9 +1597,9 @@ static struct fi_ops gnix_sep_fi_ops = {
 
 static struct fi_ops_ep gnix_sep_ops = {
 	.size = sizeof(struct fi_ops_ep),
-	.cancel = fi_no_cancel,
-	.getopt = fi_no_getopt,
-	.setopt = fi_no_setopt,
+	.cancel = gnix_cancel,
+	.getopt = gnix_getopt,
+	.setopt = gnix_setopt,
 	.tx_ctx = gnix_sep_tx_ctx,
 	.rx_ctx = gnix_sep_rx_ctx,
 	.rx_size_left = fi_no_rx_size_left,

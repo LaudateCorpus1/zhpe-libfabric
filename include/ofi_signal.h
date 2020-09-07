@@ -39,11 +39,13 @@
 #include <unistd.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <stdbool.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 
 #include <ofi_file.h>
 #include <ofi_osd.h>
+#include <ofi_atom.h>
 #include <rdma/fi_errno.h>
 
 
@@ -52,10 +54,20 @@ enum {
 	FI_WRITE_FD
 };
 
+enum ofi_signal_state {
+	OFI_SIGNAL_UNSET,
+	OFI_SIGNAL_WRITE_PREPARE,
+	OFI_SIGNAL_SET,
+	OFI_SIGNAL_READ_PREPARE,
+};
+
 struct fd_signal {
-	int		rcnt;
-	int		wcnt;
+	ofi_atomic32_t	state;
 	int		fd[2];
+
+#if ENABLE_DEBUG
+	ofi_atomic32_t debug_cnt;
+#endif
 };
 
 static inline int fd_signal_init(struct fd_signal *signal)
@@ -70,6 +82,11 @@ static inline int fd_signal_init(struct fd_signal *signal)
 	if (ret)
 		goto err;
 
+	ofi_atomic_initialize32(&signal->state, OFI_SIGNAL_UNSET);
+
+#if ENABLE_DEBUG
+	ofi_atomic_initialize32(&signal->debug_cnt, 0);
+#endif
 	return 0;
 
 err:
@@ -87,19 +104,73 @@ static inline void fd_signal_free(struct fd_signal *signal)
 static inline void fd_signal_set(struct fd_signal *signal)
 {
 	char c = 0;
-	if (signal->wcnt == signal->rcnt) {
-		if (ofi_write_socket(signal->fd[FI_WRITE_FD], &c, sizeof c) == sizeof c)
-			signal->wcnt++;
+	bool cas; /* cas result */
+	int write_rc;
+
+	cas = ofi_atomic_cas_bool_strong32(&signal->state,
+					   OFI_SIGNAL_UNSET,
+					   OFI_SIGNAL_WRITE_PREPARE);
+	if (cas) {
+		write_rc = ofi_write_socket(signal->fd[FI_WRITE_FD], &c,
+					    sizeof c);
+		if (write_rc == sizeof c) {
+#if ENABLE_DEBUG
+			assert(ofi_atomic_inc32(&signal->debug_cnt) == 1);
+#endif
+			ofi_atomic_set32(&signal->state, OFI_SIGNAL_SET);
+		} else {
+			/* XXX: Setting the signal failed, a polling thread
+			 * will not be woken up now and the system might
+			 * get stuck.
+			 * Also, typically this will be totally
+			 * untested code path, as it basically will never
+			 * come up.
+			 */
+			ofi_atomic_set32(&signal->state, OFI_SIGNAL_UNSET);
+		}
 	}
 }
 
 static inline void fd_signal_reset(struct fd_signal *signal)
 {
 	char c;
-	if (signal->rcnt != signal->wcnt) {
-		if (ofi_read_socket(signal->fd[FI_READ_FD], &c, sizeof c) == sizeof c)
-			signal->rcnt++;
-	}
+	bool cas; /* cas result */
+	enum ofi_signal_state state;
+	int read_rc;
+
+	do {
+		cas = ofi_atomic_cas_bool_weak32(&signal->state,
+						 OFI_SIGNAL_SET,
+						 OFI_SIGNAL_READ_PREPARE);
+		if (cas) {
+			read_rc = ofi_read_socket(signal->fd[FI_READ_FD], &c,
+						  sizeof c);
+			if (read_rc == sizeof c) {
+#if ENABLE_DEBUG
+				assert(ofi_atomic_dec32(&signal->debug_cnt) == 0);
+#endif
+				ofi_atomic_set32(&signal->state,
+						 OFI_SIGNAL_UNSET);
+				break;
+			} else {
+				ofi_atomic_set32(&signal->state, OFI_SIGNAL_SET);
+
+				/* Avoid spinning forever in this highly
+				 * unlikely code path.
+				 */
+				break;
+			}
+		}
+
+		state = ofi_atomic_get32(&signal->state);
+
+		/* note that this loop also needs to include
+		 * OFI_SIGNAL_WRITE_PREPARE, as the writing thread sets
+		 * the signal to the socket in _WRITE_PREPARE state. The reading
+		 * thread might then race with the writing thread and then
+		 * end up here before the state was switched to OFI_SIGNAL_SET.
+		 */
+	} while (state == OFI_SIGNAL_WRITE_PREPARE || state == OFI_SIGNAL_SET);
 }
 
 static inline int fd_signal_poll(struct fd_signal *signal, int timeout)
@@ -113,74 +184,9 @@ static inline int fd_signal_poll(struct fd_signal *signal, int timeout)
 	return (ret == 0) ? -FI_ETIMEDOUT : 0;
 }
 
-#ifdef HAVE_EPOLL
-#include <sys/epoll.h>
-
-typedef int fi_epoll_t;
-
-static inline int fi_epoll_create(int *ep)
+static inline int fd_signal_get(struct fd_signal *signal)
 {
-	*ep = epoll_create(4);
-	return *ep < 0 ? -ofi_syserr() : 0;
+	return signal->fd[FI_READ_FD];
 }
-
-static inline int fi_epoll_add(int ep, int fd, void *context)
-{
-	struct epoll_event event;
-	int ret;
-
-	event.data.ptr = context;
-	event.events = EPOLLIN;
-	ret = epoll_ctl(ep, EPOLL_CTL_ADD, fd, &event);
-	if ((ret == -1) && (ofi_syserr() != EEXIST))
-		return -ofi_syserr();
-	return 0;
-}
-
-static inline int fi_epoll_del(int ep, int fd)
-{
-	return epoll_ctl(ep, EPOLL_CTL_DEL, fd, NULL) ? -ofi_syserr() : 0;
-}
-
-static inline int fi_epoll_wait(int ep, void **contexts, int max_contexts,
-                                int timeout)
-{
-	struct epoll_event events[max_contexts];
-	int ret;
-	int i;
-
-	ret = epoll_wait(ep, events, max_contexts, timeout);
-	if (ret == -1)
-		return -ofi_syserr();
-
-	for (i = 0; i < ret; i++)
-		contexts[i] = events[i].data.ptr;
-	return ret;
-}
-
-static inline void fi_epoll_close(int ep)
-{
-	close(ep);
-}
-
-#else
-#include <poll.h>
-
-typedef struct fi_epoll {
-	int		size;
-	int		nfds;
-	struct pollfd	*fds;
-	void		**context;
-	int		index;
-} *fi_epoll_t;
-
-int fi_epoll_create(struct fi_epoll **ep);
-int fi_epoll_add(struct fi_epoll *ep, int fd, void *context);
-int fi_epoll_del(struct fi_epoll *ep, int fd);
-int fi_epoll_wait(struct fi_epoll *ep, void **contexts, int max_contexts,
-                  int timeout);
-void fi_epoll_close(struct fi_epoll *ep);
-
-#endif /* HAVE_EPOLL */
 
 #endif /* _OFI_SIGNAL_H_ */

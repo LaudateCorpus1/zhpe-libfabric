@@ -316,14 +316,15 @@ parsed and converted to FI_ADDR_GNI for use within the GNI provider.
 *FI_ADDR_STR* is formatted as follows:
 gni;node;service;GNIX_AV_STR_ADDR_VERSION;device_addr;cdm_id;name_type;cm_nic_cdm_id;cookie;rx_ctx_cnt;key_offset
 
-The GNI provider sets the domain attribute *cntr_cnt* to the the CQ limit divided by 2.
+The GNI provider sets the domain attribute *cntr_cnt* to the CQ limit divided by 2.
 
 The GNI provider sets the domain attribute *cq_cnt* to the CQ limit divided by 2.
 
 The GNI provider sets the domain attribute *ep_cnt* to SIZE_MAX.
 
 Completion queue events may report unknown source address information when
-using *FI_SOURCE*. The source address information will be reported in the
+using *FI_SOURCE*. If *FI_SOURCE_ERR* is also specified, the source address
+information will be reported in the
 err_data member of the struct fi_cq_err_entry populated by fi_cq_readerr. The
 err_data member will contain the source address information in the FI_ADDR_GNI
 address format. In order to populate the remote peer's address vector

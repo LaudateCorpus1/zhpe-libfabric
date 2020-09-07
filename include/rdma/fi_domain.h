@@ -33,6 +33,7 @@
 #ifndef FI_DOMAIN_H
 #define FI_DOMAIN_H
 
+#include <string.h>
 #include <rdma/fabric.h>
 #include <rdma/fi_eq.h>
 
@@ -49,6 +50,7 @@ extern "C" {
 
 #define FI_SYMMETRIC		(1ULL << 59)
 #define FI_SYNC_ERR		(1ULL << 58)
+#define FI_UNIVERSE		(1ULL << 57)
 
 
 struct fi_av_attr {
@@ -60,6 +62,18 @@ struct fi_av_attr {
 	void			*map_addr;
 	uint64_t		flags;
 };
+
+struct fi_av_set_attr {
+	size_t			count;
+	fi_addr_t		start_addr;
+	fi_addr_t		end_addr;
+	uint64_t		stride;
+	size_t			comm_key_size;
+	uint8_t			*comm_key;
+	uint64_t		flags;
+};
+
+struct fid_av_set;
 
 struct fi_ops_av {
 	size_t	size;
@@ -77,6 +91,8 @@ struct fi_ops_av {
 			size_t *addrlen);
 	const char * (*straddr)(struct fid_av *av, const void *addr,
 			char *buf, size_t *len);
+	int	(*av_set)(struct fid_av *av, struct fi_av_set_attr *attr,
+			struct fid_av_set **av_set, void *context);
 };
 
 struct fid_av {
@@ -96,6 +112,11 @@ struct fid_mr {
 	uint64_t		key;
 };
 
+enum fi_hmem_iface {
+	FI_HMEM_SYSTEM	= 0,
+	FI_HMEM_CUDA,
+};
+
 struct fi_mr_attr {
 	const struct iovec	*mr_iov;
 	size_t			iov_count;
@@ -105,6 +126,11 @@ struct fi_mr_attr {
 	void			*context;
 	size_t			auth_key_size;
 	uint8_t			*auth_key;
+	enum fi_hmem_iface	iface;
+	union {
+		uint64_t	reserved;
+		int		cuda;
+	} device;
 };
 
 struct fi_mr_modify {
@@ -118,6 +144,8 @@ struct fi_mr_modify {
 #endif /* FABRIC_DIRECT */
 
 #ifndef FABRIC_DIRECT_ATOMIC_DEF
+
+#define FI_COLLECTIVE_OFFSET 256
 
 enum fi_datatype {
 	FI_INT8,
@@ -134,7 +162,11 @@ enum fi_datatype {
 	FI_DOUBLE_COMPLEX,
 	FI_LONG_DOUBLE,
 	FI_LONG_DOUBLE_COMPLEX,
-	FI_DATATYPE_LAST
+	/* End of point to point atomic datatypes */
+	FI_DATATYPE_LAST,
+
+	/* Collective datatypes */
+	FI_VOID = FI_COLLECTIVE_OFFSET,
 };
 
 enum fi_op {
@@ -157,7 +189,27 @@ enum fi_op {
 	FI_CSWAP_GE,
 	FI_CSWAP_GT,
 	FI_MSWAP,
-	FI_ATOMIC_OP_LAST
+	/* End of point to point atomic ops */
+	FI_ATOMIC_OP_LAST,
+
+	/* Collective datatypes */
+	FI_NOOP = FI_COLLECTIVE_OFFSET,
+};
+
+#endif
+
+#ifndef FABRIC_DIRECT_COLLECTIVE_DEF
+
+enum fi_collective_op {
+	FI_BARRIER,
+	FI_BROADCAST,
+	FI_ALLTOALL,
+	FI_ALLREDUCE,
+	FI_ALLGATHER,
+	FI_REDUCE_SCATTER,
+	FI_REDUCE,
+	FI_SCATTER,
+	FI_GATHER,
 };
 
 #endif
@@ -166,6 +218,7 @@ enum fi_op {
 struct fi_atomic_attr;
 struct fi_cq_attr;
 struct fi_cntr_attr;
+struct fi_collective_attr;
 
 struct fi_ops_domain {
 	size_t	size;
@@ -190,6 +243,8 @@ struct fi_ops_domain {
 	int	(*query_atomic)(struct fid_domain *domain,
 			enum fi_datatype datatype, enum fi_op op,
 			struct fi_atomic_attr *attr, uint64_t flags);
+	int (*query_collective)(struct fid_domain *domain, enum fi_collective_op coll,
+				struct fi_collective_attr *attr, uint64_t flags);
 };
 
 /* Memory registration flags */
@@ -267,20 +322,20 @@ fi_poll_open(struct fid_domain *domain, struct fi_poll_attr *attr,
 
 static inline int
 fi_mr_reg(struct fid_domain *domain, const void *buf, size_t len,
-	  uint64_t access, uint64_t offset, uint64_t requested_key,
+	  uint64_t acs, uint64_t offset, uint64_t requested_key,
 	  uint64_t flags, struct fid_mr **mr, void *context)
 {
-	return domain->mr->reg(&domain->fid, buf, len, access, offset,
+	return domain->mr->reg(&domain->fid, buf, len, acs, offset,
 			       requested_key, flags, mr, context);
 }
 
 static inline int
 fi_mr_regv(struct fid_domain *domain, const struct iovec *iov,
-			size_t count, uint64_t access,
+			size_t count, uint64_t acs,
 			uint64_t offset, uint64_t requested_key,
 			uint64_t flags, struct fid_mr **mr, void *context)
 {
-	return domain->mr->regv(&domain->fid, iov, count, access,
+	return domain->mr->regv(&domain->fid, iov, count, acs,
 			offset, requested_key, flags, mr, context);
 }
 
@@ -341,7 +396,8 @@ static inline int
 fi_mr_refresh(struct fid_mr *mr, const struct iovec *iov, size_t count,
 	      uint64_t flags)
 {
-	struct fi_mr_modify modify = {0};
+	struct fi_mr_modify modify;
+	memset(&modify, 0, sizeof(modify));
 	modify.flags = flags;
 	modify.attr.mr_iov = iov;
 	modify.attr.iov_count = count;

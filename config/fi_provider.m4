@@ -9,8 +9,6 @@ AC_DEFUN([FI_PROVIDER_INIT],[
 	PROVIDERS_DL=
 	PROVIDERS_STATIC=
 	PROVIDERS_COUNT=
-
-	m4_include(config/fi_check_package.m4)
 ])
 
 dnl
@@ -92,7 +90,11 @@ dnl
 	)
 
 	# Call the provider's CONFIGURE and CONDITIONALS macros
-	m4_include([prov/]$1[/configure.m4])
+	m4_ifnblank(m4_esyscmd(ls [prov/]$1[/configure.m4] 2> /dev/null),
+		[m4_include([prov/]$1[/configure.m4])])
+	m4_ifnblank(m4_esyscmd(ls [prov/hook/]$1[/configure.m4] 2> /dev/null),
+		[m4_include([prov/hook/]$1[/configure.m4])])
+
 	_FI_PROVIDER_INVOKE($1, [CONFIGURE], [yes], [yes])
 	_FI_PROVIDER_INVOKE($1, [CONDITIONALS], [no], [no])
 

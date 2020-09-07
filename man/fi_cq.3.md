@@ -221,8 +221,8 @@ struct fi_cq_tagged_entry {
   fi_control to retrieve the underlying wait object associated with a
   CQ, in order to use it in other system calls.  The following values
   may be used to specify the type of wait object associated with a
-  CQ: FI_WAIT_NONE, FI_WAIT_UNSPEC, FI_WAIT_SET, FI_WAIT_FD, and
-  FI_WAIT_MUTEX_COND.  The default is FI_WAIT_NONE.
+  CQ: FI_WAIT_NONE, FI_WAIT_UNSPEC, FI_WAIT_SET, FI_WAIT_FD,
+  FI_WAIT_MUTEX_COND, and FI_WAIT_YIELD.  The default is FI_WAIT_NONE.
 
 - *FI_WAIT_NONE*
 : Used to indicate that the user will not block (wait) for completions
@@ -252,9 +252,10 @@ struct fi_cq_tagged_entry {
 : Specifies that the CQ should use a pthread mutex and cond variable
   as a wait object.
 
-- *FI_WAIT_CRITSEC_COND*
-: Windows specific.  Specifies that the CQ should use a critical
-  section and condition variable as a wait object.
+- *FI_WAIT_YIELD*
+: Indicates that the CQ will wait without a wait object but instead
+  yield on every wait. Allows usage of fi_cq_sread and fi_cq_sreadfrom
+  through a spin.
 
 *signaling_vector*
 : If the FI_AFFINITY flag is set, this indicates the logical cpu number
@@ -353,23 +354,26 @@ be the same as the count parameter.
 
 Returned source addressing data is converted from the native address
 used by the underlying fabric into an fi_addr_t, which may be used in
-transmit operations.  Typically, returning fi_addr_t requires that
-the source address be inserted into the address vector associated with the
-receiving endpoint.  For endpoints allocated using the FI_SOURCE_ERR
-capability, if the source address has not been inserted into the
-address vector, fi_cq_readfrom will return -FI_EAVAIL.  The
-completion will then be reported through fi_cq_readerr with error
-code -FI_EADDRNOTAVAIL.  See fi_cq_readerr for details.
+transmit operations.  Under most circumstances, returning fi_addr_t
+requires that the source address already have been inserted into the
+address vector associated with the receiving endpoint.  This is true for
+address vectors of type FI_AV_TABLE.  In select providers when FI_AV_MAP is
+used, source addresses may be converted algorithmically into a
+usable fi_addr_t, even though the source address has not been inserted
+into the address vector.  This is permitted by the API, as it allows
+the provider to avoid address look-up as part of receive message processing.
+In no case do providers insert addresses into an AV separate from an
+application calling fi_av_insert or similar call.
+
+For endpoints allocated using the FI_SOURCE_ERR capability, if the
+source address cannot be converted into a valid fi_addr_t value,
+fi_cq_readfrom will return -FI_EAVAIL, even if the data were received
+successfully.  The completion will then be reported through fi_cq_readerr
+with error code -FI_EADDRNOTAVAIL.  See fi_cq_readerr for details.
 
 If FI_SOURCE is specified without FI_SOURCE_ERR, source addresses
-which cannot be mapped to a local fi_addr_t will be reported as
-FI_ADDR_NOTAVAIL.  The behavior is dependent on the type of address
-vector in use.  For AVs of type FI_AV_MAP, source addresses may be
-mapped directly to an fi_addr_t value, even if the source address
-were not inserted into the AV.  This allows the provider to optimize
-the reporting of the source fi_addr_t without the overhead of
-verifying whether the address is in the AV.  If full address
-validation is necessary, FI_SOURCE_ERR must be used.
+which cannot be mapped to a usable fi_addr_t will be reported as
+FI_ADDR_NOTAVAIL.
 
 ## fi_cq_sread / fi_cq_sreadfrom
 
@@ -378,6 +382,10 @@ operations to fi_cq_read and fi_cq_readfrom.  Their behavior is
 similar to the non-blocking calls, with the exception that the calls
 will not return until either a completion has been read from the CQ or
 an error or timeout occurs.
+
+Threads blocking in this function will return to the caller if
+they are signaled by some external source.  This is true even if
+the timeout has not occurred or was specified as infinite.
 
 It is invalid for applications to call these functions if the CQ
 has been configured with a wait object of FI_WAIT_NONE or FI_WAIT_SET.
@@ -415,11 +423,20 @@ convert provider specific error information into a printable string
 for debugging purposes.  See field details below for more information
 on the use of err_data and err_data_size.
 
+Note that error completions are generated for all operations, including
+those for which a completion was not requested (e.g. an endpoint
+is configured with FI_SELECTIVE_COMPLETION, but the request did not have
+the FI_COMPLETION flag set).  In such cases, providers will return as
+much information as made available by the underlying software and
+hardware about the failure, other fields will be set to NULL or 0.  This
+includes the op_context value, which may not have been provided or was
+ignored on input as part of the transfer.
+
 Notable completion error codes are given below.
 
 *FI_EADDRNOTAVAIL*
 : This error code is used by CQs configured with FI_SOURCE_ERR to report
-  completions for which a matching fi_addr_t source address could not
+  completions for which a usable fi_addr_t source address could not
   be found.  An error code of FI_EADDRNOTAVAIL indicates that the data
   transfer was successfully received and processed, with the
   fi_cq_err_entry fields containing information about the completion.
@@ -502,11 +519,15 @@ of these fields are the same for all CQ entry structure formats.
   on converting this error value into a human readable string.
 
 *err_data*
-: On an error, err_data may reference a provider specific amount of data
-  associated with an error.  The use of this field and its meaning is
+: The err_data field is used to return provider specific information, if
+  available, about the error.  On input, err_data should reference a data
+  buffer of size err_data_size.  On output, the provider will fill in this
+  buffer with any provider specific data which may help identify the cause
+  of the error.  The contents of the err_data field and its meaning is
   provider specific.  It is intended to be used as a debugging aid.  See
   fi_cq_strerror for additional details on converting this error data into
-  a human readable string.
+  a human readable string.  See the compatibility note below on how this
+  field is used for older libfabric releases.
 
 *err_data_size*
 : On input, err_data_size indicates the size of the err_data buffer in bytes.
@@ -514,9 +535,12 @@ of these fields are the same for all CQ entry structure formats.
   err_data buffer.  The err_data information is typically used with
   fi_cq_strerror to provide details about the type of error that occurred.
 
-  For compatibility purposes, if err_data_size is 0 on input, or the fabric
-  was opened with release < 1.5, err_data will be set to a data buffer
-  owned by the provider.  The contents of the buffer will remain valid until a
+  For compatibility purposes, the behavior of the err_data and err_data_size
+  fields is may be modified from that listed above.  If err_data_size is 0
+  on input, or the fabric was opened with release < 1.5, then any buffer
+  referenced by err_data will be ignored on input.  In this situation, on
+  output err_data will be set to a data buffer owned by the provider.
+  The contents of the buffer will remain valid until a
   subsequent read call against the CQ.  Applications must serialize access
   to the CQ when processing errors to ensure that the buffer referenced by
   err_data does not change.
@@ -594,6 +618,151 @@ operation.  The following completion flags are defined.
   buffer has been released, and the completion entry is not associated
   with a received message.
 
+*FI_MORE*
+: See the 'Buffered Receives' section in `fi_msg`(3) for more details.
+  This flag is associated with receive completions on endpoints that
+  have FI_BUFFERED_RECV mode enabled.  When set to one, it indicates that
+  the buffer referenced by the completion is limited by the
+  FI_OPT_BUFFERED_LIMIT threshold, and additional message data must be
+  retrieved by the application using an FI_CLAIM operation.  
+
+*FI_CLAIM*
+: See the 'Buffered Receives' section in `fi_msg`(3) for more details.
+  This flag is set on completions associated with receive operations
+  that claim buffered receive data.  Note that this flag only applies
+  to endpoints configured with the FI_BUFFERED_RECV mode bit.
+
+# COMPLETION EVENT SEMANTICS
+
+Libfabric defines several completion 'levels', identified using operational
+flags.  Each flag indicates the soonest that a completion event may be
+generated by a provider, and the assumptions that an application may make
+upon processing a completion.  The operational flags are defined below,
+along with an example of how a provider might implement the semantic.  Note
+that only meeting the semantic is required of the provider and not the
+implementation.  Providers may implement stronger completion semantics
+than necessary for a given operation, but only the behavior defined by the
+completion level is guaranteed.
+
+To help understand the conceptual differences in completion levels, consider
+mailing a letter.  Placing the letter into the local mailbox for pick-up is
+similar to 'inject complete'.  Having the letter picked up and dropped off
+at the destination mailbox is equivalent to 'transmit complete'.  The
+'delivery complete' semantic is a stronger guarantee, with a person at the
+destination signing for the letter.  However, the person who signed for the
+letter is not necessarily the intended recipient.  The 'match complete'
+option is similar to delivery complete, but requires the intended recipient
+to sign for the letter.
+
+The 'commit complete' level has different semantics than the previously
+mentioned levels.  Commit complete would be closer to the letter
+arriving at the destination and being placed into a fire proof safe.
+
+The operational flags for the described completion levels are defined below.
+
+*FI_INJECT_COMPLETE*
+: Indicates that a completion should be generated when the
+  source buffer(s) may be reused.  A completion guarantees that
+  the buffers will not be read from again and the application may
+  reclaim them.  No other guarantees are made with respect to the
+  state of the operation.
+
+  Example: A provider may generate this completion event after copying
+  the source buffer into a network buffer, either in host memory or
+  on the NIC.  An inject completion does not indicate that the data has
+  been transmitted onto the network, and a local error could occur after
+  the completion event has been generated that could prevent it from being
+  transmitted.
+
+  Inject complete allows for the fastest completion reporting (and, hence,
+  buffer reuse), but provides the weakest guarantees against network errors.
+
+  Note: This flag is used to control when a completion entry is inserted
+  into a completion queue.  It does not apply to operations that do not
+  generate a completion queue entry, such as the fi_inject operation, and
+  is not subject to the inject_size message limit restriction.
+
+*FI_TRANSMIT_COMPLETE*
+: Indicates that a completion should be generated when the transmit
+  operation has completed relative to the local provider.  The exact
+  behavior is dependent on the endpoint type.
+
+  For reliable endpoints:
+
+  Indicates that a completion should be generated when the operation has
+  been delivered to the peer endpoint.  A completion guarantees that the
+  operation is no longer dependent on the fabric or local resources.  The
+  state of the operation at the peer endpoint is not defined.
+
+  Example: A provider may generate a transmit complete event upon receiving
+  an ack from the peer endpoint.  The state of the message at the peer is
+  unknown and may be buffered in the target NIC at the time the ack has been
+  generated.
+
+  For unreliable endpoints:
+
+  Indicates that a completion should be generated when the operation has
+  been delivered to the fabric.  A completion guarantees that the
+  operation is no longer dependent on local resources.  The state of the
+  operation within the fabric is not defined.
+
+*FI_DELIVERY_COMPLETE*
+: Indicates that a completion should not be generated until an operation
+  has been processed by the destination endpoint(s).  A completion
+  guarantees that the result of the operation is available; however,
+  additional steps may need to be taken at the destination to retrieve the
+  results.  For example, an application may need to provide a receive buffers
+  in order to retrieve messages that were buffered by the provider.
+
+  Delivery complete indicates that the message has been processed by the peer.
+  If an application buffer was ready to receive the results of the message
+  when it arrived, then delivery complete indicates that the data was placed
+  into the application's buffer.
+
+  This completion mode applies only to reliable endpoints.  For operations
+  that return data to the initiator, such as RMA read or atomic-fetch,
+  the source endpoint is also considered a destination endpoint.  This is the
+  default completion mode for such operations.
+
+*FI_MATCH_COMPLETE*
+: Indicates that a completion should be generated only after the operation
+  has been matched with an application specified buffer.  Operations using
+  this completion semantic are dependent on the application at the target
+  claiming the message or results.  As a result, match complete may involve
+  additional provider level acknowledgements or lengthy delays.  However, this
+  completion model enables peer applications to synchronize their execution.
+  Many providers may not support this semantic.
+
+*FI_COMMIT_COMPLETE*
+: Indicates that a completion should not be generated (locally or at the
+  peer) until the result of an operation have been made persistent.
+  A completion guarantees that the result is both available and durable,
+  in the case of power failure.
+
+  This completion mode applies only to operations that target persistent
+  memory regions over reliable endpoints.  This completion mode is
+  experimental.
+
+*FI_FENCE*
+: This is not a completion level, but plays a role in the completion
+  ordering between operations that would not normally be ordered.  An
+  operation that is marked with the FI_FENCE flag and all
+  operations posted after the fenced operation are deferred until all
+  previous operations targeting the same peer endpoint have completed.
+  Additionally, the completion of the fenced operation indicates that
+  prior operations have met the same completion level as the fenced
+  operation.  For example, if an operation is posted as
+  FI_DELIVERY_COMPLETE | FI_FENCE, then its completion indicates prior
+  operations have met the semantic required for FI_DELIVERY_COMPLETE.
+  This is true even if the prior operation was posted with a lower
+  completion level, such as FI_TRANSMIT_COMPLETE or FI_INJECT_COMPLETE.
+
+  Note that a completion generated for an operation posted prior to
+  the fenced operation only guarantees that the completion level
+  that was originally requested has been met.  It is the completion
+  of the fenced operation that guarantees that the additional
+  semantics have been met.
+ 
 # NOTES
 
 A completion queue must be bound to at least one enabled endpoint before any
@@ -625,6 +794,13 @@ fi_cq_sread / fi_cq_sreadfrom
   the completion queue.  On error, a negative value corresponding to
   fabric errno is returned.  If no completions are available to
   return from the CQ, -FI_EAGAIN will be returned.
+
+fi_cq_sread / fi_cq_sreadfrom
+: On success, returns the number of completion events retrieved from
+  the completion queue.  On error, a negative value corresponding to
+  fabric errno is returned.  If the timeout expires or the calling
+  thread is signaled and no data is available to be read from the
+  completion queue, -FI_EAGAIN is returned.
 
 fi_cq_strerror
 : Returns a character string interpretation of the provider specific

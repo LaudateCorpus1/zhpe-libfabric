@@ -49,6 +49,7 @@ static int ofi_check_cntr_attr(const struct fi_provider *prov,
 
 	switch (attr->wait_obj) {
 	case FI_WAIT_NONE:
+	case FI_WAIT_YIELD:
 		break;
 	case FI_WAIT_SET:
 		if (!attr->wait_set) {
@@ -58,6 +59,7 @@ static int ofi_check_cntr_attr(const struct fi_provider *prov,
 		/* fall through */
 	case FI_WAIT_UNSPEC:
 	case FI_WAIT_FD:
+	case FI_WAIT_POLLFD:
 		break;
 	default:
 		FI_WARN(prov, FI_LOG_CNTR, "unsupported wait object\n");
@@ -138,16 +140,18 @@ static int ofi_cntr_seterr(struct fid_cntr *cntr_fid, uint64_t value)
 	return FI_SUCCESS;
 }
 
+#define OFI_TIMEOUT_QUANTUM_MS 50
+
 static int ofi_cntr_wait(struct fid_cntr *cntr_fid, uint64_t threshold, int timeout)
 {
 	struct util_cntr *cntr;
-	uint64_t start, errcnt;
-	int ret;
+	uint64_t endtime, errcnt;
+	int ret, timeout_quantum;
 
 	cntr = container_of(cntr_fid, struct util_cntr, cntr_fid);
 	assert(cntr->wait);
 	errcnt = ofi_atomic_get64(&cntr->err);
-	start = (timeout >= 0) ? fi_gettime_ms() : 0;
+	endtime = ofi_timeout_time(timeout);
 
 	do {
 		cntr->progress(cntr);
@@ -157,14 +161,28 @@ static int ofi_cntr_wait(struct fid_cntr *cntr_fid, uint64_t threshold, int time
 		if (errcnt != ofi_atomic_get64(&cntr->err))
 			return -FI_EAVAIL;
 
-		if (timeout >= 0) {
-			timeout -= (int) (fi_gettime_ms() - start);
-			if (timeout <= 0)
-				return -FI_ETIMEDOUT;
-		}
+		if (ofi_adjust_timeout(endtime, &timeout))
+			return -FI_ETIMEDOUT;
 
-		ret = fi_wait(&cntr->wait->wait_fid, timeout);
-	} while (!ret);
+		/*
+		 * Temporary work-around to avoid a thread hanging in underlying
+		 * epoll_wait called from fi_wait. This can happen if one thread
+		 * updates the counter, another thread reads it (thereby resetting
+		 * cntr signal fd) and the current thread is about to wait. The
+		 * current thread would never wake up and doesn't know the counter
+		 * has been updated. Fix it by checking counter state every now
+		 * and then instead of waiting for a longer period. This does
+		 * have the overhead of threads waking up unnecessarily.
+		 */
+		if (cntr->domain->data_progress == FI_PROGRESS_AUTO)
+			timeout_quantum =
+				(timeout < 0 ? OFI_TIMEOUT_QUANTUM_MS :
+				 MIN(OFI_TIMEOUT_QUANTUM_MS, timeout));
+		else
+			timeout_quantum = 0;
+		ret = fi_wait(&cntr->wait->wait_fid, timeout_quantum);
+	} while (!ret || (ret == -FI_ETIMEDOUT &&
+			  (timeout < 0 || timeout_quantum < timeout)));
 
 	return ret;
 }
@@ -178,6 +196,17 @@ static struct fi_ops_cntr util_cntr_ops = {
 	.set = ofi_cntr_set,
 	.seterr = ofi_cntr_seterr,
 	.wait = ofi_cntr_wait
+};
+
+static struct fi_ops_cntr util_cntr_no_wait_ops = {
+	.size = sizeof(struct fi_ops_cntr),
+	.read = ofi_cntr_read,
+	.readerr = ofi_cntr_readerr,
+	.add = ofi_cntr_add,
+	.adderr = ofi_cntr_adderr,
+	.set = ofi_cntr_set,
+	.seterr = ofi_cntr_seterr,
+	.wait = fi_no_cntr_wait,
 };
 
 int ofi_cntr_cleanup(struct util_cntr *cntr)
@@ -210,54 +239,6 @@ static int util_cntr_close(struct fid *fid)
 	return 0;
 }
 
-static int fi_cntr_init(struct fid_domain *domain, struct fi_cntr_attr *attr,
-			struct util_cntr *cntr, void *context)
-{
-	struct fi_wait_attr wait_attr;
-	struct fid_wait *wait;
-	int ret;
-
-	cntr->domain = container_of(domain, struct util_domain, domain_fid);
-	ofi_atomic_initialize32(&cntr->ref, 0);
-	ofi_atomic_initialize64(&cntr->cnt, 0);
-	ofi_atomic_initialize64(&cntr->err, 0);
-	dlist_init(&cntr->ep_list);
-	fastlock_init(&cntr->ep_list_lock);
-
-	cntr->cntr_fid.fid.fclass = FI_CLASS_CNTR;
-	cntr->cntr_fid.fid.context = context;
-
-	switch (attr->wait_obj) {
-	case FI_WAIT_NONE:
-		wait = NULL;
-		cntr->cntr_fid.ops->wait = fi_no_cntr_wait;
-		break;
-	case FI_WAIT_UNSPEC:
-	case FI_WAIT_FD:
-	case FI_WAIT_MUTEX_COND:
-		memset(&wait_attr, 0, sizeof wait_attr);
-		wait_attr.wait_obj = attr->wait_obj;
-		cntr->internal_wait = 1;
-		ret = fi_wait_open(&cntr->domain->fabric->fabric_fid,
-				   &wait_attr, &wait);
-		if (ret)
-			return ret;
-		break;
-	case FI_WAIT_SET:
-		wait = attr->wait_set;
-		break;
-	default:
-		assert(0);
-		return -FI_EINVAL;
-	}
-
-	if (wait)
-		cntr->wait = container_of(wait, struct util_wait, wait_fid);
-
-	ofi_atomic_inc32(&cntr->domain->ref);
-	return 0;
-}
-
 void ofi_cntr_progress(struct util_cntr *cntr)
 {
 	struct util_ep *ep;
@@ -286,22 +267,58 @@ int ofi_cntr_init(const struct fi_provider *prov, struct fid_domain *domain,
 		  ofi_cntr_progress_func progress, void *context)
 {
 	int ret;
+	struct fi_wait_attr wait_attr;
+	struct fid_wait *wait;
 
 	assert(progress);
 	ret = ofi_check_cntr_attr(prov, attr);
 	if (ret)
 		return ret;
 
+	cntr->progress = progress;
+	cntr->domain = container_of(domain, struct util_domain, domain_fid);
+	ofi_atomic_initialize32(&cntr->ref, 0);
+	ofi_atomic_initialize64(&cntr->cnt, 0);
+	ofi_atomic_initialize64(&cntr->err, 0);
+	dlist_init(&cntr->ep_list);
+
+	cntr->cntr_fid.fid.fclass = FI_CLASS_CNTR;
+	cntr->cntr_fid.fid.context = context;
 	cntr->cntr_fid.fid.ops = &util_cntr_fi_ops;
 	cntr->cntr_fid.ops = &util_cntr_ops;
-	cntr->progress = progress;
 
-	ret = fi_cntr_init(domain, attr, cntr, context);
-	if (ret)
-		return ret;
+	switch (attr->wait_obj) {
+	case FI_WAIT_NONE:
+		wait = NULL;
+		cntr->cntr_fid.ops = &util_cntr_no_wait_ops;
+		break;
+	case FI_WAIT_UNSPEC:
+	case FI_WAIT_FD:
+	case FI_WAIT_POLLFD:
+	case FI_WAIT_MUTEX_COND:
+	case FI_WAIT_YIELD:
+		memset(&wait_attr, 0, sizeof wait_attr);
+		wait_attr.wait_obj = attr->wait_obj;
+		cntr->internal_wait = 1;
+		ret = fi_wait_open(&cntr->domain->fabric->fabric_fid,
+				   &wait_attr, &wait);
+		if (ret)
+			return ret;
+		break;
+	case FI_WAIT_SET:
+		wait = attr->wait_set;
+		break;
+	default:
+		assert(0);
+		return -FI_EINVAL;
+	}
+
+	fastlock_init(&cntr->ep_list_lock);
+	ofi_atomic_inc32(&cntr->domain->ref);
 
 	/* CNTR must be fully operational before adding to wait set */
-	if (cntr->wait) {
+	if (wait) {
+		cntr->wait = container_of(wait, struct util_wait, wait_fid);
 		ret = fi_poll_add(&cntr->wait->pollset->poll_fid,
 				  &cntr->cntr_fid.fid, 0);
 		if (ret) {
@@ -313,3 +330,28 @@ int ofi_cntr_init(const struct fi_provider *prov, struct fid_domain *domain,
 	return 0;
 }
 
+ofi_ep_cntr_inc_func ofi_ep_tx_cntr_inc_funcs[] = {
+	[ofi_op_msg] = ofi_ep_tx_cntr_inc,
+	[ofi_op_tagged] = ofi_ep_tx_cntr_inc,
+	[ofi_op_read_req] = ofi_ep_rd_cntr_inc,
+	[ofi_op_read_rsp] = ofi_ep_rem_rd_cntr_inc,
+	[ofi_op_write] = ofi_ep_wr_cntr_inc,
+	[ofi_op_write_async] = ofi_ep_wr_cntr_inc,
+	[ofi_op_atomic] = ofi_ep_wr_cntr_inc,
+	[ofi_op_atomic_fetch] = ofi_ep_rd_cntr_inc,
+	[ofi_op_atomic_compare] = ofi_ep_rd_cntr_inc,
+	[ofi_op_read_async] = ofi_ep_rd_cntr_inc,
+};
+
+ofi_ep_cntr_inc_func ofi_ep_rx_cntr_inc_funcs[] = {
+	[ofi_op_msg] = ofi_ep_rx_cntr_inc,
+	[ofi_op_tagged] = ofi_ep_rx_cntr_inc,
+	[ofi_op_read_req] = ofi_ep_rem_rd_cntr_inc,
+	[ofi_op_read_rsp] = ofi_ep_rd_cntr_inc,
+	[ofi_op_write] = ofi_ep_rem_wr_cntr_inc,
+	[ofi_op_write_async] = ofi_ep_rem_wr_cntr_inc,
+	[ofi_op_atomic] = ofi_ep_rem_wr_cntr_inc,
+	[ofi_op_atomic_fetch] = ofi_ep_rem_rd_cntr_inc,
+	[ofi_op_atomic_compare] = ofi_ep_rem_rd_cntr_inc,
+	[ofi_op_read_async] = ofi_ep_rem_rd_cntr_inc,
+};

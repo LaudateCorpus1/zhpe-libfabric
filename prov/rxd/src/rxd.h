@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2017 Intel Corporation, Inc.  All rights reserved.
+ * Copyright (c) 2015-2018 Intel Corporation, Inc.  All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -52,58 +52,53 @@
 #include <ofi_rbuf.h>
 #include <ofi_list.h>
 #include <ofi_util.h>
+#include <ofi_tree.h>
+#include <ofi_atomic.h>
+#include "rxd_proto.h"
 
 #ifndef _RXD_H_
 #define _RXD_H_
 
-#define RXD_MAJOR_VERSION 	(1)
-#define RXD_MINOR_VERSION 	(0)
-#define RXD_PROTOCOL_VERSION 	(1)
-#define RXD_FI_VERSION 		FI_VERSION(1,6)
+#define RXD_PROTOCOL_VERSION 	(2)
 
-#define RXD_IOV_LIMIT		4
-#define RXD_MAX_DGRAM_ADDR	128
+#define RXD_MAX_MTU_SIZE	4096
 
 #define RXD_MAX_TX_BITS 	10
 #define RXD_MAX_RX_BITS 	10
-#define RXD_TX_ID(seq, id)	(((seq) << RXD_MAX_TX_BITS) | id)
-#define RXD_RX_ID(seq, id)	(((seq) << RXD_MAX_RX_BITS) | id)
-#define RXD_TX_IDX_BITS		((1ULL << RXD_MAX_TX_BITS) - 1)
-#define RXD_RX_IDX_BITS		((1ULL << RXD_MAX_RX_BITS) - 1)
 
 #define RXD_BUF_POOL_ALIGNMENT	16
 #define RXD_TX_POOL_CHUNK_CNT	1024
 #define RXD_RX_POOL_CHUNK_CNT	1024
-
-#define RXD_MAX_RX_CREDITS	16
-#define RXD_MAX_PEER_TX		8
-#define RXD_MAX_UNACKED		128
-
-#define RXD_EP_MAX_UNEXP_PKT	512
-#define RXD_EP_MAX_UNEXP_MSG	128
-
-#define RXD_USE_OP_FLAGS	(1ULL << 61)
-#define RXD_NO_COMPLETION	(1ULL << 62)
-
+#define RXD_MAX_PENDING		128
 #define RXD_MAX_PKT_RETRY	50
 
-extern int rxd_progress_spin_count;
-extern int rxd_reposted_bufs;
+#define RXD_PKT_IN_USE		(1 << 0)
+#define RXD_PKT_ACKED		(1 << 1)
 
+#define RXD_REMOTE_CQ_DATA	(1 << 0)
+#define RXD_NO_TX_COMP		(1 << 1)
+#define RXD_NO_RX_COMP		(1 << 2)
+#define RXD_INJECT		(1 << 3)
+#define RXD_TAG_HDR		(1 << 4)
+#define RXD_INLINE		(1 << 5)
+#define RXD_MULTI_RECV		(1 << 6)
+
+struct rxd_env {
+	int spin_count;
+	int retry;
+	int max_peers;
+	int max_unacked;
+};
+
+extern struct rxd_env rxd_env;
 extern struct fi_provider rxd_prov;
 extern struct fi_info rxd_info;
 extern struct fi_fabric_attr rxd_fabric_attr;
 extern struct util_prov rxd_util_prov;
+extern struct fi_ops_msg rxd_ops_msg;
+extern struct fi_ops_tagged rxd_ops_tagged;
 extern struct fi_ops_rma rxd_ops_rma;
-
-enum {
-	RXD_TX_CONN = 0,
-	RXD_TX_MSG,
-	RXD_TX_TAG,
-	RXD_TX_WRITE,
-	RXD_TX_READ_REQ,
-	RXD_TX_READ_RSP,
-};
+extern struct fi_ops_atomic rxd_ops_atomic;
 
 struct rxd_fabric {
 	struct util_fabric util_fabric;
@@ -115,16 +110,55 @@ struct rxd_domain {
 	struct fid_domain *dg_domain;
 
 	ssize_t max_mtu_sz;
-	int mr_mode;
+	ssize_t max_inline_msg;
+	ssize_t max_inline_rma;
+	ssize_t max_inline_atom;
+	ssize_t max_seg_sz;
 	struct ofi_mr_map mr_map;//TODO use util_domain mr_map instead
+};
+
+struct rxd_peer {
+	struct dlist_entry entry;
+	fi_addr_t peer_addr;
+	uint64_t tx_seq_no;
+	uint64_t rx_seq_no;
+	uint64_t last_rx_ack;
+	uint64_t last_tx_ack;
+	uint16_t rx_window;
+	uint16_t tx_window;
+	int retry_cnt;
+
+	uint16_t unacked_cnt;
+	uint8_t active;
+
+	uint16_t curr_rx_id;
+	uint16_t curr_tx_id;
+
+	struct rxd_unexp_msg *curr_unexp;
+	struct dlist_entry tx_list;
+	struct dlist_entry rx_list;
+	struct dlist_entry rma_rx_list;
+	struct dlist_entry unacked;
+	struct dlist_entry buf_pkts;
+};
+
+struct rxd_addr {
+	fi_addr_t fi_addr;
+	fi_addr_t dg_addr;
 };
 
 struct rxd_av {
 	struct util_av util_av;
 	struct fid_av *dg_av;
+	struct ofi_rbmap rbmap;
+	int fi_addr_idx;
+	int rxd_addr_idx;
 
 	int dg_av_used;
 	size_t dg_addrlen;
+
+	fi_addr_t *fi_addr_table;
+	struct rxd_addr *rxd_addr_table;
 };
 
 struct rxd_cq;
@@ -135,14 +169,15 @@ struct rxd_cq {
 	rxd_cq_write_fn write_fn;
 };
 
-struct rxd_peer {
-	uint64_t		nxt_msg_id;
-	uint64_t		exp_msg_id;
-	uint64_t		conn_data;
-	fi_addr_t		fiaddr;
+enum rxd_pool_type {
+	RXD_BUF_POOL_RX,
+	RXD_BUF_POOL_TX,
+};
 
-	enum util_cmap_state	state;
-	uint16_t		active_tx_cnt;
+struct rxd_buf_pool {
+	enum rxd_pool_type type;
+	struct ofi_bufpool *pool;
+	struct rxd_ep *rxd_ep;
 };
 
 struct rxd_ep {
@@ -150,39 +185,38 @@ struct rxd_ep {
 	struct fid_ep *dg_ep;
 	struct fid_cq *dg_cq;
 
-	struct rxd_peer *peer_info;
-	size_t max_peers;
-
-	int conn_data_set;
-	uint64_t conn_data;
-
 	size_t rx_size;
-	size_t credits;
-//	uint64_t num_out;
-
+	size_t tx_size;
+	size_t tx_prefix_size;
+	size_t rx_prefix_size;
+	size_t min_multi_recv_size;
 	int do_local_mr;
-	struct dlist_entry wait_rx_list;
-	struct dlist_entry unexp_tag_list;
-	struct dlist_entry unexp_msg_list;
-	uint16_t num_unexp_pkt;
-	uint16_t num_unexp_msg;
+	int next_retry;
+	int dg_cq_fd;
+	uint32_t tx_flags;
+	uint32_t rx_flags;
 
-	struct util_buf_pool *tx_pkt_pool;
-	struct util_buf_pool *rx_pkt_pool;
+	size_t tx_msg_avail;
+	size_t rx_msg_avail;
+	size_t tx_rma_avail;
+	size_t rx_rma_avail;
+
+	struct rxd_buf_pool tx_pkt_pool;
+	struct rxd_buf_pool rx_pkt_pool;
 	struct slist rx_pkt_list;
 
-	struct rxd_tx_entry_fs *tx_entry_fs;
-	struct dlist_entry tx_entry_list;
+	struct rxd_buf_pool tx_entry_pool;
+	struct rxd_buf_pool rx_entry_pool;
 
-	struct rxd_rx_entry_fs *rx_entry_fs;
-	struct dlist_entry rx_entry_list;
+	struct dlist_entry unexp_list;
+	struct dlist_entry unexp_tag_list;
+	struct dlist_entry rx_list;
+	struct dlist_entry rx_tag_list;
+	struct dlist_entry active_peers;
+	struct dlist_entry rts_sent_list;
+	struct dlist_entry ctrl_pkts;
 
-	struct rxd_recv_fs *recv_fs;
-	struct dlist_entry recv_list;
-
-	struct rxd_trecv_fs *trecv_fs;
-	struct dlist_entry trecv_list;
-	fastlock_t lock;
+	struct rxd_peer peers[];
 };
 
 static inline struct rxd_domain *rxd_ep_domain(struct rxd_ep *ep)
@@ -205,150 +239,167 @@ static inline struct rxd_cq *rxd_ep_rx_cq(struct rxd_ep *ep)
 	return container_of(ep->util_ep.rx_cq, struct rxd_cq, util_cq);
 }
 
-struct rxd_rx_buf {
-	struct fi_context context;
-	struct slist_entry entry;
-	struct rxd_ep *ep;
-	struct fid_mr *mr;
-	char buf[];
-};
-
-struct rxd_rx_entry {
-	struct ofi_op_hdr op_hdr;
-	uint32_t exp_seg_no;
-	uint64_t msg_id;
-	uint64_t key;
-	uint64_t done;
-	uint64_t peer;
-	uint16_t credits;
-	uint32_t last_win_seg;
-	fi_addr_t source;
-	struct rxd_peer *peer_info;
-	struct rxd_rx_buf *unexp_buf;
-	uint64_t nack_stamp;
-	struct dlist_entry entry;
-
-	union {
-		struct rxd_recv_entry *recv;
-		struct rxd_trecv_entry *trecv;
-
-		struct {
-			struct iovec iov[RXD_IOV_LIMIT];
-		} write;
-
-		struct {
-			struct rxd_tx_entry *tx_entry;
-		} read_rsp;
-	};
-
-	union {
-		struct dlist_entry wait_entry;
-		struct dlist_entry unexp_entry;
-	};
-};
-DECLARE_FREESTACK(struct rxd_rx_entry, rxd_rx_entry_fs);
-
-struct rxd_tx_entry {
+struct rxd_x_entry {
 	fi_addr_t peer;
-	uint64_t msg_id;
-	uint64_t flags;
-	uint64_t rx_key;
-	uint64_t bytes_sent;
-	uint32_t seg_no;
-	uint32_t window;
-	uint64_t retry_time;
-	uint8_t retry_cnt;
+	uint16_t tx_id;
+	uint16_t rx_id;
+	uint64_t bytes_done;
+	uint64_t next_seg_no;
+	uint64_t start_seq;
+	uint64_t offset;
+	uint64_t num_segs;
+	uint32_t op;
 
-	struct dlist_entry entry;
-	struct dlist_entry pkt_list;
+	uint32_t flags;
+	uint64_t ignore;
+	uint8_t iov_count;
+	uint8_t res_count;
 
-	uint8_t op_type;
-	struct ofi_op_hdr op_hdr;
-
-	union {
-		struct {
-			struct fi_msg msg;
-			struct iovec msg_iov[RXD_IOV_LIMIT];
-		} msg;
-
-		struct {
-			struct fi_msg_tagged tmsg;
-			struct iovec msg_iov[RXD_IOV_LIMIT];
-		} tmsg;
-
-		struct {
-			struct fi_msg_rma msg;
-			struct iovec src_iov[RXD_IOV_LIMIT];
-			struct fi_rma_iov dst_iov[RXD_IOV_LIMIT];
-		} write;
-
-		struct {
-			struct fi_msg_rma msg;
-			struct fi_rma_iov src_iov[RXD_IOV_LIMIT];
-			struct iovec dst_iov[RXD_IOV_LIMIT];
-		} read_req;
-
-		struct {
-			uint64_t peer_msg_id;
-			uint8_t iov_count;
-			struct iovec src_iov[RXD_IOV_LIMIT];
-		} read_rsp;
-	};
-};
-DECLARE_FREESTACK(struct rxd_tx_entry, rxd_tx_entry_fs);
-
-struct rxd_recv_entry {
-	struct dlist_entry entry;
-	struct fi_msg msg;
-	uint64_t flags;
 	struct iovec iov[RXD_IOV_LIMIT];
-	void *desc[RXD_IOV_LIMIT];
-};
-DECLARE_FREESTACK(struct rxd_recv_entry, rxd_recv_fs);
+	struct iovec res_iov[RXD_IOV_LIMIT];
 
-struct rxd_trecv_entry {
+	struct fi_cq_tagged_entry cq_entry;
+
+	struct rxd_pkt_entry *pkt;
 	struct dlist_entry entry;
-	struct fi_msg_tagged msg;
-	uint64_t flags;
-	struct rxd_rx_entry *rx_entry;
-	struct iovec iov[RXD_IOV_LIMIT];
-	void *desc[RXD_IOV_LIMIT];
-};
-DECLARE_FREESTACK(struct rxd_trecv_entry, rxd_trecv_fs);
-
-struct rxd_pkt_data_start {
-	struct ofi_ctrl_hdr ctrl;
-	struct ofi_op_hdr op;
-	char data[];
 };
 
-struct rxd_pkt_data {
-	struct ofi_ctrl_hdr ctrl;
-	char data[];
-};
+static inline uint32_t rxd_tx_flags(uint64_t fi_flags)
+{
+	uint32_t rxd_flags = 0;
 
-#define RXD_PKT_FIRST	(1 << 0)
-#define RXD_PKT_LAST	(1 << 1)
-#define RXD_LOCAL_COMP	(1 << 2)
-#define RXD_REMOTE_ACK	(1 << 3)
-#define RXD_NOT_ACKED	RXD_REMOTE_ACK
+	if (fi_flags & FI_REMOTE_CQ_DATA)
+		rxd_flags |= RXD_REMOTE_CQ_DATA;
+	if (fi_flags & FI_INJECT)
+		rxd_flags |= RXD_INJECT;
+	if (fi_flags & FI_COMPLETION)
+		return rxd_flags;
 
-struct rxd_pkt_meta {
+	return rxd_flags | RXD_NO_TX_COMP;
+}
+
+static inline uint32_t rxd_rx_flags(uint64_t fi_flags)
+{
+	uint32_t rxd_flags = 0;
+
+	if (fi_flags & FI_MULTI_RECV)
+		rxd_flags |= RXD_MULTI_RECV;
+	if (fi_flags & FI_COMPLETION)
+		return rxd_flags;
+
+	return rxd_flags | RXD_NO_RX_COMP;
+}
+
+struct rxd_pkt_entry {
+	struct dlist_entry d_entry;
+	struct slist_entry s_entry;//TODO - keep both or make separate tx/rx pkt structs
+	uint8_t flags;
+	size_t pkt_size;
+	uint64_t timestamp;
 	struct fi_context context;
-	struct dlist_entry entry;
-	struct rxd_tx_entry *tx_entry;
-	struct rxd_ep *ep;
 	struct fid_mr *mr;
-	int flags;
-
-	/* TODO: use iov and remove data copies */
-	char pkt_data[]; /* rxd_pkt_data*, followed by data */
+	void *desc;
+	fi_addr_t peer;
+	void *pkt;
 };
+
+struct rxd_unexp_msg {
+	struct dlist_entry entry;
+	struct rxd_pkt_entry *pkt_entry;
+	struct dlist_entry pkt_list;
+	struct rxd_base_hdr *base_hdr;
+	struct rxd_sar_hdr *sar_hdr;
+	struct rxd_tag_hdr *tag_hdr;
+	struct rxd_data_hdr *data_hdr;
+	size_t msg_size;
+	void *msg;
+};
+
+static inline int rxd_pkt_type(struct rxd_pkt_entry *pkt_entry)
+{
+	return ((struct rxd_base_hdr *) (pkt_entry->pkt))->type;
+}
+
+static inline struct rxd_base_hdr *rxd_get_base_hdr(struct rxd_pkt_entry *pkt_entry)
+{
+	return &((struct rxd_ack_pkt *) (pkt_entry->pkt))->base_hdr;
+}
+
+static inline uint64_t rxd_set_pkt_seq(struct rxd_peer *peer,
+				       struct rxd_pkt_entry *pkt_entry)
+{
+	rxd_get_base_hdr(pkt_entry)->seq_no = peer->tx_seq_no++;
+
+	return rxd_get_base_hdr(pkt_entry)->seq_no;
+}
+
+static inline struct rxd_ext_hdr *rxd_get_ext_hdr(struct rxd_pkt_entry *pkt_entry)
+{
+	return &((struct rxd_ack_pkt *) (pkt_entry->pkt))->ext_hdr;
+}
+
+static inline struct rxd_sar_hdr *rxd_get_sar_hdr(struct rxd_pkt_entry *pkt_entry)
+{
+	return (struct rxd_sar_hdr *) ((char *) pkt_entry->pkt +
+		sizeof(struct rxd_base_hdr));
+}
+
+static inline void rxd_set_tx_pkt(struct rxd_ep *ep, struct rxd_pkt_entry *pkt_entry)
+{
+	pkt_entry->pkt = (void *) ((char *) pkt_entry +
+			  sizeof(*pkt_entry) + ep->tx_prefix_size);
+}
+
+static inline void rxd_set_rx_pkt(struct rxd_ep *ep, struct rxd_pkt_entry *pkt_entry)
+{
+	pkt_entry->pkt = (void *) ((char *) pkt_entry +
+			  sizeof(*pkt_entry) + ep->rx_prefix_size);
+}
+
+static inline void *rxd_pkt_start(struct rxd_pkt_entry *pkt_entry)
+{
+	return (void *) ((char *) pkt_entry + sizeof(*pkt_entry));
+}
+
+static inline size_t rxd_pkt_size(struct rxd_ep *ep, struct rxd_base_hdr *base_hdr,
+				   void *ptr)
+{
+	return ((char *) ptr - (char *) base_hdr) + ep->tx_prefix_size;
+}
+
+static inline void rxd_remove_free_pkt_entry(struct rxd_pkt_entry *pkt_entry)
+{
+	dlist_remove(&pkt_entry->d_entry);
+	ofi_buf_free(pkt_entry);
+}
+
+static inline void rxd_free_unexp_msg(struct rxd_unexp_msg *unexp_msg)
+{
+	ofi_buf_free(unexp_msg->pkt_entry);
+	dlist_remove(&unexp_msg->entry);
+	free(unexp_msg);
+}
+
+struct rxd_match_attr {
+	fi_addr_t	peer;
+	uint64_t	tag;
+	uint64_t	ignore;
+};
+
+static inline int rxd_match_addr(fi_addr_t addr, fi_addr_t match_addr)
+{
+	return (addr == FI_ADDR_UNSPEC || addr == match_addr);
+}
+
+static inline int rxd_match_tag(uint64_t tag, uint64_t ignore, uint64_t match_tag)
+{
+	return ((tag | ignore ) == (match_tag | ignore));
+}
 
 int rxd_info_to_core(uint32_t version, const struct fi_info *rxd_info,
-		     struct fi_info *core_info);
+		     const struct fi_info *base_info, struct fi_info *core_info);
 int rxd_info_to_rxd(uint32_t version, const struct fi_info *core_info,
-		    struct fi_info *info);
+		    const struct fi_info *base_info, struct fi_info *info);
 
 int rxd_fabric(struct fi_fabric_attr *attr,
 	       struct fid_fabric **fabric, void *context);
@@ -362,59 +413,102 @@ int rxd_cq_open(struct fid_domain *domain, struct fi_cq_attr *attr,
 		struct fid_cq **cq_fid, void *context);
 int rxd_cntr_open(struct fid_domain *domain, struct fi_cntr_attr *attr,
 		  struct fid_cntr **cntr_fid, void *context);
-
+int rxd_query_atomic(struct fid_domain *domain, enum fi_datatype datatype,
+		     enum fi_op op, struct fi_atomic_attr *attr, uint64_t flags);
 
 /* AV sub-functions */
-int rxd_av_insert_dg_addr(struct rxd_av *av, uint64_t hint_index,
-			  const void *addr, fi_addr_t *dg_fiaddr);
-fi_addr_t rxd_av_dg_addr(struct rxd_av *av, fi_addr_t fi_addr);
-fi_addr_t rxd_av_fi_addr(struct rxd_av *av, fi_addr_t dg_fiaddr);
-int rxd_av_dg_reverse_lookup(struct rxd_av *av, uint64_t start_idx,
-			     const void *addr, fi_addr_t *dg_fiaddr);
+int rxd_av_insert_dg_addr(struct rxd_av *av, const void *addr,
+			  fi_addr_t *dg_fiaddr, uint64_t flags,
+			  void *context);
 
-/* EP sub-functions */
-void rxd_handle_send_comp(struct fi_cq_msg_entry *comp);
-void rxd_handle_recv_comp(struct rxd_ep *ep, struct fi_cq_msg_entry *comp);
-int rxd_ep_repost_buff(struct rxd_rx_buf *rx_buf);
-int rxd_ep_reply_ack(struct rxd_ep *ep, struct ofi_ctrl_hdr *in_ctrl,
-		     uint8_t type, uint16_t seg_size, uint64_t rx_key,
-		     uint64_t source, fi_addr_t dest);
-struct rxd_peer *rxd_ep_getpeer_info(struct rxd_ep *rxd_ep, fi_addr_t addr);
-
-void rxd_ep_check_unexp_msg_list(struct rxd_ep *ep,
-				 struct rxd_recv_entry *recv_entry);
-void rxd_ep_check_unexp_tag_list(struct rxd_ep *ep,
-				 struct rxd_trecv_entry *trecv_entry);
-void rxd_ep_handle_data_msg(struct rxd_ep *ep, struct rxd_peer *peer,
-			    struct rxd_rx_entry *rx_entry,
-			    struct iovec *iov, size_t iov_count,
-			    struct ofi_ctrl_hdr *ctrl, void *data,
-			    struct rxd_rx_buf *rx_buf);
-void rxd_ep_free_acked_pkts(struct rxd_ep *ep, struct rxd_tx_entry *tx_entry,
-			    uint32_t seg_no);
-ssize_t rxd_ep_start_xfer(struct rxd_ep *ep, struct rxd_peer *peer,
-			  uint8_t op, struct rxd_tx_entry *tx_entry);
-ssize_t rxd_ep_connect(struct rxd_ep *ep, struct rxd_peer *peer, fi_addr_t addr);
-int rxd_mr_verify(struct rxd_domain *rxd_domain, ssize_t len,
-		  uintptr_t *io_addr, uint64_t key, uint64_t access);
-
+/* Pkt resource functions */
+int rxd_ep_post_buf(struct rxd_ep *ep);
+void rxd_ep_send_ack(struct rxd_ep *rxd_ep, fi_addr_t peer);
+struct rxd_pkt_entry *rxd_get_tx_pkt(struct rxd_ep *ep);
+struct rxd_x_entry *rxd_get_tx_entry(struct rxd_ep *ep, uint32_t op);
+struct rxd_x_entry *rxd_get_rx_entry(struct rxd_ep *ep, uint32_t op);
+int rxd_ep_send_pkt(struct rxd_ep *ep, struct rxd_pkt_entry *pkt_entry);
+ssize_t rxd_ep_post_data_pkts(struct rxd_ep *ep, struct rxd_x_entry *tx_entry);
+void rxd_insert_unacked(struct rxd_ep *ep, fi_addr_t peer,
+			struct rxd_pkt_entry *pkt_entry);
+ssize_t rxd_send_rts_if_needed(struct rxd_ep *rxd_ep, fi_addr_t rxd_addr);
+int rxd_start_xfer(struct rxd_ep *ep, struct rxd_x_entry *tx_entry);
+void rxd_init_data_pkt(struct rxd_ep *ep, struct rxd_x_entry *tx_entry,
+		       struct rxd_pkt_entry *pkt_entry);
+void rxd_init_base_hdr(struct rxd_ep *rxd_ep, void **ptr,
+		       struct rxd_x_entry *tx_entry);
+void rxd_init_sar_hdr(void **ptr, struct rxd_x_entry *tx_entry,
+		      size_t iov_count);
+void rxd_init_tag_hdr(void **ptr, struct rxd_x_entry *tx_entry);
+void rxd_init_data_hdr(void **ptr, struct rxd_x_entry *tx_entry);
+void rxd_init_rma_hdr(void **ptr, const struct fi_rma_iov *rma_iov,
+		      size_t rma_count);
+void rxd_init_atom_hdr(void **ptr, enum fi_datatype datatype,
+		       enum fi_op atomic_op);
+size_t rxd_init_msg(void **ptr, const struct iovec *iov, size_t iov_count,
+		    size_t total_len, size_t avail_len);
+static inline void rxd_check_init_cq_data(void **ptr, struct rxd_x_entry *tx_entry,
+			      		  size_t *max_inline)
+{
+	if (tx_entry->flags & RXD_REMOTE_CQ_DATA) {
+		rxd_init_data_hdr(ptr, tx_entry);
+		*max_inline -= sizeof(tx_entry->cq_entry.data);
+	}
+}
 
 /* Tx/Rx entry sub-functions */
-struct rxd_tx_entry *rxd_tx_entry_alloc(struct rxd_ep *ep,
-	struct rxd_peer *peer, fi_addr_t addr, uint64_t flags, uint8_t op);
-void rxd_tx_entry_progress(struct rxd_ep *ep, struct rxd_tx_entry *tx_entry);
-void rxd_tx_entry_discard(struct rxd_ep *ep, struct rxd_tx_entry *tx_entry);
-void rxd_tx_entry_free(struct rxd_ep *ep, struct rxd_tx_entry *tx_entry);
-void rxd_tx_entry_done(struct rxd_ep *ep, struct rxd_tx_entry *tx_entry);
-void rxd_set_timeout(struct rxd_tx_entry *tx_entry);
+struct rxd_x_entry *rxd_tx_entry_init_common(struct rxd_ep *ep, fi_addr_t addr,
+			uint32_t op, const struct iovec *iov, size_t iov_count,
+			uint64_t tag, uint64_t data, uint32_t flags, void *context,
+			struct rxd_base_hdr **base_hdr, void **ptr);
+struct rxd_x_entry *rxd_rx_entry_init(struct rxd_ep *ep,
+			const struct iovec *iov, size_t iov_count, uint64_t tag,
+			uint64_t ignore, void *context, fi_addr_t addr,
+			uint32_t op, uint32_t flags);
+void rxd_tx_entry_free(struct rxd_ep *ep, struct rxd_x_entry *tx_entry);
+void rxd_rx_entry_free(struct rxd_ep *ep, struct rxd_x_entry *rx_entry);
+int rxd_get_timeout(uint8_t retry_cnt);
+uint64_t rxd_get_retry_time(uint64_t start, uint8_t retry_cnt);
 
-void rxd_tx_pkt_free(struct rxd_pkt_meta *pkt_meta);
-void rxd_rx_entry_free(struct rxd_ep *ep, struct rxd_rx_entry *rx_entry);
+/* Generic message functions */
+ssize_t rxd_ep_generic_recvmsg(struct rxd_ep *rxd_ep, const struct iovec *iov,
+			       size_t iov_count, fi_addr_t addr, uint64_t tag,
+			       uint64_t ignore, void *context, uint32_t op,
+			       uint32_t rxd_flags, uint64_t flags);
+ssize_t rxd_ep_generic_sendmsg(struct rxd_ep *rxd_ep, const struct iovec *iov,
+			       size_t iov_count, fi_addr_t addr, uint64_t tag,
+			       uint64_t data, void *context, uint32_t op,
+			       uint32_t rxd_flags);
+ssize_t rxd_ep_generic_inject(struct rxd_ep *rxd_ep, const struct iovec *iov,
+			      size_t iov_count, fi_addr_t addr, uint64_t tag,
+			      uint64_t data, uint32_t op, uint32_t rxd_flags);
 
+/* Progress functions */
+void rxd_tx_entry_progress(struct rxd_ep *ep, struct rxd_x_entry *tx_entry,
+			   int try_send);
+void rxd_handle_recv_comp(struct rxd_ep *ep, struct fi_cq_msg_entry *comp);
+void rxd_handle_send_comp(struct rxd_ep *ep, struct fi_cq_msg_entry *comp);
+void rxd_handle_error(struct rxd_ep *ep);
+void rxd_progress_op(struct rxd_ep *ep, struct rxd_x_entry *rx_entry,
+		     struct rxd_pkt_entry *pkt_entry,
+		     struct rxd_base_hdr *base_hdr,
+		     struct rxd_sar_hdr *sar_hdr,
+		     struct rxd_tag_hdr *tag_hdr,
+		     struct rxd_data_hdr *data_hdr,
+		     struct rxd_rma_hdr *rma_hdr,
+		     struct rxd_atom_hdr *atom_hdr,
+		     void **msg, size_t size);
+void rxd_ep_recv_data(struct rxd_ep *ep, struct rxd_x_entry *x_entry,
+		      struct rxd_data_pkt *pkt, size_t size);
+void rxd_progress_tx_list(struct rxd_ep *ep, struct rxd_peer *peer);
+struct rxd_x_entry *rxd_progress_multi_recv(struct rxd_ep *ep,
+					    struct rxd_x_entry *rx_entry,
+					    size_t total_size);
+void rxd_ep_progress(struct util_ep *util_ep);
+void rxd_cleanup_unexp_msg(struct rxd_unexp_msg *unexp_msg);
 
 /* CQ sub-functions */
 void rxd_cq_report_error(struct rxd_cq *cq, struct fi_cq_err_entry *err_entry);
-void rxd_cq_report_tx_comp(struct rxd_cq *cq, struct rxd_tx_entry *tx_entry);
-void rxd_cntr_report_tx_comp(struct rxd_ep *ep, struct rxd_tx_entry *tx_entry);
+void rxd_cq_report_tx_comp(struct rxd_cq *cq, struct rxd_x_entry *tx_entry);
 
 #endif

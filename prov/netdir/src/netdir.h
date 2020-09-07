@@ -48,24 +48,25 @@
 extern "C" {
 #endif /* __cplusplus */
 
-#define OFI_ND_MAJOR_VERSION 1
-#define OFI_ND_MINOR_VERSION 5
 
 #define ND_MSG_IOV_LIMIT		(256)
 #define ND_MSG_INTERNAL_IOV_LIMIT	(512)
 #define ND_EP_MAX_CM_DATA_SIZE		(256)
 #define OFI_ND_MAX_MR_CNT		(1 << 16)
 
-#define OFI_ND_PRIMARY_CAPS					\
-	FI_MSG | FI_RMA | FI_SEND | FI_RECV |			\
-	FI_READ | FI_WRITE | FI_REMOTE_READ | FI_REMOTE_WRITE
-#define OFI_ND_CAPS OFI_ND_PRIMARY_CAPS
+#define OFI_ND_DOMAIN_CAPS	(FI_LOCAL_COMM | FI_REMOTE_COMM)
 
-#define OFI_ND_TX_OP_FLAGS					\
-	FI_INJECT | FI_COMPLETION | FI_TRANSMIT_COMPLETE |	\
-	FI_INJECT_COMPLETE | FI_DELIVERY_COMPLETE |		\
-	FI_SELECTIVE_COMPLETION
+#define OFI_ND_EP_CAPS	(FI_MSG | FI_RMA |			\
+			 FI_SEND | FI_RECV |			\
+			 FI_READ | FI_WRITE |			\
+			 FI_REMOTE_READ | FI_REMOTE_WRITE)
 
+#define OFI_ND_TX_OP_FLAGS	(FI_INJECT | FI_COMPLETION | FI_TRANSMIT_COMPLETE |	\
+				 FI_INJECT_COMPLETE | FI_DELIVERY_COMPLETE |		\
+				 FI_SELECTIVE_COMPLETION)
+
+#define OFI_ND_MSG_ORDER (OFI_ORDER_RAR_SET | OFI_ORDER_RAW_SET | FI_ORDER_RAS | \
+			OFI_ORDER_WAW_SET | FI_ORDER_WAS | FI_ORDER_SAW | FI_ORDER_SAS )
 
 extern struct gl_data {
 	int	inline_thr;
@@ -157,11 +158,30 @@ static inline size_t unique(void *base, size_t num, size_t width,
 	return n;
 }
 
+#define H2F(x) ofi_nd_hresult_2_fierror(x)
+
+static inline int ofi_nd_hresult_2_fierror(HRESULT hr)
+{
+	switch (hr) {
+	case S_OK:
+	case ND_PENDING:
+		return FI_SUCCESS;
+	case ND_BUFFER_OVERFLOW:
+		return -FI_EOVERFLOW;
+	case ND_CONNECTION_REFUSED:
+		return -FI_ECONNREFUSED;
+	case ND_TIMEOUT:
+		return -FI_ETIMEDOUT;
+	default:
+		return -FI_EOTHER;
+	}
+}
+
 #define OFI_ND_TIMEOUT_INIT(timeout)				\
 	uint64_t sfinish = ((timeout) >= 0) ?			\
-		(fi_gettime_ms() + (timeout) * 10000) : -1;
+		(ofi_gettime_ms() + (timeout) * 10000) : -1;
 
-#define OFI_ND_TIMEDOUT() ((sfinish > 0) ? fi_gettime_ms() >= sfinish : 0)
+#define OFI_ND_TIMEDOUT() ((sfinish > 0) ? ofi_gettime_ms() >= sfinish : 0)
 
 #ifdef ENABLE_DEBUG  
 # define NODEFAULT	assert(0)  

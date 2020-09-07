@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2018 Intel Corporation. All rights reserved.
+ * Copyright (c) 2013-2019 Intel Corporation. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -32,6 +32,38 @@
 
 #include "psmx2.h"
 
+#define PSMX2_EP_SET_TAGGED_OPS(suffix, msg_suffix)				\
+	do {									\
+		if (!send_completion && !recv_completion) {			\
+			ep->ep.tagged = &psmx2_tagged_ops_no_event##suffix;	\
+			FI_INFO(&psmx2_prov, FI_LOG_EP_DATA,			\
+				"tagged ops optimized for op_flags=0 "		\
+				"and event suppression "			\
+				msg_suffix					\
+				"\n");						\
+		} else if (!send_completion) {					\
+			ep->ep.tagged = &psmx2_tagged_ops_no_send_event##suffix;\
+			FI_INFO(&psmx2_prov, FI_LOG_EP_DATA,			\
+				"tagged ops optimized for op_flags=0 "		\
+				"and send event suppression "			\
+				msg_suffix					\
+				"\n");						\
+		} else if (!recv_completion) {					\
+			ep->ep.tagged = &psmx2_tagged_ops_no_recv_event##suffix;\
+			FI_INFO(&psmx2_prov, FI_LOG_EP_DATA,			\
+				"tagged ops optimized for op_flags=0 "		\
+				"and recv event suppression "			\
+				msg_suffix					\
+				"\n");						\
+		} else {							\
+			ep->ep.tagged = &psmx2_tagged_ops_no_flag##suffix;	\
+			FI_INFO(&psmx2_prov, FI_LOG_EP_DATA,			\
+				"tagged ops optimized for op_flags=0 "		\
+				msg_suffix					\
+				"\n");						\
+		}								\
+	} while (0)
+
 static void psmx2_ep_optimize_ops(struct psmx2_fid_ep *ep)
 {
 	int send_completion;
@@ -50,73 +82,23 @@ static void psmx2_ep_optimize_ops(struct psmx2_fid_ep *ep)
 			send_completion = !ep->send_selective_completion || ep->tx_flags & FI_COMPLETION;
 			recv_completion = !ep->recv_selective_completion || ep->rx_flags & FI_COMPLETION;
 
-			if (ep->caps & FI_DIRECTED_RECV) {
-				if (!send_completion && !recv_completion) {
-					if (ep->av && ep->av->type == FI_AV_TABLE)
-						ep->ep.tagged = &psmx2_tagged_ops_no_event_av_table_directed;
-					else
-						ep->ep.tagged = &psmx2_tagged_ops_no_event_av_map_directed;
-					FI_INFO(&psmx2_prov, FI_LOG_EP_DATA,
-						"tagged ops optimized for op_flags=0 and event suppression and directed receive\n");
-				} else if (!send_completion) {
-					if (ep->av && ep->av->type == FI_AV_TABLE)
-						ep->ep.tagged = &psmx2_tagged_ops_no_send_event_av_table_directed;
-					else
-						ep->ep.tagged = &psmx2_tagged_ops_no_send_event_av_map_directed;
-					FI_INFO(&psmx2_prov, FI_LOG_EP_DATA,
-						"tagged ops optimized for op_flags=0 and send event suppression and directed receive\n");
-				} else if (!recv_completion) {
-					if (ep->av && ep->av->type == FI_AV_TABLE)
-						ep->ep.tagged = &psmx2_tagged_ops_no_recv_event_av_table_directed;
-					else
-						ep->ep.tagged = &psmx2_tagged_ops_no_recv_event_av_map_directed;
-					FI_INFO(&psmx2_prov, FI_LOG_EP_DATA,
-						"tagged ops optimized for op_flags=0 and recv event suppression and directed receive\n");
-				} else {
-					if (ep->av && ep->av->type == FI_AV_TABLE)
-						ep->ep.tagged = &psmx2_tagged_ops_no_flag_av_table_directed;
-					else
-						ep->ep.tagged = &psmx2_tagged_ops_no_flag_av_map_directed;
-					FI_INFO(&psmx2_prov, FI_LOG_EP_DATA,
-						"tagged ops optimized for op_flags=0 and directed receive\n");
-				}
+			if (ep->av && ep->av->type == FI_AV_MAP) {
+				if (ep->caps & FI_DIRECTED_RECV)
+					PSMX2_EP_SET_TAGGED_OPS(_directed_av_map, "and directed receive and av map");
+				else
+					PSMX2_EP_SET_TAGGED_OPS(_undirected_av_map, "and av map");
 			} else {
-				if (!send_completion && !recv_completion) {
-					if (ep->av && ep->av->type == FI_AV_TABLE)
-						ep->ep.tagged = &psmx2_tagged_ops_no_event_av_table_undirected;
-					else
-						ep->ep.tagged = &psmx2_tagged_ops_no_event_av_map_undirected;
-					FI_INFO(&psmx2_prov, FI_LOG_EP_DATA,
-						"tagged ops optimized for op_flags=0 and event suppression\n");
-				} else if (!send_completion) {
-					if (ep->av && ep->av->type == FI_AV_TABLE)
-						ep->ep.tagged = &psmx2_tagged_ops_no_send_event_av_table_undirected;
-					else
-						ep->ep.tagged = &psmx2_tagged_ops_no_send_event_av_map_undirected;
-					FI_INFO(&psmx2_prov, FI_LOG_EP_DATA,
-						"tagged ops optimized for op_flags=0 and send event suppression\n");
-				} else if (!recv_completion) {
-					if (ep->av && ep->av->type == FI_AV_TABLE)
-						ep->ep.tagged = &psmx2_tagged_ops_no_recv_event_av_table_undirected;
-					else
-						ep->ep.tagged = &psmx2_tagged_ops_no_recv_event_av_map_undirected;
-					FI_INFO(&psmx2_prov, FI_LOG_EP_DATA,
-						"tagged ops optimized for op_flags=0 and recv event suppression\n");
-				} else {
-					if (ep->av && ep->av->type == FI_AV_TABLE)
-						ep->ep.tagged = &psmx2_tagged_ops_no_flag_av_table_undirected;
-					else
-						ep->ep.tagged = &psmx2_tagged_ops_no_flag_av_map_undirected;
-					FI_INFO(&psmx2_prov, FI_LOG_EP_DATA,
-						"tagged ops optimized for op_flags=0\n");
-				}
+				if (ep->caps & FI_DIRECTED_RECV)
+					PSMX2_EP_SET_TAGGED_OPS(_directed, "and directed receive");
+				else
+					PSMX2_EP_SET_TAGGED_OPS(_undirected, "");
 			}
 		}
-
 	}
 }
 
-static ssize_t psmx2_ep_cancel(fid_t fid, void *context)
+DIRECT_FN
+STATIC ssize_t psmx2_ep_cancel(fid_t fid, void *context)
 {
 	struct psmx2_fid_ep *ep;
 	psm2_mq_status2_t status;
@@ -165,7 +147,8 @@ static ssize_t psmx2_ep_cancel(fid_t fid, void *context)
 	return psmx2_errno(err);
 }
 
-static int psmx2_ep_getopt(fid_t fid, int level, int optname,
+DIRECT_FN
+STATIC int psmx2_ep_getopt(fid_t fid, int level, int optname,
 			   void *optval, size_t *optlen)
 {
 	struct psmx2_fid_ep *ep;
@@ -188,7 +171,8 @@ static int psmx2_ep_getopt(fid_t fid, int level, int optname,
 	return 0;
 }
 
-static int psmx2_ep_setopt(fid_t fid, int level, int optname,
+DIRECT_FN
+STATIC int psmx2_ep_setopt(fid_t fid, int level, int optname,
 			   const void *optval, size_t optlen)
 {
 	struct psmx2_fid_ep *ep;
@@ -275,12 +259,14 @@ static int psmx2_add_poll_ctxt(struct slist *list, struct psmx2_trx_ctxt *trx_ct
 	if (!item)
 		return -FI_ENOMEM;
 
+	ofi_atomic_inc32(&trx_ctxt->poll_refcnt);
 	item->trx_ctxt = trx_ctxt;
 	slist_insert_tail(&item->list_entry, list);
 	return 0;
 }
 
-static int psmx2_ep_bind(struct fid *fid, struct fid *bfid, uint64_t flags)
+DIRECT_FN
+STATIC int psmx2_ep_bind(struct fid *fid, struct fid *bfid, uint64_t flags)
 {
 	struct psmx2_fid_ep *ep;
 	struct psmx2_fid_av *av;
@@ -357,9 +343,9 @@ static int psmx2_ep_bind(struct fid *fid, struct fid *bfid, uint64_t flags)
 		ep->av = av;
 		psmx2_ep_optimize_ops(ep);
 		if (ep->tx)
-			psmx2_av_add_trx_ctxt(av, ep->tx, !psmx2_env.lazy_conn);
+			psmx2_av_add_trx_ctxt(av, ep->tx);
 		if (ep->rx && ep->rx != ep->tx)
-			psmx2_av_add_trx_ctxt(av, ep->rx, !psmx2_env.lazy_conn);
+			psmx2_av_add_trx_ctxt(av, ep->rx);
 		break;
 
 	case FI_CLASS_MR:
@@ -381,7 +367,11 @@ static int psmx2_ep_bind(struct fid *fid, struct fid *bfid, uint64_t flags)
 		err = psmx2_domain_enable_ep(ep->domain, ep);
 		if (err)
 			return err;
+#if HAVE_PSM2_MQ_FP_MSG
+		if (ep->caps & FI_TRIGGER)
+#else
 		if (ep->caps & (FI_RMA | FI_TRIGGER))
+#endif
 			stx->tx->am_progress = 1;
 		ofi_atomic_inc32(&stx->ref);
 		break;
@@ -425,7 +415,8 @@ static inline int psmx2_ep_get_flags(struct psmx2_fid_ep *ep, uint64_t *flags)
 	return 0;
 }
 
-static int psmx2_ep_control(fid_t fid, int command, void *arg)
+DIRECT_FN
+STATIC int psmx2_ep_control(fid_t fid, int command, void *arg)
 {
 	struct fi_alias *alias;
 	struct psmx2_fid_ep *ep, *new_ep;
@@ -477,7 +468,8 @@ static int psmx2_ep_control(fid_t fid, int command, void *arg)
 	return 0;
 }
 
-static ssize_t psmx2_rx_size_left(struct fid_ep *ep)
+DIRECT_FN
+STATIC ssize_t psmx2_rx_size_left(struct fid_ep *ep)
 {
 	struct psmx2_fid_ep *ep_priv;
 
@@ -488,7 +480,8 @@ static ssize_t psmx2_rx_size_left(struct fid_ep *ep)
 		return -FI_EOPBADSTATE;
 }
 
-static ssize_t psmx2_tx_size_left(struct fid_ep *ep)
+DIRECT_FN
+STATIC ssize_t psmx2_tx_size_left(struct fid_ep *ep)
 {
 	struct psmx2_fid_ep *ep_priv;
 
@@ -604,8 +597,11 @@ int psmx2_ep_open_internal(struct psmx2_fid_domain *domain_priv,
 	psmx2_ep_optimize_ops(ep_priv);
 
 	PSMX2_EP_INIT_OP_CONTEXT(ep_priv);
-
+#if HAVE_PSM2_MQ_FP_MSG
+	if ((ep_cap & FI_TRIGGER) && trx_ctxt)
+#else
 	if ((ep_cap & (FI_RMA | FI_TRIGGER)) && trx_ctxt)
+#endif
 		trx_ctxt->am_progress = 1;
 
 	*ep_out = ep_priv;
@@ -618,6 +614,7 @@ errout:
 	return err;
 }
 
+DIRECT_FN
 int psmx2_ep_open(struct fid_domain *domain, struct fi_info *info,
 		  struct fid_ep **ep, void *context)
 {
@@ -741,6 +738,7 @@ static struct fi_ops_ep psmx2_stx_ops = {
 	.tx_size_left = fi_no_tx_size_left,
 };
 
+DIRECT_FN
 int psmx2_stx_ctx(struct fid_domain *domain, struct fi_tx_attr *attr,
 		  struct fid_stx **stx, void *context)
 {
@@ -819,9 +817,9 @@ static int psmx2_sep_close(fid_t fid)
 			psmx2_ep_close_internal(sep->ctxts[i].ep);
 	}
 
-	psmx2_lock(&sep->domain->sep_lock, 1);
+	sep->domain->sep_lock_fn(&sep->domain->sep_lock, 1);
 	dlist_remove(&sep->entry);
-	psmx2_unlock(&sep->domain->sep_lock, 1);
+	sep->domain->sep_unlock_fn(&sep->domain->sep_lock, 1);
 
 	psmx2_domain_release(sep->domain);
 	free(sep);
@@ -846,7 +844,8 @@ static int psmx2_sep_control(fid_t fid, int command, void *arg)
 	return 0;
 }
 
-static int psmx2_sep_bind(struct fid *fid, struct fid *bfid, uint64_t flags)
+DIRECT_FN
+STATIC int psmx2_sep_bind(struct fid *fid, struct fid *bfid, uint64_t flags)
 {
 	struct psmx2_fid_sep *sep;
 	int i, err = 0;
@@ -862,7 +861,8 @@ static int psmx2_sep_bind(struct fid *fid, struct fid *bfid, uint64_t flags)
 	return err;
 }
 
-static int psmx2_tx_context(struct fid_ep *ep, int index, struct fi_tx_attr *attr,
+DIRECT_FN
+STATIC int psmx2_tx_context(struct fid_ep *ep, int index, struct fi_tx_attr *attr,
 			    struct fid_ep **tx_ep, void *context)
 {
 	struct psmx2_fid_sep *sep;
@@ -875,7 +875,8 @@ static int psmx2_tx_context(struct fid_ep *ep, int index, struct fi_tx_attr *att
 	return 0;
 }
 
-static int psmx2_rx_context(struct fid_ep *ep, int index, struct fi_rx_attr *attr,
+DIRECT_FN
+STATIC int psmx2_rx_context(struct fid_ep *ep, int index, struct fi_rx_attr *attr,
 			    struct fid_ep **rx_ep, void *context)
 {
 	struct psmx2_fid_sep *sep;
@@ -927,6 +928,7 @@ static struct fi_ops_ep psmx2_sep_ops = {
 	.tx_size_left = fi_no_tx_size_left,
 };
 
+DIRECT_FN
 int psmx2_sep_open(struct fid_domain *domain, struct fi_info *info,
 		   struct fid_ep **sep, void *context)
 {
@@ -947,18 +949,18 @@ int psmx2_sep_open(struct fid_domain *domain, struct fi_info *info,
 		goto errout;
 
 	if (info && info->ep_attr) {
-		if (info->ep_attr->tx_ctx_cnt > psmx2_env.max_trx_ctxt) {
+		if (info->ep_attr->tx_ctx_cnt > psmx2_hfi_info.max_trx_ctxt) {
 			FI_WARN(&psmx2_prov, FI_LOG_EP_CTRL,
 				"tx_ctx_cnt %"PRIu64" exceed limit %d.\n",
 				info->ep_attr->tx_ctx_cnt,
-				psmx2_env.max_trx_ctxt);
+				psmx2_hfi_info.max_trx_ctxt);
 			goto errout;
 		}
-		if (info->ep_attr->rx_ctx_cnt > psmx2_env.max_trx_ctxt) {
+		if (info->ep_attr->rx_ctx_cnt > psmx2_hfi_info.max_trx_ctxt) {
 			FI_WARN(&psmx2_prov, FI_LOG_EP_CTRL,
 				"rx_ctx_cnt %"PRIu64" exceed limit %d.\n",
 				info->ep_attr->rx_ctx_cnt,
-				psmx2_env.max_trx_ctxt);
+				psmx2_hfi_info.max_trx_ctxt);
 			goto errout;
 		}
 		ctxt_cnt = info->ep_attr->tx_ctx_cnt;
@@ -1030,10 +1032,12 @@ int psmx2_sep_open(struct fid_domain *domain, struct fi_info *info,
 				   ((uintptr_t)sep_priv & 0xFFFF);
 
 	sep_priv->id = ofi_atomic_inc32(&domain_priv->sep_cnt);
+	for (i = 0; i < ctxt_cnt; i++)
+		sep_priv->ctxts[i].ep->sep_id = sep_priv->id;
 
-	psmx2_lock(&domain_priv->sep_lock, 1);
+	domain_priv->sep_lock_fn(&domain_priv->sep_lock, 1);
 	dlist_insert_before(&sep_priv->entry, &domain_priv->sep_list);
-	psmx2_unlock(&domain_priv->sep_lock, 1);
+	domain_priv->sep_unlock_fn(&domain_priv->sep_lock, 1);
 
 	ep_name.epid = sep_priv->ctxts[0].trx_ctxt->psm2_epid;
 	ep_name.sep_id = sep_priv->id;

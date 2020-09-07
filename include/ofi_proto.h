@@ -58,6 +58,9 @@ enum {
 	ofi_ctrl_ack,
 	ofi_ctrl_nack,
 	ofi_ctrl_discard,
+	ofi_ctrl_seg_data,
+	ofi_ctrl_atomic,
+	ofi_ctrl_atomic_resp,
 };
 
 /*
@@ -66,13 +69,6 @@ enum {
  *
  * version: OFI_CTRL_VERSION
  * type
- * seg_size:
- *     Data packets - size of current message, in bytes.
- *     Large data packets - size of current message, 2 ^ seg_size, in bytes
- *     Ctrl packets - number of segments in window allowed past seg_no.
- * seg_no:
- *     Data packets - position 0..(n-1) of segment in current message.
- *     Ctrl packets - last segment ack'ed.
  * conn_id: Communication identifier.  Conn_id values are exchanged between
  *     peer endpoints as part of communication setup.  This field is valid
  *     as part of the first message in any data transfer.
@@ -80,6 +76,13 @@ enum {
  *     Unique number identifying all segments of a message
  *     Message id can be formed using an equation similar to:
  *     (seq_no++ << tx size) | tx_key
+ * seg_size:
+ *     Data packets - size of current message, in bytes.
+ *     Large data packets - size of current message, 2 ^ seg_size, in bytes
+ *     Ctrl packets - number of segments in window allowed past seg_no.
+ * seg_no:
+ *     Data packets - position 0..(n-1) of segment in current message.
+ *     Ctrl packets - last segment ack'ed.
  * conn_data: Connection specific data.  This may be set to the index
  *     of the transmit endpoint's address in its local AV, which may
  *     be used as a hint at the Rx side to locate the Tx EP address in
@@ -89,19 +92,21 @@ enum {
  * rx_key: This is the receiver's identifier for a message (receive side
  *     equivalent of msg_id).  Key returned by the Rx side, that the
  *     Tx side includes in subsequent packets.  This field is used for
- *     rendezvous and segmentation and reassembly protocols.
+ *     rendezvous protocol.
  *     The rx_key may be formed similar to message_id.
+ * ctrl_data: This is provider specific data for remote side
  */
 struct ofi_ctrl_hdr {
-	uint8_t			version;
-	uint8_t			type;
-	uint16_t		seg_size;
-	uint32_t		seg_no;
-	uint64_t		conn_id;
-	uint64_t		msg_id;
+	uint8_t				version;
+	uint8_t				type;
+	uint16_t			seg_size;
+	uint32_t			seg_no;
+	uint64_t			conn_id;
+	uint64_t			msg_id;
 	union {
-		uint64_t	conn_data;
-		uint64_t	rx_key;
+		uint64_t		conn_data;
+		uint64_t		rx_key;
+		uint64_t		ctrl_data;
 	};
 };
 
@@ -119,15 +124,18 @@ enum {
 	ofi_op_read_req,
 	ofi_op_read_rsp,
 	ofi_op_write,
-	ofi_op_write_rsp,
+	ofi_op_write_async,
 	ofi_op_atomic,
 	ofi_op_atomic_fetch,
 	ofi_op_atomic_compare,
+	ofi_op_read_async,
+	ofi_op_max,
 };
 
 #define OFI_REMOTE_CQ_DATA	(1 << 0)
 #define OFI_TRANSMIT_COMPLETE	(1 << 1)
 #define OFI_DELIVERY_COMPLETE	(1 << 2)
+#define OFI_COMMIT_COMPLETE	(1 << 3)
 
 /*
  * Common command header
