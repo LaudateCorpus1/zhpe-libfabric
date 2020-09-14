@@ -521,6 +521,9 @@ int zhpe_getinfo(uint32_t api_version, const char *node, const char *service,
 				info1->tx_attr->size = ZHPE_EP_DEF_TX_SZ;
 		} else
 			info1->tx_attr->size = ZHPE_EP_DEF_TX_SZ;
+
+		if (info1->caps & FI_RMA)
+			info1->tx_attr->inject_size = ZHPEQ_MAX_IMM;
 	}
 	for (info = info1->next; info; info = info->next) {
 		info->mode = info1->mode;
@@ -528,7 +531,7 @@ int zhpe_getinfo(uint32_t api_version, const char *node, const char *service,
 		info->rx_attr->mode = info1->rx_attr->mode;
 		info->rx_attr->size = info1->rx_attr->size;
 		info->tx_attr->mode = info1->tx_attr->mode;
-		info->tx_attr->size = info1->tx_attr->size;
+		info->tx_attr->inject_size = info1->tx_attr->inject_size;
 	}
 	ret = 0;
 
