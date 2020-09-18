@@ -112,6 +112,7 @@ extern int			zhpe_cq_def_sz;
 extern int			zhpe_eq_def_sz;
 extern int			zhpe_ep_queue_per_slice;
 extern int			zhpe_ep_queue_slice;
+extern int			zhpe_ep_queue_tc;
 extern int			zhpe_ep_rx_poll_timeout;
 extern size_t			zhpe_ep_max_eager_sz;
 extern int			zhpe_mr_cache_enable;

@@ -229,10 +229,11 @@ static int zhpe_ctx_qalloc(struct zhpe_ctx *zctx)
 
 	slice_mask = ALL_SLICES;
 	/* Allow slice to be specified via environment. */
-	if (!zhpe_ep_queue_per_slice && zhpe_ep_queue_slice >= 0)
+	if (zhpe_ep_queue_slice >= 0)
 		slice_mask = (SLICE_DEMAND | (1 << zhpe_ep_queue_slice));
 	/* High priority for ENQA. */
-	ret = zhpeq_tq_alloc(zqdom, tx_size, tx_size, 0, ZHPEQ_PRIO_HI,
+	ret = zhpeq_tq_alloc(zqdom, tx_size, tx_size,
+			     (zhpe_ep_queue_tc >> 8) & 0xFF, ZHPEQ_PRIO_HI,
 			     slice_mask, &zctx->ztq_hi);
 	if (ret < 0) {
 		ZHPE_LOG_ERROR("zhpe_tq_alloc() error %d\n", ret);
@@ -283,10 +284,6 @@ static int zhpe_ctx_qalloc(struct zhpe_ctx *zctx)
 		memcpy(zep->uuid, sz.sz_uuid, sizeof(zep->uuid));
 	zctx->lcl_gcid = zhpeu_uuid_to_gcid(sz.sz_uuid);
 	zctx->lcl_rspctxid = ntohl(sz.sz_queue);
-	zhpe_stats_stamp_dbg(__func__, __LINE__,
-			     zctx->lcl_gcid, zctx->lcl_rspctxid, 0,
-			     (zctx->ztq_hi->tqinfo.queue * ZHPE_MAX_SLICES +
-			      slice));
 	/* Low priority for RMA. */
 	for (i = 0; i < ZHPE_MAX_SLICES; i++) {
 		/*
@@ -296,7 +293,8 @@ static int zhpe_ctx_qalloc(struct zhpe_ctx *zctx)
 		slice &= (ZHPE_MAX_SLICES - 1);
 		slice_mask = SLICE_DEMAND | (1 << slice);
 		slice++;
-		ret = zhpeq_tq_alloc(zqdom, tx_size, tx_size, 0, ZHPEQ_PRIO_LO,
+		ret = zhpeq_tq_alloc(zqdom, tx_size, tx_size,
+				     zhpe_ep_queue_tc & 0xFF, ZHPEQ_PRIO_LO,
 				     slice_mask,
 				     &zctx->ztq_lo[zctx->tx_ztq_slices]);
 		if (ret < 0) {
@@ -314,7 +312,19 @@ static int zhpe_ctx_qalloc(struct zhpe_ctx *zctx)
 		ZHPE_LOG_ERROR("zhpeq_tq_alloc() error %d\n", ret);
 		goto done;
 	}
-
+	zhpe_stats_stamp_dbg(__func__, __LINE__,
+			     (uintptr_t)zctx, zctx->lcl_gcid,
+			     (uintptr_t)zctx->zrq, zctx->lcl_rspctxid);
+	zhpe_stats_stamp_dbgc((uintptr_t)zctx->ztq_hi,
+			      zhpeq_tq_rspctxid(zctx->ztq_hi),
+			      (uintptr_t)zctx->ztq_lo[0],
+			      zhpeq_tq_rspctxid(zctx->ztq_lo[0]),
+			      (uintptr_t)zctx->ztq_lo[1],
+			      zhpeq_tq_rspctxid(zctx->ztq_lo[1]));
+	zhpe_stats_stamp_dbgc((uintptr_t)zctx->ztq_lo[2],
+			      zhpeq_tq_rspctxid(zctx->ztq_lo[2]),
+			      (uintptr_t)zctx->ztq_lo[3],
+			      zhpeq_tq_rspctxid(zctx->ztq_lo[3]), 0, 0);
 	/* Allocate the ctx_ptrs array. */
 	i = zctx->tx_size + 1;
 	zctx->ctx_ptrs = calloc(i, sizeof(*zctx->ctx_ptrs));
