@@ -572,6 +572,10 @@ ZHPE_INI
 	fi_param_define(&zhpe_prov, "mr_cache_enable", FI_PARAM_BOOL,
 			"Enable/disable registration cache");
 
+	fi_param_define(&zhpe_prov, "dom_progress_override", FI_PARAM_INT,
+			"Override domain progress, 1 => AUTO,"
+			" 2 => MANUAL, 3 => MANUAL_ALL");
+
 	fi_param_define(&zhpe_prov, "queue_per_slice", FI_PARAM_BOOL,
 			"If true, ep uses one RMA queue per slice");
 
@@ -584,6 +588,8 @@ ZHPE_INI
 	fi_param_get_int(&zhpe_prov, "def_av_sz", &zhpe_av_def_sz);
 	fi_param_get_int(&zhpe_prov, "def_cq_sz", &zhpe_cq_def_sz);
 	fi_param_get_int(&zhpe_prov, "def_eq_sz", &zhpe_eq_def_sz);
+	fi_param_get_int(&zhpe_prov, "dom_progress_override",
+			 &zhpe_dom_progress_override);
 	fi_param_get_int(&zhpe_prov, "ep_rx_poll_timeout",
 			 &zhpe_ep_rx_poll_timeout);
 	fi_param_get_size_t(&zhpe_prov, "ep_max_eager_sz",

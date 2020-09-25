@@ -35,6 +35,11 @@
 
 #define ZHPE_SUBSYS	FI_LOG_CNTR
 
+static void cntr_progress_all(struct util_cntr *cntr)
+{
+	zhpe_dom_all_progress(zcntr2zdom(ucntr2zcntr(cntr)));
+}
+
 static void cntr_progress_dummy(struct util_cntr *cntr)
 {
 }
@@ -94,17 +99,29 @@ int zhpe_cntr_open(struct fid_domain *fid_domain, struct fi_cntr_attr *attr,
 	*fid_cntr = NULL;
 	if (!fid_domain || !attr)
 		goto done;
+	switch (zdom->zhpe_progress) {
+
+	case FI_ZHPE_PROGRESS_AUTO:
+		progress = cntr_progress_dummy;
+		break;
+
+	case FI_ZHPE_PROGRESS_MANUAL:
+		progress = ofi_cntr_progress;
+		break;
+
+	case FI_ZHPE_PROGRESS_MANUAL_ALL:
+		progress = cntr_progress_all;
+		break;
+
+	default:
+		abort();
+	}
 
 	zcntr = calloc(1, sizeof(*zcntr));
 	if (!zcntr) {
 		ret = -FI_ENOMEM;
 		goto done;
 	}
-
-	if (zdom->util_domain.data_progress == FI_PROGRESS_MANUAL)
-		progress = ofi_cntr_progress;
-	else
-		progress = cntr_progress_dummy;
 
 	ret = ofi_cntr_init(&zhpe_prov, fid_domain, attr, &zcntr->util_cntr,
 			    progress, context);

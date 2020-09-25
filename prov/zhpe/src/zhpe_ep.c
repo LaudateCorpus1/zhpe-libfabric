@@ -85,11 +85,9 @@ static int do_shutdown(struct zhpe_ctx *zctx)
 	zctx_lock(zctx);
 	for (i = 1; i < zctx->conn_pool.max_index; i++) {
 		if (i % 0x1F == 0) {
-			/*
-			 * May drop and reacquire zctx_lock() or
-			 * yield the core.
-			 */
+			/* Will drop zctx_lock(); may yield the core. */
 			zhpe_ctx_cleanup_progress(zctx, true);
+			zctx_lock(zctx);
 		}
 		conn = zhpe_ibuf_get(&zctx->conn_pool, i);
 		if (!conn)
@@ -125,8 +123,9 @@ static int do_shutdown(struct zhpe_ctx *zctx)
 					     !conn->rx_zseq.rx_oos_list);
 			break;
 		}
-		/* May drop and reacquire zctx_lock() or yield the core. */
+		/* Will drop zctx_lock(); may yield the core. */
 		zhpe_ctx_cleanup_progress(zctx, true);
+		zctx_lock(zctx);
 	}
 	ofi_rbmap_walk(&zctx->rkey_tree, NULL, rkey_cleanup_walk);
 	zctx_unlock(zctx);
@@ -178,11 +177,15 @@ static int zhpe_ctx_shutdown(struct zhpe_ctx *zctx)
 static int zhpe_ctx_qfree(struct zhpe_ctx *zctx)
 {
 	int			ret = 0;
+	struct zhpe_dom		*zdom = zctx2zdom(zctx);
 	int			rc;
 	uint			i;
 
 	/* Close connections and free queues. */
 	zhpe_ctx_shutdown(zctx);
+	fastlock_acquire(&zdom->ctx_list_lock);
+	dlist_remove_init(&zctx->dom_dentry);
+	fastlock_release(&zdom->ctx_list_lock);
 	zhpe_pe_del_ctx(zctx);
 	zctx_lock(zctx);
 	zhpe_conn_cleanup(zctx);
@@ -264,7 +267,7 @@ static int zhpe_ctx_qalloc(struct zhpe_ctx *zctx)
 			goto done;
 		}
 	}
-	if (zdom->util_domain.data_progress != FI_PROGRESS_MANUAL) {
+	if (zdom->zhpe_progress == FI_ZHPE_PROGRESS_AUTO) {
 		ret = zhpeq_rq_epoll_add(zdom->pe->zepoll, zctx->zrq,
 					 zhpe_pe_epoll_handler, zctx,
 					 zhpe_ep_rx_poll_timeout, false);
@@ -342,8 +345,12 @@ static int zhpe_ctx_qalloc(struct zhpe_ctx *zctx)
 	ret = 0;
 
  done:
-	if (ret >= 0)
+	if (ret >= 0) {
+		fastlock_acquire(&zdom->ctx_list_lock);
+		dlist_insert_tail(&zctx->dom_dentry, &zdom->ctx_list);
+		fastlock_release(&zdom->ctx_list_lock);
 		zhpe_pe_add_ctx(zctx);
+	}
 
 	return ret;
 }
@@ -1203,8 +1210,9 @@ static int zhpe_ctx_alloc(struct zhpe_ep *zep, uint8_t ctx_idx,
 {
 	int			ret = -FI_ENOMEM;
 	struct fi_info		*info = zep->info;
+	struct zhpe_dom		*zdom = zep->zdom;
+	void			(*progress)(struct util_ep *ep) = NULL;
 	struct zhpe_ctx		*zctx;
-	void			(*progress)(struct util_ep *ep);
 	size_t			buffer_size;
 
 	zctx = calloc_cachealigned(1, sizeof(*zctx));
@@ -1226,12 +1234,22 @@ static int zhpe_ctx_alloc(struct zhpe_ep *zep, uint8_t ctx_idx,
 	dlist_init(&zctx->rx_work_list);
 	ofi_rbmap_init(&zctx->rkey_tree, zhpe_compare_mem_tkeys);
 
-	if (zep->zdom->util_domain.data_progress == FI_PROGRESS_MANUAL) {
-		progress = zhpe_ofi_ep_progress;
-		zctx->pe_ctx_ops = &zhpe_pe_ctx_ops_manual;
-	} else {
-		progress = NULL;
+	switch (zdom->zhpe_progress) {
+
+	case FI_ZHPE_PROGRESS_AUTO:
 		zctx->pe_ctx_ops = &zhpe_pe_ctx_ops_auto_tx_idle;
+		break;
+
+	case FI_ZHPE_PROGRESS_MANUAL:
+		progress = zhpe_ofi_ep_progress;
+		/* FALLTHROUGH */
+
+	case FI_ZHPE_PROGRESS_MANUAL_ALL:
+		zctx->pe_ctx_ops = &zhpe_pe_ctx_ops_manual;
+		break;
+
+	default:
+		abort();
 	}
 
 	ret = ofi_endpoint_init(&zep->zdom->util_domain.domain_fid,

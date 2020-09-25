@@ -1572,26 +1572,50 @@ static int pe_ctx_age_tx(struct zhpe_pe *pe, struct zhpe_ctx *zctx)
 void zhpe_ctx_cleanup_progress(struct zhpe_ctx *zctx, bool locked)
 {
 	struct zhpe_dom		*zdom = zctx2zdom(zctx);
-	int			rc;
 
-	if (zdom->util_domain.data_progress == FI_PROGRESS_MANUAL) {
-		if (!locked)
-			zctx_lock(zctx);
-		rc = ctx_progress_rx(zctx) | ctx_progress_tx(zctx);
-		if (!rc) {
+	switch (zdom->zhpe_progress) {
+
+	case FI_ZHPE_PROGRESS_AUTO:
+		if (locked)
 			zctx_unlock(zctx);
-			zhpeu_yield();
-			if (locked)
-				zctx_lock(zctx);
-		} else if (!locked)
-			zctx_unlock(zctx);
-	}
-	else if (locked) {
+		zhpeu_yield();
+		break;
+
+	case FI_ZHPE_PROGRESS_MANUAL:
+		if (!locked && !zctx_trylock(zctx))
+			break;
+		ctx_progress_rx(zctx);
+		ctx_progress_tx(zctx);
 		zctx_unlock(zctx);
-		zhpeu_yield();
-		zctx_lock(zctx);
-	} else
-		zhpeu_yield();
+		break;
+
+	case FI_ZHPE_PROGRESS_MANUAL_ALL:
+		if (locked)
+			zctx_unlock(zctx);
+		zhpe_dom_all_progress(zctx2zdom(zctx));
+		break;
+
+	default:
+		abort();
+	}
+}
+
+void zhpe_dom_all_progress(struct zhpe_dom *zdom)
+{
+	struct zhpe_ctx		*zctx;
+
+	/* Manual progress for all contexts in the domain. */
+	if (fastlock_tryacquire(&zdom->ctx_list_lock))
+		return;
+	dlist_foreach_container(&zdom->ctx_list, struct zhpe_ctx,
+				zctx, dom_dentry) {
+		if (!zctx_trylock(zctx))
+			continue;
+		ctx_progress_rx(zctx);
+		ctx_progress_tx(zctx);
+		zctx_unlock(zctx);
+	}
+	fastlock_release(&zdom->ctx_list_lock);
 }
 
 void zhpe_ofi_ep_progress(struct util_ep *ep)
@@ -1707,7 +1731,7 @@ void zhpe_pe_add_ctx(struct zhpe_ctx *zctx)
 {
 	struct zhpe_dom		*zdom = zctx2zdom(zctx);
 
-	if (zctx2zdom(zctx)->util_domain.data_progress != FI_PROGRESS_MANUAL)
+	if (zctx2zdom(zctx)->zhpe_progress == FI_ZHPE_PROGRESS_AUTO)
 		pe_work_queue(zdom->pe, pe_add_ctx, zctx);
 }
 
@@ -1725,7 +1749,7 @@ void zhpe_pe_del_ctx(struct zhpe_ctx *zctx)
 {
 	struct zhpe_dom		*zdom = zctx2zdom(zctx);
 
-	if (zctx2zdom(zctx)->util_domain.data_progress != FI_PROGRESS_MANUAL)
+	if (zctx2zdom(zctx)->zhpe_progress == FI_ZHPE_PROGRESS_AUTO)
 		pe_work_queue(zdom->pe, pe_del_ctx, zctx);
 }
 

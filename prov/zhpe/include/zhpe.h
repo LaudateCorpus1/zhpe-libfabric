@@ -109,6 +109,7 @@ void gdb_hook(void);
 extern int			zhpe_av_def_sz;
 extern char			*zhpe_conn_flowctl_table;
 extern int			zhpe_cq_def_sz;
+extern int			zhpe_dom_progress_override;
 extern int			zhpe_eq_def_sz;
 extern int			zhpe_ep_queue_per_slice;
 extern int			zhpe_ep_queue_slice;
@@ -428,6 +429,14 @@ enum {
 /* Provider-specific "op" flag. */
 #define FI_ZHPE_RMA_ZERO_OFF	((uint64_t)1 << 63)
 
+/* Provider-specific progress. */
+enum zhpe_progress {
+	FI_ZHPE_PROGRESS_UNSPEC	= 0,
+	FI_ZHPE_PROGRESS_AUTO,
+	FI_ZHPE_PROGRESS_MANUAL,
+	FI_ZHPE_PROGRESS_MANUAL_ALL,
+};
+
 struct zhpe_conn_tree_key {
 	uint32_t	        rem_gcid;
 	uint32_t		rem_rspctxid0;
@@ -560,6 +569,11 @@ struct zhpe_dom {
 
 	struct ofi_rbmap	kexp_tree;
 	pthread_mutex_t		kexp_teardown_mutex;
+
+	/* For manual-all progress, a list of all contexts in the domain. */
+	enum zhpe_progress	zhpe_progress;
+	fastlock_t		ctx_list_lock;
+	struct dlist_entry	ctx_list;
 
 	bool			mr_events;
 };
@@ -942,6 +956,7 @@ struct zhpe_ctx {
 	struct util_ep		util_ep;
 	struct zhpe_ep_fid	rx_ep;
 
+	struct dlist_entry      dom_dentry;
 	struct dlist_entry	pe_dentry;
 	struct zhpe_pe_ctx_ops	*pe_ctx_ops;
 	struct dlist_entry	tx_dequeue_list;
@@ -1466,6 +1481,7 @@ void zhpe_pe_add_ctx(struct zhpe_ctx *zctx);
 void zhpe_pe_del_ctx(struct zhpe_ctx *zctx);
 void zhpe_pe_epoll_handler(struct zhpeq_rq *zrq, void *handler_data);
 void zhpe_ofi_ep_progress(struct util_ep *util_ep);
+void zhpe_dom_all_progress(struct zhpe_dom *zdom);
 void zhpe_ctx_cleanup_progress(struct zhpe_ctx *zctx, bool locked);
 
 void zhpe_rx_peek_recv(struct zhpe_ctx *zctx,

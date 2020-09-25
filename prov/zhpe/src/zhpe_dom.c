@@ -35,6 +35,11 @@
 
 #define ZHPE_SUBSYS	FI_LOG_DOMAIN
 
+/* Assumptions. */
+static_assert((int)FI_ZHPE_PROGRESS_AUTO == (int)FI_PROGRESS_AUTO, "AUTO");
+static_assert((int)FI_ZHPE_PROGRESS_MANUAL == (int)FI_PROGRESS_MANUAL,
+	      "MANUAL");
+
 static void dom_mr_free(struct zhpe_mr *zmr)
 {
 	struct zhpe_dom		*zdom = zmr->zdom;
@@ -89,6 +94,7 @@ static int zhpe_dom_close(struct fid *fid)
 	ret = zhpeu_update_error(ret, zhpeq_domain_free(zdom->zqdom));
 	zhpe_bufpool_destroy(&zdom->zmr_pool);
 	ret = zhpeu_update_error(ret, ofi_domain_close(&zdom->util_domain));
+	fastlock_destroy(&zdom->ctx_list_lock);
 	mutex_destroy(&zdom->kexp_teardown_mutex);
 	ofi_rbmap_cleanup(&zdom->kexp_tree);
 	free(zdom);
@@ -184,7 +190,7 @@ static int zhpe_mr_close(struct fid *fid)
 				/* Do progress. */
 				zdom_unlock(zdom);
 				/*
-				 * May acquire and drop zctx_lock();
+-				 * May acquire and drop zctx_lock();
 				 * may also yield the core.
 				 */
 				zhpe_ctx_cleanup_progress(kexp->conn->zctx,
@@ -602,6 +608,9 @@ int zhpe_domain(struct fid_fabric *fid_fabric, struct fi_info *info,
 		struct fid_domain **fid_domain, void *context)
 {
 	int			ret = -FI_EINVAL;
+	int			fi_progress = info->domain_attr->data_progress;
+	int			zhpe_progress;
+	struct fi_info		*info2 = info;
 	struct zhpe_dom		*zdom = NULL;
 	struct zhpe_fabric	*zfab;
 
@@ -611,34 +620,52 @@ int zhpe_domain(struct fid_fabric *fid_fabric, struct fi_info *info,
 	if (!fid_fabric || !info || !info->domain_attr)
 		goto done;
 
-	zfab = fid2zfab(&fid_fabric->fid);
+	switch (zhpe_dom_progress_override) {
 
-	ret = ofi_check_domain_attr(&zhpe_prov, zfab_api_version(zfab),
-				    &zhpe_domain_attr, info);
-	if (ret < 0) {
-		free(zdom);
-		goto done;
+	case FI_ZHPE_PROGRESS_AUTO:
+	case FI_ZHPE_PROGRESS_MANUAL:
+		fi_progress = zhpe_dom_progress_override;
+		zhpe_progress = fi_progress;
+		break;
+
+	case FI_ZHPE_PROGRESS_MANUAL_ALL:
+		fi_progress = FI_PROGRESS_MANUAL;
+		zhpe_progress = zhpe_dom_progress_override;
+		break;
+
+	default:
+		zhpe_progress = fi_progress;
+		break;
 	}
 
 	ret = -FI_ENOMEM;
+	if (info2->domain_attr->data_progress != fi_progress) {
+		info2 = fi_dupinfo(info);
+		if (!info2)
+			goto done;
+		info2->domain_attr->data_progress = fi_progress;
+	}
+
 	zdom = calloc_cachealigned(1, sizeof(*zdom));
 	if (!zdom)
 		goto done;
 	dlist_init(&zdom->zmr_list);
 	ofi_rbmap_init(&zdom->kexp_tree, zhpe_compare_mem_tkeys);
 	mutex_init(&zdom->kexp_teardown_mutex, NULL);
+	fastlock_init(&zdom->ctx_list_lock);
+	dlist_init(&zdom->ctx_list);
+	zdom->zhpe_progress = zhpe_progress;
 
-	ret = ofi_domain_init(&zfab->util_fabric.fabric_fid, info,
-			      &zdom->util_domain, context);
-
-	if (zdom->util_domain.data_progress != FI_PROGRESS_MANUAL)
-		zdom->util_domain.threading = FI_THREAD_SAFE;
-
-	if (ret < 0) {
-		free(zdom);
-		zdom = NULL;
+	zfab = fid2zfab(&fid_fabric->fid);
+	ret = ofi_check_domain_attr(&zhpe_prov, zfab_api_version(zfab),
+				    &zhpe_domain_attr, info2);
+	if (ret < 0)
 		goto done;
-	}
+
+	ret = ofi_domain_init(&zfab->util_fabric.fabric_fid, info2,
+			      &zdom->util_domain, context);
+	if (ret < 0)
+		goto done;
 
 	/* Fixups. */
 	zdom->util_domain.threading = FI_THREAD_SAFE;
@@ -670,7 +697,7 @@ int zhpe_domain(struct fid_fabric *fid_fabric, struct fi_info *info,
 	if (ret < 0)
 		goto done;
 
-	if (zdom->util_domain.data_progress != FI_PROGRESS_MANUAL) {
+	if (zdom->zhpe_progress == FI_ZHPE_PROGRESS_AUTO) {
 		zdom->pe = zhpe_pe_init(zdom);
 		if (!zdom->pe) {
 			ret = -FI_ENOMEM;
@@ -684,6 +711,8 @@ int zhpe_domain(struct fid_fabric *fid_fabric, struct fi_info *info,
 	zdom->util_domain.domain_fid.mr = &zhpe_dom_mr_ops;
 
  done:
+	if (info2 && info2 != info)
+		fi_freeinfo(info2);
 	if (ret < 0 && zdom)
 		zhpe_dom_close(&zdom->util_domain.domain_fid.fid);
 
