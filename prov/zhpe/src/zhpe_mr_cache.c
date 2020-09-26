@@ -35,10 +35,6 @@
 
 #define ZHPE_SUBSYS	FI_LOG_DOMAIN
 
-#define QACCESS_RD	(ZHPEQ_MR_PUT | ZHPEQ_MR_GET_REMOTE | ZHPEQ_MR_SEND)
-#define QACCESS_WR	(ZHPEQ_MR_GET | ZHPEQ_MR_PUT_REMOTE | ZHPEQ_MR_RECV)
-#define QACCESS_RW	(QACCESS_RD | QACCESS_WR)
-
 struct zhpe_mr_cache_data {
 	struct zhpeq_key_data	*qkdata;
 };
@@ -104,8 +100,8 @@ static int zhpe_mr_reg_cached(struct zhpe_dom *zdom, const void *buf,
 		}
 		break;
 	}
-	if ((cdata->qkdata->z.access & qaccess & QACCESS_RW) !=
-	    (qaccess & QACCESS_RW)) {
+	if ((cdata->qkdata->z.access & qaccess & ZHPEQ_ACCESS_RW) !=
+	    (qaccess & ZHPEQ_ACCESS_RW)) {
 		ret = -EFAULT;
 		ofi_mr_cache_delete(&zdom->cache, entry);
 		goto done;
@@ -146,16 +142,9 @@ static int zhpe_mr_cache_add_region(struct ofi_mr_cache *cache,
 
 	/* Flush shot down registrations before new registration. */
 	ofi_mr_cache_flush(cache, false);
-	ret = zhpeq_mr_reg(zdom->zqdom, buf, len, QACCESS_RW, &cdata->qkdata);
-	if (ret < 0) {
-		if (ret != -EFAULT)
-			goto done;
-		/* Possible read-only mapping. */
-		ret = zhpeq_mr_reg(zdom->zqdom, buf, len, QACCESS_RD,
-				   &cdata->qkdata);
-		if (ret < 0)
-			goto done;
-	}
+	ret = zhpeq_mr_reg(zdom->zqdom, buf, len, 0, &cdata->qkdata);
+	if (ret < 0)
+		goto done;
 	cdata->qkdata->cache_entry = entry;
 
  done:
