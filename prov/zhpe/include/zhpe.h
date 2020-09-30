@@ -108,6 +108,7 @@ void gdb_hook(void);
 
 extern int			zhpe_av_def_sz;
 extern char			*zhpe_conn_flowctl_table;
+extern int			zhpe_conn_seed;
 extern int			zhpe_cq_def_sz;
 extern int			zhpe_dom_progress_override;
 extern int			zhpe_eq_def_sz;
@@ -1612,7 +1613,8 @@ void zhpe_conn_connect_status_rx(struct zhpe_conn *conn, struct zhpe_msg *msg);
 struct zhpe_conn *zhpe_conn_av_lookup(struct zhpe_ctx *zctx, fi_addr_t fiaddr);
 int zhpe_conn_init(struct zhpe_ctx *zctx);
 void zhpe_conn_fini(struct zhpe_ctx *zctx);
-int zhpe_conn_init_flowctl(const char *table);
+void zhpe_conn_init_flowctl(const char *table);
+void zhpe_conn_init_seed(int seed);
 void zhpe_conn_flowctl(struct zhpe_conn *conn, uint8_t retry_idx);
 void zhpe_conn_cleanup(struct zhpe_ctx *zctx);
 void zhpe_conn_counters(struct zhpe_ctx *zctx,

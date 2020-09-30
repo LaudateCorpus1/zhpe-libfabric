@@ -211,6 +211,7 @@ int	zhpe_av_def_sz		= ZHPE_AV_DEF_SZ;
 int	zhpe_cq_def_sz		= ZHPE_CQ_DEF_SZ;
 int	zhpe_dom_progress_override;
 char	*zhpe_conn_flowctl_table;
+int	zhpe_conn_seed;
 int	zhpe_eq_def_sz		= ZHPE_EQ_DEF_SZ;
 int	zhpe_ep_rx_poll_timeout	= ZHPE_EP_RX_POLL_TIMEOUT;
 size_t	zhpe_ep_max_eager_sz	= ZHPE_EP_DEF_MAX_EAGER;

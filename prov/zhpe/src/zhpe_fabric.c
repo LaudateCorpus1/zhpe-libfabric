@@ -569,6 +569,9 @@ ZHPE_INI
 	fi_param_define(&zhpe_prov, "flowctl_table", FI_PARAM_STRING,
 			"Pathname of flow control table file");
 
+	fi_param_define(&zhpe_prov, "seed", FI_PARAM_INT,
+			"Seed for random state used in connection setup");
+
 	fi_param_define(&zhpe_prov, "mr_cache_enable", FI_PARAM_BOOL,
 			"Enable/disable registration cache");
 
@@ -595,12 +598,14 @@ ZHPE_INI
 	fi_param_get_size_t(&zhpe_prov, "ep_max_eager_sz",
 			    &zhpe_ep_max_eager_sz);
 	fi_param_get_str(&zhpe_prov, "flowctl_table", &zhpe_conn_flowctl_table);
+	fi_param_get_int(&zhpe_prov, "seed", &zhpe_conn_seed);
 	fi_param_get_bool(&zhpe_prov, "mr_cache_enable", &zhpe_mr_cache_enable);
 	fi_param_get_bool(&zhpe_prov, "queue_per_slice",
 			  &zhpe_ep_queue_per_slice);
 	fi_param_get_int(&zhpe_prov, "queue_slice", &zhpe_ep_queue_slice);
 	fi_param_get_int(&zhpe_prov, "queue_tc", &zhpe_ep_queue_tc);
 
+	zhpe_conn_init_seed(zhpe_conn_seed);
 	zhpe_conn_init_flowctl(zhpe_conn_flowctl_table);
 
 	return &zhpe_prov;

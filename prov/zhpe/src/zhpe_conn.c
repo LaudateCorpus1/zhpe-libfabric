@@ -56,9 +56,13 @@ static struct conn_flowctl_v0 conn_flowctl_default = {
 	.delay			= { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 40, 80 },
 };
 
+static fastlock_t		rand_lock;
+static uint64_t			rand_state[32];
+static struct random_data	rand_data;
+
 static struct conn_flowctl_v0	*conn_flowctl;
 
-int zhpe_conn_init_flowctl(const char *table)
+void zhpe_conn_init_flowctl(const char *table)
 {
 	uint32_t		i;
 
@@ -75,9 +79,23 @@ int zhpe_conn_init_flowctl(const char *table)
 			nsec_to_cycles(conn_flowctl->time_unit *
 				       conn_flowctl->delay[i]);
 	conn_flowctl->delay_entries--;
-
-	return 0;
 }
+
+void zhpe_conn_init_seed(int seed)
+{
+	int			rc MAYBE_UNUSED;
+
+	/*
+	 * We just want to make sure our use of random() doesn't interfere
+	 * with others benchmarks and such. We don't really care about
+	 * quality, but why not the best?
+	 */
+	fastlock_init(&rand_lock);
+	rc = initstate_r(seed, (char *)rand_state, sizeof(rand_state),
+			 &rand_data);
+	assert(!rc);
+}
+
 
 void zhpe_conn_flowctl(struct zhpe_conn *conn, uint8_t retry_idx)
 {
@@ -292,6 +310,8 @@ static int conn_dequeue_connect(struct zhpe_conn *conn)
 struct zhpe_conn *zhpe_conn_alloc(struct zhpe_ctx *zctx)
 {
 	struct zhpe_conn	*conn;
+	int32_t			rand_result;
+	int			rc MAYBE_UNUSED;
 
 	conn = zhpe_ibuf_alloc(&zctx->conn_pool);
 	conn->zctx = zctx;
@@ -306,7 +326,11 @@ struct zhpe_conn *zhpe_conn_alloc(struct zhpe_ctx *zctx)
 	conn->rx_zseq.alloc = zhpe_rx_oos_alloc;
 	conn->rx_zseq.free = zhpe_rx_oos_free;
 	do {
-		conn->rx_zseq.seq = random();
+		fastlock_acquire(&rand_lock);
+		rc = random_r(&rand_data, &rand_result);
+		fastlock_release(&rand_lock);
+		assert(!rc);
+		conn->rx_zseq.seq = rand_result;
 	} while (!conn->rx_zseq.seq);
 	conn->fiaddr = FI_ADDR_NOTAVAIL;
 
@@ -796,7 +820,7 @@ struct zhpe_conn *zhpe_conn_av_lookup(struct zhpe_ctx *zctx, fi_addr_t fiaddr)
 	struct zhpe_dom		*zdom;
 	char			blob[ZHPE_MAX_MSG_PAYLOAD];
 	size_t			blob_len;
-	int			rc MAYBE_UNUSED;
+	int			rc;
 
 	conn = ofi_idm_lookup(&zctx->conn_av_idm, av_idx);
 	if (OFI_LIKELY(conn != NULL))
