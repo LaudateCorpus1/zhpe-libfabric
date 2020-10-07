@@ -85,6 +85,9 @@ void zhpe_conn_init_seed(int seed)
 {
 	int			rc MAYBE_UNUSED;
 
+	/* If no seed specified, generate one. */
+	if (!seed)
+		seed = get_cycles(NULL) + getpid();
 	/*
 	 * We just want to make sure our use of random() doesn't interfere
 	 * with others benchmarks and such. We don't really care about
