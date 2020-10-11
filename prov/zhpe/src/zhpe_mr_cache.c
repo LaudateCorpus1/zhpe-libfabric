@@ -50,8 +50,8 @@ static int zhpe_mr_reg_cached(struct zhpe_dom *zdom, const void *buf,
 {
 	int			ret;
 	struct iovec		iov = {
-		.iov_base	= (void *)buf,
-		.iov_len	= len,
+		.iov_base	= TO_PTR(page_down((uintptr_t)buf)),
+		.iov_len	= page_up(page_off((uintptr_t)buf) + len),
 	};
 	struct fi_mr_attr	attr = {
 		.mr_iov		= &iov,
