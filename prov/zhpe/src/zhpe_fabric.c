@@ -521,6 +521,9 @@ int zhpe_getinfo(uint32_t api_version, const char *node, const char *service,
 				info1->tx_attr->size = ZHPE_EP_DEF_TX_SZ;
 		} else
 			info1->tx_attr->size = ZHPE_EP_DEF_TX_SZ;
+
+		if (info1->caps & FI_RMA)
+			info1->tx_attr->inject_size = ZHPEQ_MAX_IMM;
 	}
 	for (info = info1->next; info; info = info->next) {
 		info->mode = info1->mode;
@@ -528,7 +531,7 @@ int zhpe_getinfo(uint32_t api_version, const char *node, const char *service,
 		info->rx_attr->mode = info1->rx_attr->mode;
 		info->rx_attr->size = info1->rx_attr->size;
 		info->tx_attr->mode = info1->tx_attr->mode;
-		info->tx_attr->size = info1->tx_attr->size;
+		info->tx_attr->inject_size = info1->tx_attr->inject_size;
 	}
 	ret = 0;
 
@@ -569,15 +572,24 @@ ZHPE_INI
 	fi_param_define(&zhpe_prov, "mr_cache_enable", FI_PARAM_BOOL,
 			"Enable/disable registration cache");
 
+	fi_param_define(&zhpe_prov, "dom_progress_override", FI_PARAM_INT,
+			"Override domain progress, 1 => AUTO,"
+			" 2 => MANUAL, 3 => MANUAL_ALL");
+
 	fi_param_define(&zhpe_prov, "queue_per_slice", FI_PARAM_BOOL,
-			"Enable/disable ep uses one queue per slice");
+			"If true, ep uses one RMA queue per slice");
 
 	fi_param_define(&zhpe_prov, "queue_slice", FI_PARAM_INT,
-			"If queue_per_slice false, specifies slice for queue");
+			"Specifies slice for first tx/rx queues");
+
+	fi_param_define(&zhpe_prov, "queue_tc", FI_PARAM_INT,
+			"Traffic classes for high/low priorty queues 0xHHLL");
 
 	fi_param_get_int(&zhpe_prov, "def_av_sz", &zhpe_av_def_sz);
 	fi_param_get_int(&zhpe_prov, "def_cq_sz", &zhpe_cq_def_sz);
 	fi_param_get_int(&zhpe_prov, "def_eq_sz", &zhpe_eq_def_sz);
+	fi_param_get_int(&zhpe_prov, "dom_progress_override",
+			 &zhpe_dom_progress_override);
 	fi_param_get_int(&zhpe_prov, "ep_rx_poll_timeout",
 			 &zhpe_ep_rx_poll_timeout);
 	fi_param_get_size_t(&zhpe_prov, "ep_max_eager_sz",
@@ -585,9 +597,9 @@ ZHPE_INI
 	fi_param_get_str(&zhpe_prov, "flowctl_table", &zhpe_conn_flowctl_table);
 	fi_param_get_bool(&zhpe_prov, "mr_cache_enable", &zhpe_mr_cache_enable);
 	fi_param_get_bool(&zhpe_prov, "queue_per_slice",
-			 &zhpe_ep_queue_per_slice);
-	fi_param_get_int(&zhpe_prov, "queue_slice",
-			 &zhpe_ep_queue_slice);
+			  &zhpe_ep_queue_per_slice);
+	fi_param_get_int(&zhpe_prov, "queue_slice", &zhpe_ep_queue_slice);
+	fi_param_get_int(&zhpe_prov, "queue_tc", &zhpe_ep_queue_tc);
 
 	zhpe_conn_init_flowctl(zhpe_conn_flowctl_table);
 

@@ -36,6 +36,11 @@
 
 #define ZHPE_SUBSYS	FI_LOG_CQ
 
+static void cq_progress_all(struct util_cq *cq)
+{
+	zhpe_dom_all_progress(zcq2zdom(ucq2zcq(cq)));
+}
+
 static void cq_progress_dummy(struct util_cq *cq)
 {
 }
@@ -228,6 +233,23 @@ int zhpe_cq_open(struct fid_domain *fid_domain, struct fi_cq_attr *attr,
 		goto done;
 	if (attr->flags & ~FI_AFFINITY)
 		goto done;
+	switch (zdom->zhpe_progress) {
+
+	case FI_PROGRESS_AUTO:
+		progress = cq_progress_dummy;
+		break;
+
+	case FI_PROGRESS_MANUAL:
+		progress = ofi_cq_progress;
+		break;
+
+	case FI_ZHPE_PROGRESS_MANUAL_ALL:
+		progress = cq_progress_all;
+		break;
+
+	default:
+		abort();
+	}
 
 	cq_attr = *attr;
 	if (!cq_attr.size)
@@ -238,11 +260,6 @@ int zhpe_cq_open(struct fid_domain *fid_domain, struct fi_cq_attr *attr,
 		ret = -FI_ENOMEM;
 		goto done;
 	}
-
-	if (zdom->util_domain.data_progress == FI_PROGRESS_MANUAL)
-		progress = ofi_cq_progress;
-	else
-		progress = cq_progress_dummy;
 
 	ret = ofi_cq_init(&zhpe_prov, fid_domain, &cq_attr, &zcq->util_cq,
 			  progress, context);

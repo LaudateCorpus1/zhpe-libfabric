@@ -1249,7 +1249,7 @@ static ssize_t zhpe_trecvv##_name(struct fid_ep *fid_ep,		\
 	op_flags = zctx->util_ep.rx_op_flags;				\
 									\
 	ret = recv_iov(zctx, iov, desc, count,				\
-		       src_addr, op_context, tag, 0,			\
+		       src_addr, op_context, tag, ignore,		\
 		       op_flags, opt_flags);				\
 									\
  done:									\
@@ -1282,7 +1282,7 @@ static ssize_t zhpe_trecv##_name(struct fid_ep *fid_ep, void *buf,	\
 	iov[0].iov_len = len;						\
 									\
 	ret = recv_iov(zctx, iov, &desc, 1,				\
-		       src_addr, op_context, tag, 0,			\
+		       src_addr, op_context, tag, ignore,		\
 		       op_flags, opt_flags);				\
 									\
  done:									\

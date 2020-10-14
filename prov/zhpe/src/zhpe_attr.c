@@ -50,7 +50,7 @@
 #define ZHPE_EP_MAX_CNTR	(128)
 #define ZHPE_EP_MAX_CQ		(32)
 #define ZHPE_EP_MAX_EP		(128)
-#define ZHPE_EP_MAX_INJECT_SZ	(40)
+#define ZHPE_EP_MAX_INJECT_SZ	(ZHPE_EP_MAX_INLINE_MSG)
 #define ZHPE_EP_MAX_MSG_SZ	(UINT64_MAX)
 #define ZHPE_EP_MAX_ORDER_RAW_SZ (0)
 #define ZHPE_EP_MAX_ORDER_WAR_SZ (0)
@@ -64,6 +64,7 @@
 #define ZHPE_EP_MAX_CM_DATA_SZ  (256)
 #define ZHPE_EP_QUEUE_PER_SLICE (0)
 #define ZHPE_EP_QUEUE_SLICE     (-1)
+#define ZHPE_EP_QUEUE_TC        (0)
 #define ZHPE_EP_RX_CAP		(FI_DIRECTED_RECV | FI_RECV |	\
 				 FI_REMOTE_READ | FI_REMOTE_WRITE | \
 				 FI_RMA_EVENT)
@@ -208,10 +209,12 @@ struct util_prov zhpe_util_prov = {
 /* Parameter variables */
 int	zhpe_av_def_sz		= ZHPE_AV_DEF_SZ;
 int	zhpe_cq_def_sz		= ZHPE_CQ_DEF_SZ;
+int	zhpe_dom_progress_override;
 char	*zhpe_conn_flowctl_table;
 int	zhpe_eq_def_sz		= ZHPE_EQ_DEF_SZ;
 int	zhpe_ep_rx_poll_timeout	= ZHPE_EP_RX_POLL_TIMEOUT;
 size_t	zhpe_ep_max_eager_sz	= ZHPE_EP_DEF_MAX_EAGER;
 int	zhpe_ep_queue_per_slice	= ZHPE_EP_QUEUE_PER_SLICE;
 int	zhpe_ep_queue_slice	= ZHPE_EP_QUEUE_SLICE;
+int	zhpe_ep_queue_tc	= ZHPE_EP_QUEUE_TC;
 int	zhpe_mr_cache_enable	= ZHPE_MR_CACHE_ENABLE;
